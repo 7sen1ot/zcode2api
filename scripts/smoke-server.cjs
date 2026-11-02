@@ -40,7 +40,7 @@ async function main() {
     const gateway = `http://127.0.0.1:${ports.gateway_port}`;
     assert.equal((await json(web + '/healthz')).ok, true);
     assert.equal((await json(gateway + '/healthz')).ok, true);
-    for (const asset of ['/', '/app.js', '/style.css', '/ui-state.js', '/claims-view.js', '/favicon.svg']) {
+    for (const asset of ['/', '/app.js', '/style.css', '/ui-state.js', '/claims-view.js', '/logs-view.js', '/favicon.svg']) {
       const response = await fetch(web + asset);
       assert.equal(response.status, 200, asset);
       assert.ok((await response.text()).length > 20, asset);

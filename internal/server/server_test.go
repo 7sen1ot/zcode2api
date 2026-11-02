@@ -500,6 +500,8 @@ func TestTimeoutsAndClientCancellation(t *testing.T) {
 				want = "rate_limit"
 			}
 			equal(t, f.Kind, want)
+			wantCode := map[string]string{"first": "first_token_timeout", "idle": "stream_idle_timeout", "total": "inference_timeout", "cancel": "canceled", "admission": "throttle_window_exhausted"}[kind]
+			equal(t, f.Code, wantCode)
 			select {
 			case <-cancelled:
 			case <-time.After(time.Second):

@@ -43,8 +43,7 @@ func loadConfig(root, data string) (M, error) {
 			return nil, fmt.Errorf("config.json 解析失败: %w", e)
 		}
 		cfg = deepMerge(cfg, c, false)
-		// Keep existing config.json proxy_url deployments working. New settings use
-		// an explicit enable switch, including an explicit way to return to direct.
+		// Preserve proxy_url deployments without overriding the new enable switch.
 		if _, present := c["outbound_proxy"]; !present && str(cfg["proxy_url"]) != "" {
 			cfg["outbound_proxy"] = merge(proxyDefaults(), M{"enabled": true, "urls": []any{cfg["proxy_url"]}})
 		}

@@ -153,6 +153,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	case "GET /api/usage/stats":
 		return a.usageStats(r), 200, nil
 	case "GET /api/usage/logs":
+		if r.URL.Query().Has("page") {
+			return a.pagedLogs(r, "logs")
+		}
 		rows := a.rows("SELECT u.*,k.name key_name,a.label account_label FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id LEFT JOIN accounts a ON a.id=u.account_id ORDER BY u.ts DESC LIMIT ?", limitQuery(r, 100, 500))
 		for _, v := range rows {
 			m := obj(v)
@@ -165,6 +168,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	case "GET /api/performance":
 		return a.performance(limitQuery(r, 100, 1000)), 200, nil
 	case "GET /api/schedule-logs":
+		if r.URL.Query().Has("page") {
+			return a.pagedLogs(r, "sched")
+		}
 		return a.rows("SELECT * FROM schedule_log ORDER BY ts DESC LIMIT ?", limitQuery(r, 50, 200)), 200, nil
 	case "GET /api/keys":
 		rows := a.rows("SELECT * FROM keys ORDER BY created_at")
@@ -291,6 +297,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		return ok, 200, e
 	case "GET /api/audit":
+		if r.URL.Query().Has("page") {
+			return a.pagedLogs(r, "audit")
+		}
 		return a.rows("SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?", limitQuery(r, 100, 300)), 200, nil
 	}
 	if strings.HasPrefix(p, "/api/accounts/oauth/status/") && method == "GET" {

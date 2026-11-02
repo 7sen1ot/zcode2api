@@ -16,9 +16,12 @@ import (
 )
 
 type accountState struct {
-	Inflight int
-	LastUsed int64
-	Cooldown int64
+	Inflight       int
+	LastUsed       int64
+	Cooldown       int64
+	BusyUntil      int64
+	BusyGeneration int64
+	BusyProbe      bool
 }
 type stickyEntry struct {
 	Account string
@@ -48,6 +51,8 @@ type App struct {
 	mu                   sync.Mutex
 	states               map[string]*accountState
 	available            chan struct{}
+	scheduleMu           sync.Mutex
+	waiters              []*accountWaiter
 	sticky               map[string]stickyEntry
 	sessions             map[string]int64
 	responses            map[string]responseEntry
@@ -130,6 +135,7 @@ func New(root, data string, web fs.FS) (*App, error) {
 		_ = a.setSetting("config_overrides", clean)
 	}
 	a.ensureGroups()
+	a.background(a.runAccountQueue)
 	return a, nil
 }
 func (a *App) config() M { a.configMu.RLock(); defer a.configMu.RUnlock(); return clone(a.cfg) }

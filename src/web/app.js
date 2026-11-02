@@ -194,7 +194,7 @@ function routeValues() {
   if (currentPage === 'dashboard') { const f = window._dashboardAccounts || {}; return { page: f.page > 1 ? f.page : '', size: f.size && f.size !== 10 ? f.size : '' }; }
   if (currentPage === 'accounts') { const f = window._accFilter || {}; return { q: f.q, status: f.status === 'all' ? '' : f.status, sort: f.sort === 'default' ? '' : f.sort, page: f.page > 1 ? f.page : '', size: f.size && f.size !== 25 ? f.size : '' }; }
   if (currentPage === 'usage') { const f = window._usageDetail || {}; return { hours: window._usageHours || 24, tab: f.tab || 'model', page: f.pages?.[f.tab] || 1 }; }
-  if (currentPage === 'logs') { const f = window._logFilter || {}; return { tab: window._logTab || 'logs', hours: f.hours || 'all', status: f.status || 'all', model: f.model || 'all', page: window._logPage?.[window._logTab || 'logs'] || 1 }; }
+  if (currentPage === 'logs') return Z2ALogs.routeValues();
   if (currentPage === 'claims') { const f = window._claimsFilter || {}; return { account: f.account || 'all', view: f.view || 'all', page: f.historyPage || 1 }; }
   return {};
 }
@@ -212,7 +212,7 @@ function restoreRoute(route) {
   if (currentPage === 'dashboard') window._dashboardAccounts = { page, size: Number(valid(q.size, ['10', '25', '50'], '10')) };
   if (currentPage === 'accounts') window._accFilter = { q: (q.q || '').slice(0, 200), status: valid(q.status, ['active', 'needs_relogin', 'cooldown', 'expired', 'web_only'], 'all'), sort: valid(q.sort, ['remaining', 'expiring'], 'default'), page, size: Number(valid(q.size, ['25', '50', '100'], '25')) };
   if (currentPage === 'usage') { window._usageHours = Number(valid(q.hours, ['24', '168', '720'], '24')); const tab = valid(q.tab, ['model', 'key', 'account', 'status'], 'model'); window._usageDetail = { tab, pages: { [tab]: page } }; }
-  if (currentPage === 'logs') { window._logTab = valid(q.tab, ['logs', 'sched', 'audit'], 'logs'); window._logFilter = { hours: valid(q.hours, ['24', '168', '720'], 'all'), status: valid(q.status, ['success', 'busy', 'error'], 'all'), model: (q.model || 'all').slice(0, 160) }; window._logPage = { [window._logTab]: page }; }
+  if (currentPage === 'logs') Z2ALogs.restoreRoute(q);
   if (currentPage === 'claims') window._claimsFilter = { account: (q.account || 'all').slice(0, 160), view: valid(q.view, ['ready', 'pending', 'error'], 'all'), historyPage: page };
 }
 async function mayLeaveSettings() {
@@ -268,6 +268,7 @@ function render(opts = {}) {
   return renderTask;
 }
 async function renderPage(opts = {}) {
+  if (currentPage !== 'logs') Z2ALogs.closeDetails();
   const main = $('#main');
   const page = currentPage;
   main.querySelector('.page-error')?.remove();
@@ -1009,14 +1010,6 @@ function renderUsageChart(root, stats) {
   renderChart();
 }
 
-function mobileLogCards(rows) {
-  return `<div class="log-mobile">${rows.map(r => `<details class="mobile-log"><summary><span class="mobile-log-heading"><strong>${esc(r.model || '未知模型')}</strong><span class="badge ${r.status === 'success' ? 'ok' : r.status === 'busy' ? 'busy' : 'err'}">${r.status === 'success' ? '成功' : r.status === 'busy' ? '忙碌' : '失败'}</span></span><span class="mobile-log-time">${esc(fmtCompactTime(r.ts))}<span>查看详情</span></span></summary><dl>
-    <div><dt>账号</dt><dd>${esc(r.account_label || r.account_id || '未分配')}</dd></div><div><dt>密钥</dt><dd>${esc(r.key_name || r.key_id || '—')}</dd></div>
-    <div><dt>思考档位</dt><dd>${esc(({ low: '低', high: '高', max: '最高' })[r.reasoning_level] || r.reasoning_level || '未指定')}</dd></div><div><dt>尝试次数</dt><dd>${fmtInt(r.attempt_count)}</dd></div>
-    <div><dt>首 Token 时间</dt><dd>${r.ttft_ms == null ? '—' : fmtInt(r.ttft_ms) + ' ms'}</dd></div><div><dt>Token 用量</dt><dd>${fmtInt((r.tokens_in || 0) + (r.tokens_out || 0))}</dd></div>
-    ${r.error_message ? `<div class="log-error-detail"><dt>错误详情</dt><dd>${esc(r.error_message)}</dd></div>` : ''}</dl></details>`).join('')}</div>`;
-}
-
 async function pageUsage(main) {
   const s = await api('/api/usage/stats?hours=' + (window._usageHours || 24));
   const sum = (field) => s.byHour.reduce((total, row) => total + (Number(row[field]) || 0), 0);
@@ -1535,195 +1528,9 @@ async function pageSettings(main) {
   });
 }
 
-const LOG_PAGE_SIZE = 10;
-window._logPage = window._logPage || {};
-window._logTab = window._logTab || 'logs';
-let logCache = null;
-function pagerHtml(total, page, id) {
-  const pages = Math.max(1, Math.ceil(total / LOG_PAGE_SIZE));
-  const cur = Math.min(page, pages);
-  window._logPage[id] = cur;
-  const nums = [];
-  for (let i = 1; i <= pages; i++) {
-    if (i === 1 || i === pages || Math.abs(i - cur) <= 2) nums.push(i);
-    else if (nums[nums.length - 1] !== '…') nums.push('…');
-  }
-  return `<div class="pager usage-pager" data-pager="${id}" aria-label="日志分页">
-    <button type="button" data-pg="prev" aria-label="上一页" ${cur === 1 ? 'disabled' : ''}>‹</button>
-    ${nums.map((n) => n === '…' ? '<span aria-hidden="true">…</span>' : `<button type="button" data-pg="${n}" aria-label="第 ${n} 页" ${n === cur ? 'class="cur" aria-current="page"' : ''}>${n}</button>`).join('')}
-    <button type="button" data-pg="next" aria-label="下一页" ${cur === pages ? 'disabled' : ''}>›</button>
-    <span class="pinfo">共 ${fmtInt(total)} 条</span>
-  </div>`;
-}
-function bindPager(scope, totalOf, rerender) {
-  scope.querySelectorAll('.pager[data-pager]').forEach((p) => {
-    p.addEventListener('click', (e) => {
-      const btn = e.target.closest('button[data-pg]');
-      if (!btn || btn.disabled) return;
-      const id = p.dataset.pager;
-      const pages = Math.max(1, Math.ceil(totalOf(id) / LOG_PAGE_SIZE));
-      let cur = window._logPage[id] || 1;
-      const pg = btn.dataset.pg;
-      if (pg === 'first') cur = 1;
-      else if (pg === 'prev') cur = Math.max(1, cur - 1);
-      else if (pg === 'next') cur = Math.min(pages, cur + 1);
-      else if (pg === 'last') cur = pages;
-      else cur = Number(pg);
-      if (cur === window._logPage[id]) return;
-      window._logPage[id] = cur;
-      Promise.resolve(rerender()).then(() => scope.querySelector(`[data-pager="${id}"] [data-pg="${cur}"]`)?.focus());
-    });
-  });
-}
-
 async function pageLogs(main) {
-  if (!logCache || Date.now() - logCache.ts > 15000) {
-    const data = await Promise.all([
-      api('/api/usage/logs?limit=80'), api('/api/schedule-logs?limit=40'), api('/api/audit?limit=50'),
-    ]);
-    logCache = { data, ts: Date.now() };
-  }
-  const [logs, sched, aud] = logCache.data;
-  const st = window._logPage;
-  const f = window._logFilter = window._logFilter || { hours: 'all', status: 'all', model: 'all' };
-  const tab = window._logTab;
-  const since = f.hours === 'all' ? 0 : Date.now() - Number(f.hours) * 3600e3;
-  const flt = (rows) => rows.filter((r) => {
-    if (since && (r.ts || 0) < since) return false;
-    if (f.status !== 'all' && (r.status || '') !== f.status) return false;
-    if (f.model !== 'all' && (r.model || '') !== f.model) return false;
-    return true;
-  });
-  const F = flt(logs);
-  const models = [...new Set(logs.map((r) => r.model).filter(Boolean))];
-  const okN = F.filter((r) => r.status === 'success').length;
-  const errN = F.filter((r) => r.status && r.status !== 'success' && r.status !== 'busy').length;
-  const busyN = F.filter((r) => r.status === 'busy').length;
-  const ttfts = F.map((r) => r.ttft_ms).filter((x) => typeof x === 'number').sort((a, b) => a - b);
-  const p50 = ttfts.length ? ttfts[Math.floor(ttfts.length / 2)] : null;
-  const tok = F.reduce((a, r) => a + (r.tokens_in || 0) + (r.tokens_out || 0), 0);
-  const lp = Math.min(st.logs || 1, Math.max(1, Math.ceil(F.length / LOG_PAGE_SIZE)));
-  const sp = Math.min(st.sched || 1, Math.max(1, Math.ceil(sched.length / LOG_PAGE_SIZE)));
-  const ap = Math.min(st.audit || 1, Math.max(1, Math.ceil(aud.length / LOG_PAGE_SIZE)));
-  st.logs = lp; st.sched = sp; st.audit = ap;
-  const logsView = F.slice((lp - 1) * LOG_PAGE_SIZE, lp * LOG_PAGE_SIZE);
-  const schedView = sched.slice((sp - 1) * LOG_PAGE_SIZE, sp * LOG_PAGE_SIZE);
-  const audView = aud.slice((ap - 1) * LOG_PAGE_SIZE, ap * LOG_PAGE_SIZE);
-  const hourLabel = { all: '全部时间', 24: '近 24 小时', 168: '近 7 天', 720: '近 30 天' };
-
-  const tabsHtml = `<nav class="section-tabs fade-up" style="animation-delay:50ms" role="tablist" aria-label="日志分区">
-    ${[['logs', '调用记录', 'scroll', F.length], ['sched', '调度时间线', 'timer', sched.length], ['audit', '审计', 'shield', aud.length]]
-      .map(([id, label, ic, n]) => `<button type="button" class="tab${tab === id ? ' active' : ''}" data-ltab="${id}" role="tab" id="log-tab-${id}" aria-controls="log-panel" aria-selected="${tab === id}" tabindex="${tab === id ? '0' : '-1'}">${icon(ic, 13)}${label}<span class="cnt">${n}</span></button>`).join('')}
-  </nav>`;
-
-  const emptyBox = (ic, text) => `<div class="empty">${icon(ic, 22)}<span>${text}</span></div>`;
-  const statusBadge = (s) => s === 'success' ? '<span class="badge ok">成功</span>'
-    : s === 'busy' ? '<span class="badge busy">忙碌</span>'
-    : `<span class="badge err">${s === 'error' ? '失败' : esc(s || '失败')}</span>`;
-
-  let body = '';
-  if (tab === 'logs') {
-    body = `
-    <section class="fade-up" style="animation-delay:100ms">
-      <div class="toolbar">
-        <select id="lf-hours" class="round" aria-label="时间范围">${Object.entries(hourLabel).map(([v, l]) => `<option value="${v}" ${f.hours === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
-        <select id="lf-status" class="round" aria-label="状态筛选">
-          <option value="all" ${f.status === 'all' ? 'selected' : ''}>全部状态</option>
-          <option value="success" ${f.status === 'success' ? 'selected' : ''}>成功</option>
-          <option value="busy" ${f.status === 'busy' ? 'selected' : ''}>忙碌</option>
-          <option value="error" ${f.status === 'error' ? 'selected' : ''}>失败</option>
-        </select>
-        <select id="lf-model" class="round" aria-label="模型筛选">
-          <option value="all" ${f.model === 'all' ? 'selected' : ''}>全部模型</option>
-          ${models.map((m) => `<option value="${esc(m)}" ${f.model === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
-        </select>
-        <div class="spacer"></div>
-        <button class="btn" id="lf-reset">${icon('refresh', 14)}重置</button>
-      </div>
-      <div class="overview-strip logs-strip">
-        <div><span>调用总数</span><strong>${fmtInt(F.length)}</strong></div>
-        <div><span>成功 / 忙碌</span><strong class="tone-success">${okN}<small> / ${busyN}</small></strong></div>
-        <div><span>失败</span><strong class="${errN ? 'tone-danger' : ''}">${fmtInt(errN)}</strong></div>
-        <div><span>首 Token 时间 P50</span><strong>${p50 !== null ? `${fmtInt(p50)}<small> ms</small>` : '—'}</strong></div>
-        <div><span>Token 消耗</span><strong title="${esc(fmtInt(tok))}">${fmtInt(tok)}</strong></div>
-      </div>
-    </section>
-    <section class="fade-up" style="animation-delay:150ms">
-      ${F.length ? `<div class="tablecard log-desktop"><table><colgroup><col style="width:118px"><col style="width:96px"><col style="width:15%"><col style="width:15%"><col style="width:74px"><col style="width:40px"><col style="width:64px"><col style="width:76px"><col style="width:19%"></colgroup>
-        <tr><th>时间</th><th>密钥</th><th>账号</th><th>模型</th><th>状态</th><th>尝试</th><th>首 Token（ms）</th><th>Token 用量</th><th>错误</th></tr>
-        ${logsView.map((r) => `<tr><td class="mono" style="white-space:nowrap">${fmtTime(r.ts)}</td><td>${esc(r.key_name || r.key_id || '—')}</td><td>${esc(r.account_label || r.account_id || '—')}</td>
-          <td class="mono" style="color:var(--foreground)">${esc(r.model)}${r.reasoning_level ? ` <span class="badge sm">${esc(r.reasoning_level)}</span>` : ''}</td>
-          <td>${statusBadge(r.status)}</td>
-          <td class="mono">${r.attempt_count}</td><td class="mono">${fmtInt(r.ttft_ms)}</td><td class="mono">${fmtInt((r.tokens_in || 0) + (r.tokens_out || 0))}</td>
-          <td class="mono" style="font-size:11px;max-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.error_message || '')}">${esc(r.error_message || '')}</td></tr>`).join('')}</table></div>${mobileLogCards(logsView)}${pagerHtml(F.length, lp, 'logs')}`
-      : emptyBox('scroll', '当前筛选条件下暂无请求')}
-    </section>`;
-  } else if (tab === 'sched') {
-    const candInfo = (raw) => {
-      try {
-        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        if (Array.isArray(arr)) {
-          const picked = arr.find((x) => x && x.picked);
-          return { n: arr.length, label: picked?.label || picked?.account || '' };
-        }
-      } catch { }
-      return { n: null, label: String(raw ?? '—') };
-    };
-    body = `<section class="fade-up" style="animation-delay:100ms">
-      ${sched.length ? `<div class="tablecard"><table><colgroup><col style="width:132px"><col style="width:170px"><col style="width:110px"><col style="width:180px"><col></colgroup>
-        <tr><th>时间</th><th>请求 ID</th><th>策略</th><th>选中账号</th><th>候选</th></tr>
-        ${schedView.map((r) => {
-          const c = candInfo(r.candidates);
-          return `<tr><td class="mono" style="white-space:nowrap">${fmtTime(r.ts)}</td><td class="mono">${esc(r.request_id)}</td>
-          <td><span class="badge">${esc(policyLabel(r.policy))}</span></td><td>${esc(r.picked || '—')}</td><td>${c.n !== null ? `<span class="badge plain">候选 ${c.n}</span>${c.label ? ` <span class="muted" style="font-size:11px">${esc(c.label)}</span>` : ''}` : esc(c.label)}</td></tr>`;
-        }).join('')}</table></div>${pagerHtml(sched.length, sp, 'sched')}`
-      : emptyBox('timer', '暂无调度记录——首次推理后这里会显示选路时间线')}
-    </section>`;
-  } else {
-    body = `<section class="fade-up" style="animation-delay:100ms">
-      ${aud.length ? `<div class="tablecard"><table><colgroup><col style="width:132px"><col style="width:120px"><col style="width:140px"><col></colgroup>
-        <tr><th>时间</th><th>动作</th><th>操作者</th><th>详情</th></tr>
-        ${audView.map((r) => `<tr><td class="mono" style="white-space:nowrap">${fmtTime(r.ts)}</td><td><span class="badge">${esc(r.action)}</span></td><td class="mono">${esc(r.actor)}</td><td class="mono" style="font-size:11px">${esc(r.detail || '')}</td></tr>`).join('')}</table></div>${pagerHtml(aud.length, ap, 'audit')}`
-      : emptyBox('shield', '暂无审计记录')}
-    </section>`;
-  }
-
-  main.innerHTML = `
-  ${pagehead('请求日志', '查看最近的调用、调度与审计记录 · 调用最多 80 条，调度最多 40 条，审计最多 50 条', `<button class="btn" id="log-refresh">${icon('refresh', 14)}刷新</button>`)}
-  ${tabsHtml}
-  <div role="tabpanel" id="log-panel" aria-labelledby="log-tab-${tab}">${body}</div>`;
-
-  $('#log-refresh', main).addEventListener('click', () => { logCache = null; render({ swap: true }); });
-  $$('button[data-ltab]', main).forEach((b) => b.addEventListener('click', () => {
-    if (b.dataset.ltab === tab) return;
-    window._logTab = b.dataset.ltab;
-    render({ swap: true }).then(() => main.querySelector(`[data-ltab="${window._logTab}"]`)?.focus());
-  }));
-  main.querySelector('[role=tablist]').addEventListener('keydown', (e) => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const ids = ['logs', 'sched', 'audit'];
-    const index = ids.indexOf(window._logTab);
-    const next = e.key === 'Home' ? 0 : e.key === 'End' ? ids.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
-    window._logTab = ids[next];
-    render({ swap: true }).then(() => main.querySelector(`[data-ltab="${ids[next]}"]`)?.focus());
-  });
-  if (tab === 'logs') {
-    const onFilter = () => {
-      f.hours = $('#lf-hours').value; f.status = $('#lf-status').value; f.model = $('#lf-model').value;
-      st.logs = 1;
-      render({ swap: true });
-    };
-    $('#lf-hours').addEventListener('change', onFilter);
-    $('#lf-status').addEventListener('change', onFilter);
-    $('#lf-model').addEventListener('change', onFilter);
-    $('#lf-reset').addEventListener('click', () => { window._logFilter = { hours: 'all', status: 'all', model: 'all' }; st.logs = 1; render({ swap: true }); });
-    bindPager(main, () => F.length, () => render({ swap: true }));
-  }
-  if (tab === 'sched') bindPager(main, () => sched.length, () => render({ swap: true }));
-  if (tab === 'audit') bindPager(main, () => aud.length, () => render({ swap: true }));
+  await Z2ALogs.render(main, { api, esc, icon, pagehead, fmtTime, fmtCompactTime, fmtInt, policyLabel, rerender: () => render({ swap: true }) });
 }
-
 async function boot() {
   if (!TOKEN) return showLogin();
   try {

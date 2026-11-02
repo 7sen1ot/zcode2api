@@ -76,6 +76,7 @@ type inferOptions struct {
 	Sticky                                   float64
 	Stream                                   bool
 	OnEvent                                  func(Event) error
+	OnAdmitted                               func()
 	Timing                                   *requestTiming
 	Admission                                time.Duration
 }
@@ -177,20 +178,22 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	defer cancel(nil)
 	params := obj(a.config()["http"])
 	timers := []*time.Timer{}
-	timer := func(label string, d time.Duration) *time.Timer {
+	timer := func(code, label string, d time.Duration) *time.Timer {
 		if d <= 0 {
 			return nil
 		}
-		t := time.AfterFunc(d, func() { cancel(&Failure{Kind: "timeout", Code: "timeout", Message: label}) })
+		t := time.AfterFunc(d, func() { cancel(&Failure{Kind: "timeout", Code: code, Message: label}) })
 		timers = append(timers, t)
 		return t
 	}
-	timer("HTTP 整轮推理超时", ms(params["total_timeout_ms"]))
-	firstTimer := timer("HTTP 首字超时", ms(params["first_token_timeout_ms"]))
-	idle := timer("HTTP 上游流空闲超时", ms(params["idle_timeout_ms"]))
+	timer("inference_timeout", "上游推理超时", ms(params["total_timeout_ms"]))
+	firstTimer := timer("first_token_timeout", "上游首字超时", ms(params["first_token_timeout_ms"]))
+	idle := timer("stream_idle_timeout", "上游流空闲超时", ms(params["idle_timeout_ms"]))
 	var admission *time.Timer
 	if o.Admission > 0 {
-		admission = time.AfterFunc(o.Admission, func() { cancel(&Failure{Kind: "rate_limit", Code: "429", Message: "限流重试窗口已耗尽"}) })
+		admission = time.AfterFunc(o.Admission, func() {
+			cancel(&Failure{Kind: "rate_limit", Code: "throttle_window_exhausted", Message: "限流重试超时"})
+		})
 		timers = append(timers, admission)
 	}
 	defer func() {
@@ -203,7 +206,12 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 			idle.Reset(ms(params["idle_timeout_ms"]))
 		}
 	}
+	admitted := false
 	admit := func() {
+		if !admitted && o.OnAdmitted != nil {
+			o.OnAdmitted()
+		}
+		admitted = true
 		if firstTimer != nil {
 			firstTimer.Stop()
 		}
@@ -242,7 +250,7 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 			return
 		}
 		classify(failure)
-		if failure.Kind == "risk" && failure.Code != "captcha_duplicate_result" || failure.Kind == "network" && failure.Retryable {
+		if proxyExitFailure(failure) {
 			if _, pooled := ctx.Value(proxySelectionKey{}).(proxySelection); pooled {
 				failure.Retryable = a.markProxyFailure(ctx)
 				failure.ProxyFailover = failure.Retryable
@@ -255,7 +263,7 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	}
 	var res *http.Response
 	for verificationAttempt := 0; ; verificationAttempt++ {
-		verification, f := a.captchaHeaders(ctx, account)
+		verification, f := a.captchaHeaders(ctx, account, verificationAttempt > 0)
 		if f != nil {
 			return nil, f
 		}
@@ -269,7 +277,11 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		}
 		res, e = client.Do(req)
 		if e != nil {
-			return nil, &Failure{Kind: "network", Code: "network", Message: e.Error(), Retryable: true}
+			code := "network"
+			if selectedProxy(ctx) != "" {
+				code = "proxy_connection_failed"
+			}
+			return nil, &Failure{Kind: "network", Code: code, Message: e.Error(), Retryable: true}
 		}
 		resetIdle()
 		if res.StatusCode >= 200 && res.StatusCode < 300 {

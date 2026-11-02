@@ -36,7 +36,7 @@ type captchaManager struct {
 	reset  bool
 }
 
-func (a *App) captchaHeaders(parent context.Context, account M) (http.Header, *Failure) {
+func (a *App) captchaHeaders(parent context.Context, account M, force bool) (http.Header, *Failure) {
 	options := obj(obj(a.config()["http"])["captcha"])
 	mode := str(fallback(options["mode"], "off"))
 	headers := http.Header{}
@@ -82,7 +82,10 @@ func (a *App) captchaHeaders(parent context.Context, account M) (http.Header, *F
 	if failure != nil {
 		return nil, failure
 	}
-	if !truth(scene["enabled"]) || (mode == "auto" && truth(scene["skip_model_request"])) {
+	if force && !truth(scene["enabled"]) {
+		return nil, &Failure{Kind: "risk", Code: "captcha_scene_disabled", Message: "上游要求安全验证，但未提供可用的验证场景"}
+	}
+	if !truth(scene["enabled"]) || (!force && mode == "auto" && truth(scene["skip_model_request"])) {
 		return headers, nil
 	}
 	modulePath := a.captchaModulePath(str(options["jsdom_path"]))
@@ -103,6 +106,10 @@ func (a *App) captchaHeaders(parent context.Context, account M) (http.Header, *F
 			return nil, &Failure{Kind: "server", Code: "captcha_timeout", Message: "上游安全验证超时或需要人工交互"}
 		case "captcha_proxy_unsupported":
 			return nil, &Failure{Kind: "server", Code: "captcha_proxy_unsupported", Message: "SDK 验证仅支持无认证 HTTP/HTTPS 代理，请使用本机 Mihomo 入口或无认证代理"}
+		case "captcha_network_error":
+			return nil, &Failure{Kind: "network", Code: "captcha_network_error", Message: "验证码 SDK 资源连接失败", Retryable: true}
+		case "captcha_interaction_required":
+			return nil, &Failure{Kind: "risk", Code: "captcha_interaction_required", Message: "上游要求人工安全验证，请先在官方客户端完成验证"}
 		case "captcha_runtime_error", "captcha_sdk_error", "captcha_origin_invalid", "captcha_canceled":
 			return nil, &Failure{Kind: "server", Code: "captcha_runtime_error", Message: "验证码运行环境、页面或网络配置不可用"}
 		}
@@ -111,7 +118,7 @@ func (a *App) captchaHeaders(parent context.Context, account M) (http.Header, *F
 		if len(code) == 4 && code[0] == 'F' && code[1] >= '0' && code[1] <= '9' && code[2] >= '0' && code[2] <= '9' && code[3] >= '0' && code[3] <= '9' {
 			message += "（" + code + "）"
 		}
-		return nil, &Failure{Kind: "risk", Code: "captcha_verification_failed", Message: message}
+		return nil, &Failure{Kind: "risk", Code: "captcha_verification_failed", Message: message, VerifyCode: code}
 	}
 	param := str(result["param"])
 	invalid := strings.TrimSpace(param) == "" || len(param) > 32<<10
@@ -157,7 +164,7 @@ func (a *App) captchaScene(ctx context.Context, account M) (M, *Failure) {
 			return nil, failure
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, &Failure{Kind: "timeout", Code: "timeout", Message: "读取安全验证配置超时", Retryable: true}
+			return nil, &Failure{Kind: "timeout", Code: "captcha_config_timeout", Message: "SDK 配置获取超时", Retryable: true}
 		}
 		return nil, &Failure{Kind: "network", Code: "captcha_config_unavailable", Message: "读取上游安全验证配置的网络请求失败", Retryable: true}
 	}

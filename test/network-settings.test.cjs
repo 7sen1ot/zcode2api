@@ -80,6 +80,16 @@ test('SDK timeout and missing dependencies report errors without leaving signal 
   assert.equal(missing.code, 'captcha_jsdom_missing');
 });
 
+test('SDK distinguishes a resource connection failure from initialization errors', async () => {
+  class BrokenResources extends library.ResourceLoader {
+    fetch() { return Promise.reject(new Error('offline resource connection failed')); }
+  }
+  const network = await run(sdkConfig, { loadJSDOM: () => ({ ...library, ResourceLoader: BrokenResources }), delayMs: 0, timeoutMs: 1000 });
+  assert.equal(network.code, 'captcha_network_error');
+  const initialization = await run(sdkConfig, { loadJSDOM: () => sdkLibrary('window.initAliyunCaptcha = () => { throw new Error("invalid initialization"); };'), delayMs: 0, timeoutMs: 1000 });
+  assert.equal(initialization.code, 'captcha_sdk_error');
+});
+
 function settingsFixture() {
   return {
     poll_interval_sec: 60, poll_jitter_sec: 10, poll_concurrency: 4, claim_auto_enabled: true, claim_auto_min: 240,
@@ -138,7 +148,7 @@ async function settingsPage(draft, installError = '', overrides = {}) {
   if (draft) window.sessionStorage.setItem('z2a_settings_draft', JSON.stringify(draft));
   const source = fs.readFileSync(path.join(__dirname, '../src/web/app.js'), 'utf8');
   const start = source.indexOf('async function pageSettings(main)');
-  const end = source.indexOf('\nconst LOG_PAGE_SIZE', start);
+  const end = source.indexOf('\nasync function pageLogs(', start);
   assert.ok(start >= 0 && end > start);
   window.eval(source.slice(start, end));
   await window.pageSettings(window.document.querySelector('main'));

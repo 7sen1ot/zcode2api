@@ -7,6 +7,22 @@ import (
 )
 
 const accountConcurrencyLimit = 3
+const maxQueuedRequests = 1024
+
+type accountAssignment struct {
+	account    M
+	busy       bool
+	candidates []any
+	policy     string
+}
+
+type accountWaiter struct {
+	ctx      context.Context
+	o        inferOptions
+	skip     map[string]bool
+	deadline time.Time
+	result   chan accountAssignment
+}
 
 type schedulingCandidate struct {
 	row       M
@@ -127,6 +143,13 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (M, bool, 
 			if reason == "" && a.state(id).Cooldown > now {
 				reason = "cooldown"
 			}
+			if reason == "" {
+				s := a.state(id)
+				if s.BusyUntil > now || s.BusyUntil != 0 && (s.BusyProbe || s.Inflight > 0) {
+					reason = "upstream_busy"
+					busy = true
+				}
+			}
 			candidates = append(candidates, M{"account": id, "label": c.row["label"], "skip": nullable(reason), "picked": false})
 			if reason == "" {
 				usable = append(usable, c)
@@ -177,6 +200,10 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (M, bool, 
 		if picked != nil {
 			id := str(picked.row["id"])
 			a.state(id).Inflight++
+			picked.row["_busy_generation"] = a.state(id).BusyGeneration
+			if a.state(id).BusyUntil != 0 {
+				a.state(id).BusyProbe = true
+			}
 			for _, v := range candidates {
 				if m := obj(v); str(m["account"]) == id {
 					m["picked"] = true
@@ -203,44 +230,154 @@ func (a *App) notifyAvailableLocked() {
 	a.available = make(chan struct{})
 }
 func (a *App) notifyAvailable() { a.mu.Lock(); a.notifyAvailableLocked(); a.mu.Unlock() }
-func (a *App) release(id string) {
-	a.mu.Lock()
-	s := a.state(id)
-	s.Inflight = max(0, s.Inflight-1)
-	s.LastUsed = nowMS()
-	a.notifyAvailableLocked()
-	a.mu.Unlock()
-}
 func (a *App) acquire(ctx context.Context, o inferOptions, skip map[string]bool, limit time.Duration) (M, bool, []any, string, error) {
-	deadline := time.Now().Add(limit)
-	var lastCandidates []any
-	firstTry := true
-	for {
-		if e := ctx.Err(); e != nil {
-			return nil, false, lastCandidates, "", e
+	if err := ctx.Err(); err != nil {
+		return nil, false, nil, "", err
+	}
+	w := &accountWaiter{ctx: ctx, o: o, skip: skip, result: make(chan accountAssignment, 1)}
+	if limit >= 0 {
+		w.deadline = time.Now().Add(limit)
+	}
+	a.scheduleMu.Lock()
+	if len(a.waiters) >= maxQueuedRequests {
+		a.scheduleMu.Unlock()
+		return nil, false, nil, "", &Failure{Kind: "busy", Code: "queue_full", Message: "请求等待队列已满", RetryAfter: time.Second}
+	}
+	a.waiters = append(a.waiters, w)
+	a.scheduleMu.Unlock()
+	a.notifyAvailable()
+	defer func() {
+		a.scheduleMu.Lock()
+		for i, pending := range a.waiters {
+			if pending == w {
+				copy(a.waiters[i:], a.waiters[i+1:])
+				a.waiters[len(a.waiters)-1] = nil
+				a.waiters = a.waiters[:len(a.waiters)-1]
+				break
+			}
 		}
-		if !firstTry && !time.Now().Before(deadline) {
-			return nil, true, lastCandidates, "", nil
-		}
-		firstTry = false
-		changed := a.availability()
-		r, b, c, p := a.selectAccount(o, skip)
-		lastCandidates = c
-		if r != nil || !b {
-			return r, b, c, p, nil
-		}
-		left := time.Until(deadline)
-		if left <= 0 {
-			return nil, true, c, p, nil
-		}
-		timer := time.NewTimer(min(left, time.Second))
+		// Cancellation can race with a dispatch that already reserved a slot.
 		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, false, c, p, ctx.Err()
+		case assigned := <-w.result:
+			if assigned.account != nil {
+				a.finishAccountAttempt(assigned.account, nil, false, nil)
+			}
+		default:
+		}
+		a.scheduleMu.Unlock()
+		a.notifyAvailable()
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, false, nil, "", ctx.Err()
+	case <-a.ctx.Done():
+		return nil, false, nil, "", a.ctx.Err()
+	case assigned := <-w.result:
+		return assigned.account, assigned.busy, assigned.candidates, assigned.policy, nil
+	}
+}
+
+// One dispatcher owns wakeups and cooldown timers for the entire queue.
+func (a *App) runAccountQueue() {
+	for a.ctx.Err() == nil {
+		changed := a.availability()
+		a.dispatchAccounts()
+		a.scheduleMu.Lock()
+		queued := len(a.waiters) > 0
+		delay := a.nextBusyDelay()
+		for _, w := range a.waiters {
+			if !w.deadline.IsZero() {
+				delay = min(delay, max(0, time.Until(w.deadline)))
+			}
+		}
+		a.scheduleMu.Unlock()
+		var timer *time.Timer
+		var tick <-chan time.Time
+		if queued {
+			timer = time.NewTimer(delay)
+			tick = timer.C
+		}
+		select {
+		case <-a.ctx.Done():
 		case <-changed:
+		case <-tick:
+		}
+		if timer != nil {
 			timer.Stop()
-		case <-timer.C:
 		}
 	}
+}
+
+// Serve older compatible waiters first; a blocked key must not block other pools.
+func (a *App) dispatchAccounts() {
+	a.scheduleMu.Lock()
+	defer a.scheduleMu.Unlock()
+	pending := a.waiters[:0]
+	for _, w := range a.waiters {
+		if w.ctx.Err() != nil {
+			continue
+		}
+		account, busy, candidates, policy := a.selectAccount(w.o, w.skip)
+		if w.o.Admission <= 0 && account == nil {
+			for _, candidate := range candidates {
+				if obj(candidate)["skip"] == "upstream_busy" {
+					w.deadline = time.Time{}
+					break
+				}
+			}
+		}
+		if account != nil || !busy || !w.deadline.IsZero() && !time.Now().Before(w.deadline) {
+			w.result <- accountAssignment{account, busy, candidates, policy}
+		} else {
+			pending = append(pending, w)
+		}
+	}
+	clear(a.waiters[len(pending):])
+	a.waiters = pending
+}
+
+func (a *App) nextBusyDelay() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delay := time.Second
+	for _, s := range a.states {
+		if s.BusyUntil > nowMS() {
+			delay = min(delay, time.Duration(s.BusyUntil-nowMS())*time.Millisecond)
+		}
+	}
+	return max(time.Millisecond, delay)
+}
+
+func (a *App) admitAccount(account M) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.state(str(account["id"]))
+	if s.BusyGeneration == integer(account["_busy_generation"]) {
+		s.BusyUntil, s.BusyProbe = 0, false
+		a.notifyAvailableLocked()
+	}
+}
+
+// Publish upstream busy state before waking other requests on slot release.
+func (a *App) finishAccountAttempt(account M, failure *Failure, completed bool, params M) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.state(str(account["id"]))
+	s.Inflight = max(0, s.Inflight-1)
+	s.LastUsed = nowMS()
+	if failure != nil && classify(failure).Kind == "busy" {
+		delay := failure.RetryAfter
+		if delay <= 0 {
+			delay = ms(fallback(params["rate_limit_retry_interval_ms"], 1000))
+		}
+		s.BusyGeneration++
+		s.BusyUntil = max(s.BusyUntil, nowMS()+max(50*time.Millisecond, delay).Milliseconds())
+		s.BusyProbe = false
+	} else if s.BusyGeneration == integer(account["_busy_generation"]) {
+		s.BusyProbe = false
+		if completed && failure == nil {
+			s.BusyUntil = 0
+		}
+	}
+	a.notifyAvailableLocked()
 }

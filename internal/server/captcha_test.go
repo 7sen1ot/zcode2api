@@ -58,7 +58,7 @@ func TestCaptchaPoliciesSceneCacheAndFreshTickets(t *testing.T) {
 				return M{"ok": true, "param": fmt.Sprintf("ticket-%d", tickets)}, nil
 			}
 			for i := 0; i < 2; i++ {
-				headers, failure := a.captchaHeaders(context.Background(), nil)
+				headers, failure := a.captchaHeaders(context.Background(), nil, false)
 				if failure != nil {
 					t.Fatal(failure)
 				}
@@ -81,7 +81,7 @@ func TestCaptchaPoliciesSceneCacheAndFreshTickets(t *testing.T) {
 			}
 			if item.mode != "off" {
 				a.invalidateCaptchaScene()
-				_, failure := a.captchaHeaders(context.Background(), nil)
+				_, failure := a.captchaHeaders(context.Background(), nil, false)
 				if failure != nil {
 					t.Fatal(failure)
 				}
@@ -103,7 +103,8 @@ func TestCaptchaRuntimeFailuresAndTicketValidation(t *testing.T) {
 		{"authenticated-proxy", M{"code": "captcha_proxy_unsupported"}, nil, "captcha_proxy_unsupported"},
 		{"sdk-error", M{"code": "captcha_sdk_error"}, nil, "captcha_runtime_error"},
 		{"canceled", M{"code": "captcha_canceled"}, nil, "captcha_runtime_error"},
-		{"interaction", M{"code": "captcha_interaction_required", "verify_code": "F015"}, nil, "captcha_verification_failed"},
+		{"interaction", M{"code": "captcha_interaction_required", "verify_code": "F015"}, nil, "captcha_interaction_required"},
+		{"network", M{"code": "captcha_network_error"}, nil, "captcha_network_error"},
 		{"unsafe-error", M{"verify_code": "<script>secret</script>"}, nil, "captcha_verification_failed"},
 		{"process-error", nil, errors.New("private process output"), "captcha_runtime_error"},
 		{"empty-ticket", M{"ok": true, "param": " "}, nil, "captcha_invalid_result"},
@@ -115,7 +116,7 @@ func TestCaptchaRuntimeFailuresAndTicketValidation(t *testing.T) {
 			obj(obj(a.cfg["http"])["captcha"])["mode"] = "always"
 			installCaptchaScene(t, a, validCaptchaScene())
 			a.captcha.run = func(context.Context, M) (M, error) { return item.result, item.err }
-			_, failure := a.captchaHeaders(context.Background(), nil)
+			_, failure := a.captchaHeaders(context.Background(), nil, false)
 			if failure == nil || failure.Code != item.code {
 				t.Fatalf("unexpected failure: %+v", failure)
 			}
@@ -128,11 +129,11 @@ func TestCaptchaRuntimeFailuresAndTicketValidation(t *testing.T) {
 	obj(obj(a.cfg["http"])["captcha"])["mode"] = "always"
 	installCaptchaScene(t, a, validCaptchaScene())
 	a.captcha.run = func(context.Context, M) (M, error) { return M{"ok": true, "param": "same-ticket"}, nil }
-	_, failure := a.captchaHeaders(context.Background(), nil)
+	_, failure := a.captchaHeaders(context.Background(), nil, false)
 	if failure != nil {
 		t.Fatal(failure)
 	}
-	_, failure = a.captchaHeaders(context.Background(), nil)
+	_, failure = a.captchaHeaders(context.Background(), nil, false)
 	if failure == nil || failure.Code != "captcha_duplicate_result" {
 		t.Fatal("single-use ticket was reused")
 	}
@@ -147,7 +148,7 @@ func TestCaptchaSceneValidationAndCancellation(t *testing.T) {
 		a := networkTestApp(t)
 		obj(obj(a.cfg["http"])["captcha"])["mode"] = "auto"
 		installCaptchaScene(t, a, scene)
-		_, failure := a.captchaHeaders(context.Background(), nil)
+		_, failure := a.captchaHeaders(context.Background(), nil, false)
 		if failure == nil || failure.Code != "captcha_config_invalid" {
 			t.Fatalf("invalid scene accepted: %v / %+v", scene, failure)
 		}
@@ -156,7 +157,7 @@ func TestCaptchaSceneValidationAndCancellation(t *testing.T) {
 	obj(obj(a.cfg["http"])["captcha"])["mode"] = "always"
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, failure := a.captchaHeaders(ctx, nil)
+	_, failure := a.captchaHeaders(ctx, nil, false)
 	if failure == nil || failure.Code != "captcha_timeout" {
 		t.Fatalf("canceled operation was not stopped: %+v", failure)
 	}

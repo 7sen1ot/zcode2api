@@ -142,28 +142,41 @@ async function run(config, dependencies = {}) {
   try { library = (dependencies.loadJSDOM || loadJSDOM)(config); }
   catch { return { ok: false, code: 'captcha_jsdom_missing', message: '未找到 jsdom，请安装验证码运行时依赖' }; }
   const { JSDOM, ResourceLoader, VirtualConsole } = library;
-  let dom, timer, interrupt;
+  let dom, timer, interrupt, networkFailed = false;
   try {
     const canceled = new Promise(resolve => {
       interrupt = () => resolve({ ok: false, code: 'captcha_canceled', message: '验证码请求已取消' });
       process.once('SIGINT', interrupt);
       process.once('SIGTERM', interrupt);
     });
+    class VerificationResources extends ResourceLoader {
+      fetch(url, options) {
+        const request = super.fetch(url, options);
+        request?.catch(() => { networkFailed = true; });
+        return request;
+      }
+    }
+    const console = new VirtualConsole();
+    console.on('jsdomError', error => { if (error.type === 'XMLHttpRequest') networkFailed = true; });
     dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
       url: new URL(config.origin).origin + '/', runScripts: 'dangerously', pretendToBeVisual: true,
-      resources: new ResourceLoader({ ...(config.proxy_url ? { proxy: config.proxy_url } : {}), strictSSL: true }),
-      virtualConsole: new VirtualConsole(),
+      resources: new VerificationResources({ ...(config.proxy_url ? { proxy: config.proxy_url } : {}), strictSSL: true }),
+      virtualConsole: console,
       beforeParse(window) { if (config.simulate_canvas_webgl !== false) installCanvasWebGL(window); },
     });
     const timeoutMs = dependencies.timeoutMs ?? Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
     const operation = dom.window.eval(captchaExpression(config, dependencies.delayMs ?? 2100));
-    return await Promise.race([
+    const result = await Promise.race([
       operation,
       canceled,
       new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: 'captcha_timeout', message: '验证码请求超时或需要人工交互' }), timeoutMs); }),
     ]);
+    if (networkFailed && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
+      return { ok: false, code: 'captcha_network_error', message: '验证码 SDK 资源连接失败' };
+    }
+    return result;
   } catch {
-    return { ok: false, code: 'captcha_sdk_error', message: '验证码 SDK 初始化或网络请求失败' };
+    return { ok: false, code: networkFailed ? 'captcha_network_error' : 'captcha_sdk_error', message: '验证码 SDK 初始化或网络请求失败' };
   } finally {
     clearTimeout(timer);
     if (interrupt) {

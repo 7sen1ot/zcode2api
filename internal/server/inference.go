@@ -38,7 +38,7 @@ func classify(f *Failure) *Failure {
 		kind = "invalid"
 	case "500", "2007", "1120", "1230":
 		kind, retry = "server", true
-	case "1234", "network", "upstream_stream_error", "proxy_auth_failed":
+	case "1234", "network", "upstream_stream_error", "proxy_auth_failed", "proxy_connection_failed":
 		kind, retry = "network", true
 	case "503", "529", "1312", "engine_overloaded_error", "overloaded_error":
 		kind, retry = "overload", true
@@ -52,8 +52,10 @@ func classify(f *Failure) *Failure {
 		kind = "terminal"
 	case "3012", "CAPTCHA_VERIFY_FAILED", "coding_plan_security_verification_required", "captcha_expired", "captcha_invalid", "captcha_verification_failed", "captcha_duplicate_result", "upstream_waf_blocked", "upstream_risk_blocked", "F008", "F018", "F019":
 		kind = "risk"
-	case "timeout":
+	case "timeout", "first_token_timeout", "stream_idle_timeout", "inference_timeout", "captcha_config_timeout", "retry_budget_exhausted":
 		kind, retry = "timeout", true
+	case "throttle_window_exhausted":
+		kind, retry = "rate_limit", true
 	}
 	if kind == "" {
 		switch {
@@ -99,8 +101,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		o.Timing = newTiming()
 	}
 	p := a.retryParams()
-	budget := max(10*time.Second, ms(p["total_budget_ms"]))
-	retryDeadline := time.Now().Add(budget)
+	remainingBudget := max(10*time.Second, ms(p["total_budget_ms"]))
 	var throttleDeadline time.Time
 	excluded, round := map[string]bool{}, map[string]bool{}
 	throttled := map[string]time.Time{}
@@ -137,15 +138,15 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		if ctx.Err() != nil {
 			return fail(nil)
 		}
-		deadline := retryDeadline
+		deadline := time.Now().Add(remainingBudget)
 		if !throttleDeadline.IsZero() {
 			deadline = throttleDeadline
 			if !time.Now().Before(deadline) {
 				return fail(lastThrottle)
 			}
-		} else if !time.Now().Before(deadline) {
+		} else if remainingBudget <= 0 {
 			if last == nil {
-				last = &Failure{Kind: "timeout", Code: "timeout", Message: "排队或重试预算耗尽"}
+				last = &Failure{Kind: "timeout", Code: "retry_budget_exhausted", Message: "故障重试超时"}
 			}
 			return fail(last)
 		}
@@ -159,9 +160,16 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			}
 		}
 		start := time.Now()
+		o.Admission = 0
+		if !throttleDeadline.IsZero() {
+			o.Admission = max(time.Millisecond, time.Until(throttleDeadline))
+		}
 		account, busy, candidates, policy, e := a.acquire(ctx, o, skip, max(0, min(busyWait(p), time.Until(deadline))))
 		o.Timing.queue += time.Since(start)
 		if e != nil {
+			if f, ok := e.(*Failure); ok {
+				return fail(f)
+			}
 			return fail(nil)
 		}
 		var picked any
@@ -207,8 +215,10 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		if !throttleDeadline.IsZero() {
 			o.Admission = max(time.Millisecond, time.Until(throttleDeadline))
 		}
+		o.OnAdmitted = func() { a.admitAccount(account) }
+		attemptStart := time.Now()
 		result, f := a.inferHTTP(ctx, account, o)
-		a.release(id)
+		a.finishAccountAttempt(account, f, true, p)
 		if f == nil {
 			a.mu.Lock()
 			a.state(id).Cooldown = 0
@@ -258,7 +268,10 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 				}
 			})
 			continue
-		case "busy", "rate_limit", "overload":
+		case "busy":
+			// Account concurrency does not consume the ordinary retry budget.
+			continue
+		case "rate_limit", "overload":
 			lastThrottle = f
 			delay := f.RetryAfter
 			if delay <= 0 {
@@ -269,6 +282,10 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			continue
 		}
 		if !f.Retryable {
+			return fail(f)
+		}
+		remainingBudget -= time.Since(attemptStart)
+		if remainingBudget <= 0 {
 			return fail(f)
 		}
 		regular++
@@ -288,9 +305,11 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		if truth(p["jitter"]) {
 			delay *= 0.8 + rand.Float64()*0.4
 		}
-		if wait(min(ms(delay), max(0, time.Until(deadline)))) != nil {
+		delayStart := time.Now()
+		if wait(min(ms(delay), remainingBudget, max(0, time.Until(deadline)))) != nil {
 			return fail(f)
 		}
+		remainingBudget -= time.Since(delayStart)
 	}
 }
 func (a *App) logUsage(o inferOptions, r *Result, f *Failure, account M, attempts int, rotated []any) {

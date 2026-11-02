@@ -192,6 +192,7 @@ type Failure struct {
 	Code, Kind, Message  string
 	Retryable, Committed bool
 	ProxyFailover        bool
+	VerifyCode           string
 	RetryAfter           time.Duration
 	Attempts             int
 }

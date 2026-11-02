@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+func (a *App) release(id string) {
+	a.finishAccountAttempt(M{"id": id}, nil, false, nil)
+}
+
 func TestSchedulerQueueReusesOnlyReleasedSlot(t *testing.T) {
 	a := testApp(t)
 	k, _, accounts := testPool(t, a, 1)

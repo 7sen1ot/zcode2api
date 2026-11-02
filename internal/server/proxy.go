@@ -166,8 +166,7 @@ func proxyFailure(code, message string) error {
 	return &Failure{Kind: "server", Code: code, Message: message}
 }
 
-// A route belongs to one logical operation, not to each HTTP call. Scene lookup,
-// SDK traffic, the ticket-bearing request, and an expired-ticket retry share it.
+// Pin scene lookup, SDK verification and inference to the same exit.
 func (a *App) pinOutboundProxy(parent context.Context, account M) (context.Context, func(), error) {
 	if _, present := parent.Value(proxyContextKey{}).(proxyRoute); present {
 		return parent, func() {}, nil
@@ -264,8 +263,7 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 	return -1, manager.generation
 }
 
-// Only a production pool selection may retire a node. Account overrides, draft
-// probes, canceled requests and results from an old configuration cannot alter it.
+// Only current pooled routes may retire nodes; canceled and override routes cannot.
 func (a *App) markProxyFailure(ctx context.Context) bool {
 	selection, ok := ctx.Value(proxySelectionKey{}).(proxySelection)
 	if !ok || ctx.Err() != nil {
@@ -283,6 +281,20 @@ func (a *App) markProxyFailure(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// Ticket and runtime failures do not identify a broken exit.
+func proxyExitFailure(failure *Failure) bool {
+	if failure.Kind == "network" && failure.Retryable {
+		return true
+	}
+	switch failure.Code {
+	case "3012", "upstream_waf_blocked", "upstream_risk_blocked":
+		return true
+	case "captcha_verification_failed":
+		return failure.VerifyCode == "F001"
+	}
+	return failure.Kind == "risk" && riskBlockMessage(failure.Message)
 }
 
 func maskedProxy(address string) string {
