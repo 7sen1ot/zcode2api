@@ -5,8 +5,7 @@ const path = require('node:path');
 
 const SDK_URL = 'https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';
 
-// Compatibility stubs for jsdom, which has no renderer or GPU. These values are
-// synthetic; they neither represent the host hardware nor guarantee acceptance.
+// Synthetic rendering interfaces for jsdom; no host GPU is queried.
 function installCanvasWebGL(window) {
   const noop = () => {};
   const png = window.Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));

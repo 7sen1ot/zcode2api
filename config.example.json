@@ -33,7 +33,7 @@
     "busy_wait_sec": 60,
     "total_budget_ms": 120000
   },
-  "app_version": "3.16.2",
+  "app_version": "3.17.2",
   "claim_auto_enabled": true,
   "claim_auto_min": 240,
   "trust_proxy": false,

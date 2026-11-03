@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -86,8 +87,7 @@ func (a *App) marketingPreview(ctx context.Context, r M) (M, error) {
 			if str(action["type"]) != "claim_zcode_plan" || id == "" {
 				continue
 			}
-			// Only explicit claim actions establish availability. Metadata in
-			// success popups or referral rewards does not make a plan claimable.
+			// Reward metadata alone does not establish claimability.
 			plan := M{"plan_id": id, "name": id, "entitlements": []any{}}
 			for _, key := range []string{"background", "hero"} {
 				details := obj(obj(obj(content[key])["args"])["zcode_plan"])
@@ -165,7 +165,7 @@ func (a *App) discover(ctx context.Context, id string) M {
 	}
 	return M{"previews": previews}
 }
-func (a *App) claim(ctx context.Context, id, plan, trigger string) (M, error) {
+func (a *App) claim(ctx context.Context, id, plan, trigger string, verification M) (M, error) {
 	lock := id + ":" + plan
 	a.mu.Lock()
 	if a.claimLocks[lock] {
@@ -183,9 +183,40 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string) (M, error) {
 	if token == "" {
 		return nil, fmt.Errorf("该账号无 zcode_jwt，无法领取")
 	}
-	res, e := a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, M{"X-Device-Mid": r["device_mid"]}, a.jar(id))
+	if e := validateClaimVerification(verification); e != nil {
+		return nil, e
+	}
+	ctx, release, e := a.pinOutboundProxy(ctx, r)
 	if e != nil {
 		return nil, e
+	}
+	defer release()
+	headers := M{"X-Device-Mid": r["device_mid"]}
+	if param := str(verification["captcha_verify_param"]); param != "" {
+		if failure := a.reserveCaptchaTicket(param); failure != nil {
+			return nil, failure
+		}
+		headers["X-Aliyun-Captcha-Verify-Param"] = param
+		headers["X-Aliyun-Captcha-Verify-Region"] = verification["captcha_region"]
+	}
+	res, e := a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
+	if e != nil {
+		return nil, e
+	}
+	var verificationFailure *Failure
+	if trigger == "auto" && claimRequiresVerification(res.JSON["code"]) {
+		a.invalidateCaptchaScene()
+		var ticketHeaders http.Header
+		ticketHeaders, verificationFailure = a.captchaHeaders(ctx, r, true)
+		if verificationFailure == nil {
+			for key := range ticketHeaders {
+				headers[key] = ticketHeaders.Get(key)
+			}
+			res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
+			if e != nil {
+				return nil, e
+			}
+		}
 	}
 	data := obj(res.JSON["data"])
 	p := obj(data["plan"])
@@ -195,6 +226,14 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string) (M, error) {
 		code = str(res.JSON["code"])
 	}
 	message := first(data["message"], res.JSON["msg"], "")
+	requiresVerification := !ok && claimRequiresVerification(code)
+	if verificationFailure != nil {
+		code = verificationFailure.Code
+		message = conciseFailureMessage(verificationFailure) + "，请在领卡中心领取"
+		requiresVerification = true
+	} else if requiresVerification {
+		message = "请在领卡中心完成安全验证后领取（" + str(code) + "）"
+	}
 	end := secondsMS(p["ends_at"])
 	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger) VALUES(?,?,?,?,?,?,?,?,?)", id, nowMS(), plan, integer(ok), code, message, p["user_plan_id"], end, trigger)
 	a.audit("system", "claim", M{"account": id, "plan_id": plan, "ok": ok, "code": code}, "")
@@ -207,7 +246,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string) (M, error) {
 	if len(p) > 0 {
 		resultPlan = p
 	}
-	return M{"ok": ok, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end}, nil
+	return M{"ok": ok, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification}, nil
 }
 func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
 	lock := "__auto"
@@ -239,18 +278,13 @@ func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
 		if p["warning"] != nil {
 			results = append(results, M{"account": id, "warning": p["warning"]})
 		}
-		seen := map[string]bool{}
 		for _, v := range arr(p["plans"]) {
 			plan := str(obj(v)["plan_id"])
-			if plan == "" || seen[plan] {
-				continue
-			}
-			seen[plan] = true
 			if dry {
 				results = append(results, M{"account": id, "plan_id": plan, "would_claim": true})
 				continue
 			}
-			res, e := a.claim(ctx, id, plan, "auto")
+			res, e := a.claim(ctx, id, plan, "auto", nil)
 			if e != nil {
 				results = append(results, M{"account": id, "error": e.Error()})
 				continue

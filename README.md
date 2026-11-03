@@ -15,16 +15,16 @@
 
 </div>
 
-将自己授权的账号加入账号池，通过统一地址和网关密钥接入支持 OpenAI Chat Completions、Responses 或 Anthropic Messages 的客户端。
+兼容 OpenAI Chat Completions、Responses 和 Anthropic Messages 协议。
 
-- **多账号调度**：支持 BigModel / Z.ai、本机凭据导入、OAuth、分组和会话亲和；单账号最多同时处理 3 个推理请求，所有模型共享名额。
-- **自动换号与重试**：账号并发满时换号，全池暂忙则共享排队至恢复或取消；普通限流和过载保留 10 秒重试窗口，已输出内容后停止整轮重放。
-- **自动领卡**：合并活动卡与旧版额度卡，支持手动领取、领取记录和待生效额度展示。
-- **可选网络配置**：支持出站代理、节点订阅、Mihomo 安装及上游安全验证。
+- **账号管理**：BigModel / Z.ai、本机导入、OAuth、分组与会话亲和。
+- **调度与重试**：自动换号、并发排队、限流重试；单账号最多 3 个并发请求。
+- **自动领卡**：默认每 240 分钟巡检，支持验证取票、领取记录与待生效额度。详见[领卡行为](docs/configuration.md#领卡行为)。
+- **网络配置**：HTTP/HTTPS 代理、节点订阅、Mihomo 与安全验证。
 
 ## 快速开始
 
-支持 Windows、Linux、macOS。使用 Release 无需 Go；源码构建需要 **Go 1.26+**。Node.js / jsdom 仅用于可选安全验证和相关测试，普通网关运行无需安装。
+支持 Windows、Linux、macOS。源码构建需要 **Go 1.26+**，Release 可直接运行。后台安全验证需要 Node.js 18+ 和 jsdom。
 
 ### Release
 
@@ -85,9 +85,7 @@ docker compose up -d --build
 | OpenAI Responses | `http://127.0.0.1:6780/v1` | `POST /v1/responses` |
 | Anthropic Messages | `http://127.0.0.1:6780` | `POST /v1/messages` |
 
-**网关密钥由本项目签发，不是账号 JWT 或控制台管理密码。** 模型 ID 以 `GET /v1/models` 返回为准；默认别名 `glm-flash` → `GLM-5.3-Flash`、`glm-5.3` → `GLM-5.3`，可用性取决于账号权益和密钥权限。
-
-「领卡」可查看、领取可用卡及查询记录。自动领卡默认每 **240 分钟**检查一次，服务需保持运行；奖励任务仍需在 ZCode 中完成，待生效额度不计入当前余额。网页 Cookie 导入仅用于受支持的平台资料等接口，推理、余额和领卡需要有效的 ZCode 凭据。
+使用控制台创建的网关密钥。模型列表见 `GET /v1/models`；默认别名为 `glm-flash` → `GLM-5.3-Flash`、`glm-5.3` → `GLM-5.3`。
 
 ## 常用配置
 
@@ -98,12 +96,12 @@ docker compose up -d --build
 | `host` | `127.0.0.1` | 本机监听地址 |
 | `web_port` / `gateway_port` | `6789` / `6780` | 控制台 / 网关端口 |
 | `claim_auto_enabled` / `claim_auto_min` | `true` / `240` | 自动领卡开关 / 周期（分钟） |
-| `http.captcha.mode` | `off` | 可选上游安全验证 |
+| `http.captcha.mode` | `off` | 推理请求的验证策略 |
 | `outbound_proxy.enabled` | `false` | 全局出站代理 |
 
 常用环境变量：`ZCODE2API_DATA_DIR`、`ZCODE2API_HOST`、`ZCODE2API_WEB_PORT`、`ZCODE2API_GATEWAY_PORT`、`ZCODE2API_ADMIN_PASSWORD`。更多配置、重试规则和环境变量见[配置说明](docs/configuration.md)。
 
-代理与安全验证在「设置」中启用，订阅模式需要 Mihomo，安全验证需要 Node.js 18+ 和 jsdom。依赖安装、Docker 可选构建参数、代理轮换和 HTTP 405 排查见[代理与上游安全验证](docs/network.md)。验证环境不保证通过上游风险判定。
+订阅代理需要 Mihomo；后台验证需要 Node.js 18+ 和 jsdom。安装方式、Docker 构建参数与故障排查见[网络配置](docs/network.md)。
 
 ## 文档与许可
 
@@ -112,6 +110,4 @@ docker compose up -d --build
 - [代理、订阅与上游安全验证](docs/network.md)
 - [安全说明与免责声明](SECURITY.md)
 
-本项目采用 [Apache License 2.0](LICENSE)。再分发须提供许可证副本、显著标明修改，并保留适用的版权与署名声明；具体要求见许可证第 4 条。第三方账号、额度和模型服务仍受各自条款约束。仅接入本人拥有或已获明确授权的账号；远程部署请配置访问控制与 HTTPS。
-
-本项目与 ZCode、智谱、Z.ai、BigModel 官方无隶属或背书关系。
+采用 [Apache License 2.0](LICENSE)。账号授权、第三方服务条款与部署注意事项见[安全说明](SECURITY.md)。

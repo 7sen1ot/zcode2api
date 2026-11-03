@@ -440,7 +440,7 @@ document.addEventListener('pointerdown', (e) => { if (openSelect && !openSelect.
 document.addEventListener('scroll', (e) => { if (openSelect && !openSelect.wrapper.contains(e.target)) openSelect.close(); }, true);
 window.addEventListener('resize', () => openSelect?.close());
 
-function modal(title, contentEl) {
+function modal(title, contentEl, onClose) {
   const bg = h('<div class="modal-bg"></div>');
   const box = h(`<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" tabindex="-1"><div class="modal-header"><div><span class="modal-eyebrow">ZCODE2API</span><h2>${esc(title)}</h2></div><button type="button" class="modal-close" aria-label="关闭弹窗">×</button></div><div class="modal-body"></div></div>`);
   $('.modal-body', box).appendChild(contentEl);
@@ -449,6 +449,7 @@ function modal(title, contentEl) {
   const close = (afterClose) => {
     if (closing || contentEl.dataset.submitting === 'true' || !document.body.contains(bg)) return;
     closing = true;
+    onClose?.();
     if (openSelect && box.contains(openSelect.wrapper)) openSelect.close();
     document.removeEventListener('keydown', onKey);
     bg.classList.add('closing');
@@ -846,7 +847,7 @@ function addAccountModal(groups, target = null) {
         <button class="btn primary" id="oauth-open">${icon('plug', 14)}打开授权页面</button>
         <button class="btn" id="oauth-copy">复制链接</button>
       </div>
-      <p class="muted" style="margin:0 0 12px;font-size:12px">在浏览器完成登录后回到本页面：授权成功会自动提示并加入账号库。链接剩余有效期 <b id="oauth-expire" class="mono">${expiresAt ? fmtDur(expiresAt - Date.now()) : '—'}</b></p>
+      <p class="muted" style="margin:0 0 12px;font-size:12px">登录成功后自动添加账号。链接有效期 <b id="oauth-expire" class="mono">${expiresAt ? fmtDur(expiresAt - Date.now()) : '—'}</b></p>
       <div class="row" style="gap:10px;align-items:center">
         <span class="muted" id="oauth-status" style="display:inline-flex;align-items:center;gap:6px"><span class="spinner"></span>等待授权…</span>
         <button class="btn" id="oauth-checknow" style="height:26px;padding:0 10px;font-size:12px">我已完成登录，立即检查</button>
@@ -1248,10 +1249,11 @@ async function pageSettings(main) {
         <label class="f">随机抖动（秒）<input id="s-jitter" type="number" min="0" step="1" required value="${s.poll_jitter_sec}"><small>分散多个账号的请求时间</small></label>
         <label class="f">轮询并发<input id="s-conc" type="number" min="1" step="1" required value="${s.poll_concurrency}"><small>同时检查余额的账号数量</small></label>
       </div></div></details>
-      <details class="settings-section formcard" id="captcha-panel"><summary class="settings-section-summary"><span><strong>上游安全验证</strong><small>为模型请求申请一次性验证票据</small></span></summary>
+      <details class="settings-section formcard" id="captcha-panel"><summary class="settings-section-summary"><span><strong>上游安全验证</strong><small>推理与自动领卡的验证运行环境</small></span></summary>
       <div class="settings-panel settings-section-body settings-section-content"><div class="network-settings-fields">
-        <div class="settings-fields"><label class="f">请求前验证策略<select id="s-captcha-mode" aria-describedby="s-captcha-mode-hint"><option value="off">关闭验证</option><option value="auto">按上游要求验证</option><option value="always">每次请求前验证（场景启用时）</option></select><small id="s-captcha-mode-hint" aria-live="polite"></small></label>
-          <label class="f">验证等待上限（毫秒）<input id="s-captcha-timeout" type="number" min="5000" max="120000" step="1" required value="${captcha.timeout_ms}"><small>仅用于安全验证；30000 毫秒 = 30 秒。</small></label></div>
+        <div class="settings-fields"><label class="f">推理验证策略<select id="s-captcha-mode" aria-describedby="s-captcha-mode-hint"><option value="off">关闭推理验证</option><option value="auto">按上游要求验证</option><option value="always">每次推理前验证</option></select><small id="s-captcha-mode-hint" aria-live="polite"></small></label>
+          <label class="f">验证超时（毫秒）<input id="s-captcha-timeout" type="number" min="5000" max="120000" step="1" required value="${captcha.timeout_ms}"></label></div>
+        <p class="quiet-message">自动领卡遇到验证要求时取票重试一次；需要人工操作时请到领卡页面处理。</p>
         <label class="settings-check"><input id="s-captcha-canvas" type="checkbox" ${captcha.simulate_canvas_webgl ? 'checked' : ''}><span>启用浏览器接口模拟<small>为 SDK 补充 Canvas、WebGL 等兼容接口；不保证通过验证。</small></span></label>
         <div class="settings-subsection"><div class="settings-fields">
           <label class="f">Node.js 可执行文件<input id="s-captcha-node" value="${esc(captcha.node_path)}" placeholder="node"><small id="s-node-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></label>
@@ -1278,12 +1280,12 @@ async function pageSettings(main) {
       </div></div></details>
       <details class="settings-section formcard" id="gateway-panel"><summary class="settings-section-summary"><span><strong>网关与模型</strong><small>配置上游版本、模型别名与请求参数</small></span></summary>
       <div class="settings-panel settings-section-body settings-section-content"><div class="network-settings-fields">
-        <label class="f">默认思考强度<select id="s-level" required aria-describedby="s-level-hint"><option value="low">低（low）</option><option value="high">高（high）</option><option value="max">最高（max）</option></select><small id="s-level-hint">客户端指定的思考设置优先；未指定时，依次使用密钥默认值和此处设置。低强度仍会开启思考。</small></label>
+        <label class="f">默认思考强度<select id="s-level" required aria-describedby="s-level-hint"><option value="low">低（low）</option><option value="high">高（high）</option><option value="max">最高（max）</option></select><small id="s-level-hint">优先级：客户端 → 密钥 → 此处设置。低强度仍开启思考。</small></label>
         <p class="inline-notice">客户端显式关闭思考时，此设置不会覆盖；始终思考的模型可能返回 1210，请在客户端开启思考。</p>
         <div class="settings-subsection"><h3>客户端版本、模型别名、重试与 HTTP 超时</h3><div class="advanced-fields">
-          <label class="f">额度与领卡 API 版本<input id="s-ver" value="${esc(s.app_version)}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 3.16.2" required><small>用于管理请求的 User-Agent、X-ZCode-App-Version 和 app_version 参数。</small></label>
+          <label class="f">额度与领卡 API 版本<input id="s-ver" value="${esc(s.app_version)}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 3.17.2" required><small>用于管理请求的 User-Agent、X-ZCode-App-Version 和 app_version 参数。</small></label>
           <label class="f">推理 API 版本<input id="s-http-version" value="${esc(s.http.client_version || '0.17.0')}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 0.17.0" required><small>对应 http.client_version，仅调整推理请求的版本标识。</small></label>
-          <p class="inline-notice client-version-note">当前使用 Go HTTP 传输，版本字段不等于官方客户端的完整指纹。版本设置不改变 TLS、设备标识或系统前缀，不能保证避免平台风控。现有设备标识在账号入库后保留；风险拒绝会停止本次请求，不自动换号重试。</p>
+          <p class="inline-notice client-version-note">版本号仅标识请求版本，不改变设备指纹或上游验证规则。</p>
           <label class="f" for="s-aliases">模型别名（JSON 对象）</label><textarea id="s-aliases" class="code-input" spellcheck="false" rows="5" aria-describedby="s-aliases-hint">${esc(JSON.stringify(s.aliases, null, 2))}</textarea><p id="s-aliases-hint" class="json-hint" data-for="s-aliases" aria-live="polite"></p>
           <label class="f" for="s-retry">重试参数（JSON 对象）</label><textarea id="s-retry" class="code-input" spellcheck="false" rows="8" aria-describedby="s-retry-hint">${esc(JSON.stringify(s.retry, null, 2))}</textarea><p id="s-retry-hint" class="json-hint" data-for="s-retry" aria-live="polite"></p>
           <label class="f" for="s-http">HTTP 超时（JSON 对象，毫秒）<small>total_timeout_ms 为 0 表示不限制整轮时长；client_version 使用上方“推理 API 版本”设置。</small></label><textarea id="s-http" class="code-input" spellcheck="false" rows="6" aria-describedby="s-http-hint">${esc(JSON.stringify(httpParams, null, 2))}</textarea><p id="s-http-hint" class="json-hint" data-for="s-http" aria-live="polite"></p>

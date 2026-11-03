@@ -6,3 +6,4 @@ data/
 .zcode/
 config.json
 probe-*.json
+AGENTS.md

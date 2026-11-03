@@ -43,7 +43,7 @@ func (a *App) captchaHeaders(parent context.Context, account M, force bool) (htt
 	if err := validateCaptchaOptions(options); err != nil {
 		return nil, &Failure{Kind: "server", Code: "captcha_config_invalid", Message: err.Error()}
 	}
-	if mode == "off" {
+	if mode == "off" && !force {
 		return headers, nil
 	}
 	parent, release, err := a.pinOutboundProxy(parent, account)
@@ -59,7 +59,6 @@ func (a *App) captchaHeaders(parent context.Context, account M, force bool) (htt
 	if a.captcha.slot == nil {
 		a.captcha.slot = make(chan struct{}, 1)
 		a.captcha.scenes = map[string]captchaScene{}
-		a.captcha.used = map[string]time.Time{}
 	}
 	slot := a.captcha.slot
 	a.captcha.mu.Unlock()
@@ -121,27 +120,12 @@ func (a *App) captchaHeaders(parent context.Context, account M, force bool) (htt
 		return nil, &Failure{Kind: "risk", Code: "captcha_verification_failed", Message: message, VerifyCode: code}
 	}
 	param := str(result["param"])
-	invalid := strings.TrimSpace(param) == "" || len(param) > 32<<10
-	for _, character := range param {
-		invalid = invalid || character < 0x20 || character == 0x7f
-	}
-	if invalid {
+	if !validCaptchaParam(param) {
 		return nil, &Failure{Kind: "server", Code: "captcha_invalid_result", Message: "验证码运行时返回了无效票据"}
 	}
-	// CaptchaVerifyParam is single-use. Cache configuration, never the ticket itself.
-	for key, expires := range a.captcha.used {
-		if time.Now().After(expires) {
-			delete(a.captcha.used, key)
-		}
+	if failure := a.reserveCaptchaTicket(param); failure != nil {
+		return nil, failure
 	}
-	id := hash(param)
-	if _, exists := a.captcha.used[id]; exists {
-		return nil, &Failure{Kind: "risk", Code: "captcha_duplicate_result", Message: "验证码运行时返回了已使用的票据，请重新验证"}
-	}
-	if len(a.captcha.used) >= 2048 {
-		return nil, &Failure{Kind: "server", Code: "captcha_capacity_exceeded", Message: "安全验证票据保护缓存已满，请稍后重试"}
-	}
-	a.captcha.used[id] = time.Now().Add(20 * time.Minute)
 	headers.Set("X-Aliyun-Captcha-Verify-Param", param)
 	headers.Set("X-Aliyun-Captcha-Verify-Region", str(scene["region"]))
 	return headers, nil
@@ -154,9 +138,21 @@ func (a *App) captchaScene(ctx context.Context, account M) (M, *Failure) {
 	if entry, ok := a.captcha.scenes[key]; ok && time.Now().Before(entry.Expires) {
 		return entry.Value, nil
 	}
+	scene, failure := a.fetchCaptchaScene(ctx, account)
+	if failure != nil {
+		return nil, failure
+	}
+	if len(a.captcha.scenes) >= 32 {
+		clear(a.captcha.scenes)
+	}
+	a.captcha.scenes[key] = captchaScene{Value: scene, Expires: time.Now().Add(10 * time.Minute)}
+	return scene, nil
+}
+
+func (a *App) fetchCaptchaScene(ctx context.Context, account M) (M, *Failure) {
 	configCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	endpoint := "/api/v1/client/configs?app_version=" + url.QueryEscape(version) + "&platform=" + url.QueryEscape(platform())
+	endpoint := "/api/v1/client/configs?app_version=" + url.QueryEscape(str(a.config()["app_version"])) + "&platform=" + url.QueryEscape(platform())
 	response, err := a.api(configCtx, account, "GET", endpoint, "", nil, nil, nil)
 	if err != nil {
 		var failure *Failure
@@ -190,10 +186,6 @@ func (a *App) captchaScene(ctx context.Context, account M) (M, *Failure) {
 			return nil, &Failure{Kind: "server", Code: "captcha_config_invalid", Message: "上游安全验证场景或地域配置不完整"}
 		}
 	}
-	if len(a.captcha.scenes) >= 32 {
-		clear(a.captcha.scenes)
-	}
-	a.captcha.scenes[key] = captchaScene{Value: scene, Expires: time.Now().Add(10 * time.Minute)}
 	return scene, nil
 }
 

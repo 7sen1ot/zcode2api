@@ -139,11 +139,16 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return M{"summary": summary, "groups": a.groups(), "busy_24h": busy, "default_chain": a.defaultChain()}, 200, nil
 	case "GET /api/claims/discover":
 		return a.discover(ctx, r.URL.Query().Get("account_id")), 200, nil
+	case "GET /api/claims/verification":
+		return wrap(a.claimVerification(ctx, r.URL.Query().Get("account_id")))
 	case "POST /api/claims/claim":
 		if !truth(b["account_id"]) || !truth(b["plan_id"]) {
 			return M{"ok": false, "error": "缺少 account_id / plan_id"}, 400, nil
 		}
-		v, e := a.claim(ctx, str(b["account_id"]), str(b["plan_id"]), "manual")
+		if e := validateClaimVerification(b); e != nil {
+			return M{"ok": false, "error": e.Error()}, 400, nil
+		}
+		v, e := a.claim(ctx, str(b["account_id"]), str(b["plan_id"]), "manual", b)
 		return wrap(v, e)
 	case "POST /api/claims/auto-run":
 		v, e := a.autoClaim(ctx, truth(b["dry_run"]))

@@ -719,21 +719,21 @@ func TestClaimDedupAndStrictSuccess(t *testing.T) {
 	id := str(accounts[0]["id"])
 	done := make(chan M)
 	go func() {
-		r, e := a.claim(context.Background(), id, "card", "manual")
+		r, e := a.claim(context.Background(), id, "card", "manual", nil)
 		if e != nil {
 			t.Error(e)
 		}
 		done <- r
 	}()
 	<-started
-	r, e := a.claim(context.Background(), id, "card", "manual")
+	r, e := a.claim(context.Background(), id, "card", "manual", nil)
 	must(t, e)
 	equal(t, r["code"], "in_progress")
 	close(release)
 	equal(t, (<-done)["ok"], true)
 	equal(t, calls.Load(), 1)
 	status.Store(500)
-	r, e = a.claim(context.Background(), id, "other", "manual")
+	r, e = a.claim(context.Background(), id, "other", "manual", nil)
 	must(t, e)
 	equal(t, r["ok"], false)
 }

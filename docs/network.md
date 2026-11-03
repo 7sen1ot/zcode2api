@@ -1,64 +1,75 @@
 # 代理与上游安全验证
 
-[返回 README](../README.md) · [配置与重试说明](configuration.md)
-
-## 排查上游 HTTP 405
-
-`upstream_waf_blocked` 表示已识别到上游安全网关拦截；仅凭 405 不能判断为请求方法错误、客户端版本过旧或账号失效。日志和网关按故障来源显示简短摘要：账号并发已满、本地排队超时、请求频率受限、上游服务过载、SDK 连接失败、代理连接失败等；保留独立的错误码、请求 ID 和追踪 ID。SDK 拒绝保留 `F001` 等诊断码，首字超时、流空闲超时和整轮超时分别记录；未知错误压成单行，最多显示 80 个字符。历史日志查询也会应用摘要，无需清空数据库。
+[返回 README](../README.md) · [配置说明](configuration.md)
 
 ## 出站代理
 
-在控制台「设置 → 出站代理」启用并配置全局代理；设置页四个主要面板默认收起，可独立展开，面板内的节点列表和其他字段直接展示。点击「加载节点」后，可选择「自动选择」或指定一个节点，保存后对后续请求生效，重启后保留。节点列表标出当前使用与已剔除的节点。指定节点不可用或从订阅移除时，仍会自动切换到其他可用节点。关闭全局代理会恢复直连；「账号 → 编辑 → 出站代理」中的单独设置优先，且固定使用该账号代理，不参与全局池切换。项目不会自动读取 Windows 系统代理。
+在「设置 → 出站代理」启用代理，加载节点后选择并保存。账号单独设置的代理优先；程序不读取 Windows 系统代理。
 
-### 固定节点与故障切换
+- 手填模式支持 HTTP/HTTPS 地址，每行一个，可带用户名和密码。
+- 订阅模式支持 HTTPS 订阅中的 URI / Base64 URI 列表：VLESS TCP/WS（含 Reality）、Hysteria2、HTTP/HTTPS，最多 64 个节点。
+- 优先使用指定节点，否则选择第一个可用节点。正常请求保持当前节点，故障时顺序切换；全部不可用时返回 `proxy_pool_exhausted`。
+- 剔除状态保存在内存中，修改配置或重启后重置；订阅刷新会保留仍存在节点的状态。
 
-手填模式每行填写一个 HTTP/HTTPS 代理地址，支持带用户名和密码的代理。开启代理后始终使用代理，不先尝试直连。启动后优先使用指定节点；未指定时选择列表中第一个可用节点。后续操作和并发请求持续使用它，不按请求或时间轮换。遇到 WAF、`3012`、SDK 的 `F001` 拒绝或明确连接故障时，从当前可用池剔除该节点，按列表顺序切换到下一个节点。尚未输出内容的推理可自动重试；切换计入 `retry.max_attempts` 和普通故障的 `retry.total_budget_ms`，不扣减账号可用性。鉴权、额度、参数、并发暂忙、限流和普通上游服务错误不视为节点失效；客户端取消和本地超时也不剔除节点。
+WAF、`3012`、推理 SDK 的 `F001` 拒绝和连接故障可触发全局代理池切换。推理尚未输出时可重试，计入普通重试次数和预算。鉴权、额度、参数、并发暂忙、限流和普通上游错误不会剔除节点。
 
-剔除记录仅保存在运行内存中，不删除原始配置；修改代理配置或重启服务后会重新纳入。订阅刷新时按节点配置识别同一节点，保留当前选择和剔除记录。所有节点不可用时返回 `proxy_pool_exhausted`，不重复使用已剔除节点，也不回退直连。旧配置中的 `rotation_enabled` 和 `rotation_interval_sec` 仍可读取，但不再控制轮换。
+配置获取、SDK 验证与携票请求使用同一代理入口。外部代理若自行轮换公网 IP，需在提供商端配置固定或粘性会话。
 
-每次验证码配置获取、SDK 请求、携带票据的推理及过期票据重验均固定在同一个代理入口；切换后重新执行完整验证流程，已开始输出的请求不重放。若外部代理本身会轮换公网 IP，需在提供商端使用固定或粘性会话；本服务无法固定外部代理内部的路由。
-
-配置文件示例（合并进 `config.json`，保留其他字段）：
+将以下字段合并进 `config.json`：
 
 ```json
 {
   "outbound_proxy": {
     "enabled": true,
     "source": "manual",
-    "urls": ["http://127.0.0.1:7890", "http://127.0.0.1:7891"],
+    "urls": ["http://127.0.0.1:7890"],
     "subscription_url": "",
-    "subscription_filter": "",
     "mihomo_path": "mihomo",
+    "preferred_node": "",
     "refresh_interval_sec": 3600
   }
 }
 ```
 
-旧 `proxy_url` 配置会在没有显式 `outbound_proxy` 时迁移到启用的单地址列表；后续以新设置为准。
+未配置 `outbound_proxy` 时，旧 `proxy_url` 会迁移为单地址代理。旧 `rotation_enabled`、`rotation_interval_sec` 不再控制轮换；配置文件仍兼容 `subscription_filter`，界面保存时清除此字段。
 
-### 节点订阅与 Mihomo
+### Mihomo
 
-订阅模式可直接填写 HTTPS 订阅地址，支持 URI 或 Base64 URI 列表中的 VLESS TCP/WS（含 Reality）、Hysteria2、HTTP/HTTPS。需要 Mihomo，可在「设置 → 出站代理 → 节点订阅」中自行点击「安装 Mihomo」，也可填写已安装程序的路径。在线安装仅在点击时触发，从官方 GitHub 下载固定版本 `v1.19.33`，按内置的官方资产 SHA-256 校验后解压至数据目录的 `tools/mihomo/`，支持 Windows、Linux、macOS 的 amd64/arm64；无需管理员权限，但数据目录须可写且允许执行。下载使用服务器直连，不依赖尚未就绪的订阅代理。安装完成会填入路径供保存，不会替用户开启代理；已启用的订阅代理使用默认命令 `mihomo` 时，可在后续操作中发现数据目录的托管版本。GitHub 无法连接或平台不受支持时，可[手动下载](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.33)。相对路径基于 `--root`，单独的命令名从 PATH 查找。Hysteria2 的 `pinSHA256` 会映射为内核的证书指纹。程序不会下载或执行订阅提供的脚本。
+订阅模式需要 Mihomo。在设置页安装或填写已有程序路径。在线安装从[官方 GitHub](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.33)下载 `v1.19.33`，校验 SHA-256 后解压到数据目录的 `tools/mihomo/`，支持 Windows、Linux、macOS 的 amd64/arm64。
 
-订阅地址默认明文显示，界面直接列出受支持节点，最多保留 64 个，去重后按订阅顺序使用。Mihomo 安装按钮位于可执行文件字段旁。加载节点只读取订阅，无需提前安装或启动 Mihomo，也不会保存设置。界面保存时清除旧的 `subscription_filter`；配置文件仍兼容该旧字段。指定节点保存为 `preferred_node`，使用不含凭据的稳定标识，订阅刷新或重启后仍可识别。
+默认命令 `mihomo` 依次从 PATH、数据目录托管版本和 `--root` 目录查找；自定义相对路径以 `--root` 为基准。自动检测只检查程序，不安装或启动；安装需要手动点击，完成后保存路径。
 
-打开设置、展开订阅代理面板或编辑 Mihomo 路径时会自动检查可执行文件是否存在，并显示解析后的路径。使用默认命令 `mihomo` 时依次查找 PATH、数据目录中的托管版本和 `--root` 目录中的同名程序；填写自定义路径时只检查该路径。检测不保存设置、不运行内核，也不自动下载安装；已找到时安装按钮禁用，未找到时可手动点击安装。
+每个节点有独立的本机 HTTP 入口。订阅按需刷新，正在进行的请求保留旧入口至结束；刷新失败时沿用旧配置。停止服务或切换配置后清理闲置子进程及运行文件。
 
-程序在本机按节点创建固定 HTTP 入口，确保 SDK 与 Go 的独立连接仍使用相同节点。订阅按需定时刷新，刷新成功后新请求使用新入口，正在进行的请求使用旧入口直至结束；同一来源刷新暂时失败时保留仍在运行的旧配置。停止程序或切换配置后，会清理不再使用的子进程及运行文件。
+### 连通性检测
 
-### 检测与保存
+「检测当前代理配置」使用未保存的配置，不发送账号令牌或消耗模型额度。接口返回 401 可证明出口可达，但不代表实际业务能通过上游验证。代理地址和订阅链接不写入浏览器草稿，节点凭据保存在管理员配置及私有运行目录。
 
-「检测当前代理配置」的结果默认收起，摘要显示节点数、可达数和失败数；展开后在固定高度区域内滚动查看。检测测试草稿但不保存设置，也不发送账号令牌或消耗模型额度。未鉴权接口返回 401 表示出口可达，**不能证明真实业务一定通过风控**；能连通的节点仍可能在推理时返回 `3012`。代理地址及订阅链接不写入浏览器草稿。订阅访问参数和节点凭据仅存于管理员配置及私有运行目录，不写入应用日志。
+## 安全验证
 
-## 上游安全验证（可选）
+网页领卡使用浏览器中的阿里云官方组件。后台领卡和推理验证使用 Node.js 与 jsdom；依赖缺失或上游要求人工操作时，转到领卡页面或官方客户端处理。
 
-支持通过阿里云官方 SDK 自动重新申请一次性验证码票据。票据按请求生成，不延长旧票据的有效期，也不在并发请求或不同账号之间复用；上游明确返回票据失效时，在尚未输出内容前最多重新验证一次。`3012`、WAF HTML 拦截及 SDK 的 `F001` 拒绝可触发全局代理池切换；直连、账号专属代理或无其他可用节点时返回错误。
+后台领卡遇到 `3007` 等明确验证要求后，获取新票据并在原出口重试一次。每张卡独立取票，验证失败写入领取记录。此流程独立于下面的推理模式。
 
-`auto` 模式初次请求遵守上游 `skip_model_request`；若模型接口明确要求安全验证或报告票据失效，则刷新场景并在原出口强制取票重试一次。重复失效、SDK 缺依赖或初始化错误、未知验证拒绝、`F015` 人工验证要求均不会剔除代理节点。资源下载或 XMLHttpRequest 明确连接失败会归为网络故障，允许切换代理并重新获取票据；仅有通用 SDK 错误或超时不能证明节点故障，需要检查具体错误或完成官方验证。
+### 推理模式
 
-### 配置与依赖
+| `http.captcha.mode` | 行为 |
+| --- | --- |
+| `off`（默认） | 推理不运行验证 SDK |
+| `auto` | 遵循上游 `enabled` 和 `skip_model_request`，明确要求验证时强制取票 |
+| `always` | 场景启用时，每次推理前取票 |
 
-可在「设置 → 上游安全验证」选择模式、模拟开关、超时及运行路径。也可将下列字段合并进 `config.json`，保留原有 `http` 超时等字段：
+推理票据失效且尚未输出时，在原出口重新验证一次。SDK 缺依赖、初始化错误、超时、未知拒绝或人工验证要求不会剔除代理节点；明确的资源连接失败可触发推理代理切换。
+
+### 依赖与配置
+
+安装 Node.js 18+，在项目根目录运行：
+
+```sh
+npm --prefix captcha_node ci --omit=dev --ignore-scripts
+```
+
+源码和发行包须保留 `captcha_node/package.json` 与锁文件。程序不会自动安装 npm 包。
 
 ```json
 {
@@ -74,26 +85,26 @@
 }
 ```
 
-`mode` 默认为 `off`；`auto` 遵循上游的 `enabled` 和 `skip_model_request` 配置；`always` 会在场景启用时申请票据，适合诊断，不会改变阿里云的验证结论。
+`jsdom_path` 留空使用 `--root` 下的 `captcha_node`，也可指定包含 `node_modules/jsdom` 的目录。设置页自动检测 Node.js 与 jsdom，检测不访问上游或更改配置。
 
-安全验证只使用 Node.js 18+ 和 jsdom。在程序根目录安装锁定版本的可选依赖：
+`simulate_canvas_webgl` 为 jsdom 补充 Canvas、WebGL 等模拟接口；可关闭以对照验证结果。模拟环境不保证通过上游判断。无需 Chrome；旧 `backend`、`browser_path` 配置会被忽略。
+
+SDK 支持直连或无认证 HTTP/HTTPS 代理；带认证的代理可通过本机 Mihomo 入口使用。票据仅通过内存、浏览器请求或子进程管道传递，不写入日志或数据库，也不跨请求复用。
+
+### Docker
+
+需要后台验证时加入 `CAPTCHA_RUNTIME=1`；需要订阅代理时加入 `PROXY_RUNTIME=1`。两者默认均为 `0`：
 
 ```sh
-npm --prefix captcha_node ci --omit=dev --ignore-scripts
+docker compose build --build-arg CAPTCHA_RUNTIME=1 --build-arg PROXY_RUNTIME=1
+docker compose up -d
 ```
 
-`captcha_node/package.json` 和 `captcha_node/package-lock.json` 需要随源码和发行包保留：前者声明依赖，后者锁定 jsdom 及传递依赖，供 `npm ci`、Docker 和 CI 使用。安装生成的 `captcha_node/node_modules/` 已由 `.gitignore` 排除，无需提交。
+## 故障排查
 
-`jsdom_path` 留空时从 `--root` 指定目录下的 `captcha_node/node_modules/jsdom` 加载依赖；也可填写另一个包含 `node_modules/jsdom` 的目录，使用绝对路径或相对于 `--root` 的路径。只加载该目录中的依赖，缺失时直接报告错误。Go 程序内嵌运行脚本，运行时不会自动下载 npm 包。`simulate_canvas_webgl=true` 为 Canvas 2D、WebGL、OffscreenCanvas 以及缺失的 Worker、matchMedia 接口提供固定模拟结果；不代表服务器真实 GPU 或渲染输出。设为 `false` 可关闭这些模拟用于对照。
+- **HTTP 405**：`upstream_waf_blocked` 表示上游安全网关拦截，查看错误码、请求 ID 和追踪 ID；仅凭 405 无法判定账号或请求方法有误。
+- **领卡 3007**：本次领取未通过安全验证，可在领卡页面重试。
+- **SDK 不可用**：检查设置页的 Node.js、jsdom 路径与版本。
+- **需要人工验证**：按浏览器组件提示完成，或到 ZCode 客户端领取后刷新余额。
 
-设置页会自动检测 Node.js 与 jsdom，在展开安全验证面板或编辑路径后重新检测，并显示可用状态和版本；解析后的路径可在状态提示中查看。检测使用与正式验证相同的路径规则，启动一个最长 5 秒的 Node.js 本地进程确认版本不低于 18，并尝试加载指定目录中的 jsdom。检测不会申请验证码、访问上游或安装依赖，也不会更改已保存的设置。
-
-无需 Chrome/Chromium，不支持 `backend`、`browser_path` 配置；旧文件中这两个字段读取时被忽略，控制台保存的旧字段在启动时清除。SDK 缺少无痕验证启动方法、要求人工交互或返回拒绝时，直接报告错误，不尝试其他验证实现。jsdom 模拟环境不保证通过 SDK 的风险判定，也不能保证解除所有 405。
-
-SDK 使用本次推理所选的无认证 HTTP/HTTPS 代理，或在全局代理关闭且未设置账号代理时直连；手填的带用户名/密码代理暂不支持 SDK 验证，可改用订阅模式的本机 Mihomo 入口。验证码票据仅通过子进程管道传递，不写入日志或数据库。保留超时、取消、并发排队、防止票据复用，以及明确过期后最多重新验证一次的保护；代理切换后会重新获取票据。
-
-### Docker 可选运行环境
-
-Docker 可选构建完整运行环境：`docker compose build --build-arg CAPTCHA_RUNTIME=1 --build-arg PROXY_RUNTIME=1`，随后运行 `docker compose up -d`。前者安装 Node 和锁定的 jsdom，后者从固定版本、固定镜像摘要的官方多架构镜像加入 Mihomo。两个参数默认均为 `0`；只使用普通 HTTP/HTTPS 代理时无需 Mihomo。
-
-接口行为依据[阿里云客户端接入文档](https://help.aliyun.com/zh/captcha/captcha2-0/user-guide/new-architecture-for-web-and-h5-client-access)和[服务端一次性票据约束](https://help.aliyun.com/zh/captcha/captcha2-0/user-guide/server-access)实现；参考项目见 [liu5269/zcode2api](https://github.com/liu5269/zcode2api)。
+接口依据[阿里云客户端文档](https://help.aliyun.com/zh/captcha/captcha2-0/user-guide/new-architecture-for-web-and-h5-client-access)和[一次性票据约束](https://help.aliyun.com/zh/captcha/captcha2-0/user-guide/server-access)实现；参考项目：[liu5269/zcode2api](https://github.com/liu5269/zcode2api)。
