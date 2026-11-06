@@ -9,6 +9,7 @@ function claimablePlans(preview) {
 let claimCaptchaScript, claimCaptchaSequence = 0;
 // The SDK requires more than two seconds before verification.
 const claimCaptchaReadyDelay = 2100;
+const claimCaptchaAutoTimeout = 15000;
 function loadClaimCaptchaScript() {
   if (typeof window.initAliyunCaptcha === 'function') return Promise.resolve();
   if (!claimCaptchaScript) {
@@ -31,14 +32,16 @@ async function requestClaimCaptcha(config, label) {
     const mountID = `claim-captcha-${++claimCaptchaSequence}`;
     const form = h(`<div><p class="dialog-intro">${esc(label)} · 验证后领取</p><div id="${mountID}"></div><button type="button" class="btn primary" id="${mountID}-start" disabled>开始验证</button><p class="quiet-message" data-captcha-status role="status">正在加载验证…</p><div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button></div></div>`);
     const status = $('[data-captcha-status]', form), mount = $(`#${mountID}`, form);
-    let instance, dialog, observer, timeout, readyTimer, epoch = 0, settled = false, initializing = false, verifying = false;
+    let instance, dialog, observer, timeout, readyTimer, autoWaitTimer, epoch = 0, settled = false, initializing = false, verifying = false, autoStarted = false, autoPending = false;
     let startButton = $(`#${mountID}-start`, form);
     const finish = (ticket, error) => {
       if (settled) return;
       settled = true;
+      autoPending = false;
       epoch++;
       clearTimeout(timeout);
       clearTimeout(readyTimer);
+      clearTimeout(autoWaitTimer);
       observer?.disconnect();
       try { instance?.destroy?.(); } catch { }
       dialog?.close();
@@ -51,6 +54,8 @@ async function requestClaimCaptcha(config, label) {
     $('[data-cancel]', form).addEventListener('click', () => finish(null));
     const failed = value => {
       if (settled) return;
+      autoPending = false;
+      clearTimeout(autoWaitTimer);
       const result = value?.Result || value?.result || value || {};
       const code = String(result.VerifyCode || result.verifyCode || value?.verifyCode || '');
       status.textContent = code === 'F015'
@@ -68,8 +73,10 @@ async function requestClaimCaptcha(config, label) {
       epoch++;
       initializing = false;
       clearTimeout(readyTimer);
+      clearTimeout(autoWaitTimer);
       try { instance?.destroy?.(); } catch { }
       instance = null;
+      autoPending = false;
       verifying = false;
       startButton.classList.remove('loading');
       startButton.setAttribute('aria-busy', 'false');
@@ -83,8 +90,10 @@ async function requestClaimCaptcha(config, label) {
       initializing = true;
       const current = ++epoch;
       clearTimeout(readyTimer);
+      clearTimeout(autoWaitTimer);
       try { instance?.destroy?.(); } catch { }
       instance = null;
+      autoPending = false;
       verifying = false;
       mount.replaceChildren();
       // Replacing the trigger also removes listeners belonging to an old SDK
@@ -127,6 +136,27 @@ async function requestClaimCaptcha(config, label) {
             readyTimer = setTimeout(() => {
               if (settled || current !== epoch) return;
               startButton.disabled = false;
+              // Use the official traceless API once in the real browser. A
+              // reload or failure leaves subsequent attempts to the user.
+              if (!autoStarted && typeof instance.startTracelessVerification === 'function') {
+                autoStarted = true;
+                autoPending = true;
+                verifying = true;
+                startButton.classList.add('loading');
+                startButton.setAttribute('aria-busy', 'true');
+                status.textContent = '正在自动验证…';
+                autoWaitTimer = setTimeout(() => {
+                  if (!settled && current === epoch && autoPending) initializationFailed(new Error('自动验证超时，请重新加载后手动验证。'));
+                }, claimCaptchaAutoTimeout);
+                try {
+                  Promise.resolve(instance.startTracelessVerification()).catch(() => {
+                    if (!settled && current === epoch && autoPending) initializationFailed(new Error('自动验证未完成，请重新加载后手动验证。'));
+                  });
+                } catch {
+                  if (!settled && current === epoch && autoPending) initializationFailed(new Error('自动验证未完成，请重新加载后手动验证。'));
+                }
+                return;
+              }
               status.textContent = '请点击“开始验证”，按官方组件提示完成验证。';
               // Interactive scenes can display their official challenge now.
               // Traceless scenes still require the SDK-bound button click.
