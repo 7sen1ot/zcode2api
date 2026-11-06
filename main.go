@@ -26,9 +26,17 @@ func main() {
 	root := flag.String("root", ".", "配置文件所在目录")
 	health := flag.String("healthcheck", "", "检查指定健康地址后退出")
 	showVersion := flag.Bool("version", false, "显示程序版本后退出")
+	applyUpdate := flag.String("apply-update", "", "应用已下载的网关更新")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("zcode2api " + version)
+		return
+	}
+	if *applyUpdate != "" {
+		if err := server.ApplyUpdate(*applyUpdate); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 	if *health != "" {
@@ -67,7 +75,7 @@ func main() {
 		data = filepath.Join(abs, "data")
 	}
 	web, _ := fs.Sub(assets, "src/web")
-	app, e := server.New(abs, data, web)
+	app, e := server.New(abs, data, web, version)
 	if e != nil {
 		fmt.Fprintln(os.Stderr, "启动失败:", e)
 		os.Exit(1)

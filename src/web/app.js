@@ -1301,6 +1301,7 @@ async function pageSettings(main) {
     <p id="settings-state" class="visually-hidden" role="status" aria-live="polite"></p>
     <form id="settings-form" class="settings-form" novalidate>
       <p id="settings-error" class="inline-notice error hidden" role="alert"></p>
+      ${settingsUpdateMarkup()}
       <details class="settings-section formcard" id="poll-panel"><summary class="settings-section-summary"><span><strong>额度轮询</strong></span></summary>
       <div class="settings-panel settings-section-body settings-section-content"><div class="settings-fields">
         <label class="f">轮询间隔（秒）<input id="s-poll" type="number" min="1" step="1" required value="${s.poll_interval_sec}"><small>两次余额检查之间的基础间隔</small></label>
@@ -1352,6 +1353,7 @@ async function pageSettings(main) {
         </div></div></div></div></details>
     </form>`;
   const form = $('#settings-form'), save = $('#s-save'), status = $('#settings-state');
+  void mountSettingsUpdate(main);
   const captchaTTLField = $('#s-captcha-ttl');
   const validateCaptchaTTL = () => {
     const value = Number(captchaTTLField.value);

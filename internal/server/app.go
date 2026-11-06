@@ -43,6 +43,7 @@ type App struct {
 	db                   *sql.DB
 	data, secret         string
 	root                 string
+	version              string
 	log                  *log.Logger
 	logfile              *os.File
 	web                  fs.FS
@@ -77,9 +78,10 @@ type App struct {
 	captcha              captchaManager
 	proxies              outboundProxyManager
 	mihomoInstallMu      sync.Mutex
+	updates              updateManager
 }
 
-func New(root, data string, web fs.FS) (*App, error) {
+func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	cfg, e := loadConfig(root, data)
 	if e != nil {
 		return nil, e
@@ -101,6 +103,7 @@ func New(root, data string, web fs.FS) (*App, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{db: d, data: data, secret: secret, log: log.New(out, "", log.LstdFlags), logfile: lf, web: web, cfg: cfg, ctx: ctx, cancel: cancel, states: map[string]*accountState{}, sticky: map[string]stickyEntry{}, sessions: map[string]int64{}, responses: map[string]responseEntry{}, clients: map[string]*http.Client{}, jars: map[string]*diskJar{}, claimLocks: map[string]bool{}, claimReschedule: make(chan struct{}, 1), flowLocks: map[string]bool{}, reauth: map[string]int64{}, pollDue: map[string]int64{}, polling: map[string]bool{}, origin: "https://zcode.z.ai"}
 	a.root = root
+	a.version = buildVersion
 	saved := obj(a.setting("config_overrides", M{}))
 	clean := M{}
 	for k, v := range saved {
@@ -260,7 +263,7 @@ func (a *App) health(w http.ResponseWriter, r *http.Request, scope string) bool 
 	}
 	switch r.URL.Path {
 	case "/healthz":
-		writeJSON(w, 200, M{"ok": true, "scope": scope, "inference_driver": "http", "backend": "go", "ts": nowMS()})
+		writeJSON(w, 200, M{"ok": true, "scope": scope, "version": a.version, "inference_driver": "http", "backend": "go", "ts": nowMS()})
 		return true
 	case "/readyz":
 		n := integer(a.row("SELECT COUNT(*) n FROM accounts WHERE status='active'")["n"])

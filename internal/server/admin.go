@@ -57,7 +57,7 @@ func (a *App) AdminHandler() http.Handler {
 			writeJSON(w, 401, M{"ok": false, "error": "未登录或会话过期"})
 			return
 		}
-		if r.URL.Path == "/api/claims/verification" {
+		if r.URL.Path == "/api/claims/verification" || strings.HasPrefix(r.URL.Path, "/api/settings/update") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		result, status, e := a.adminRoute(r, b)
@@ -105,7 +105,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		a.mu.Unlock()
 		return ok, 200, nil
 	case "GET /api/runtime-info":
-		return M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": cfg["app_version"], "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"]}, 200, nil
+		return M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": cfg["app_version"], "version": a.version, "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"]}, 200, nil
 	case "GET /api/accounts":
 		accounts := arr(a.summary()["accounts"])
 		a.addPlatformNames(ctx, accounts)
@@ -262,6 +262,18 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		e := a.exec("INSERT INTO groups(id,name,role,family_filter,policy,urgent_window_min,enabled,created_at) VALUES(?,?,?,?,?,?,?,?)", id, b["name"], fallback(b["role"], "primary"), nullable(b["family_filter"]), fallback(b["policy"], "balanced"), fallback(b["urgent_window_min"], 180), enabled, nowMS())
 		return M{"ok": e == nil, "id": id}, 200, e
+	case "GET /api/settings/update":
+		return a.updateStatus(), 200, nil
+	case "POST /api/settings/update/check":
+		if err := a.checkUpdate(ctx); err != nil {
+			return M{"ok": false, "error": err.Error()}, 502, nil
+		}
+		return a.updateStatus(), 200, nil
+	case "POST /api/settings/update/install":
+		if err := a.startUpdate(str(b["version"])); err != nil {
+			return M{"ok": false, "error": err.Error()}, 409, nil
+		}
+		return a.updateStatus(), 202, nil
 	case "GET /api/settings":
 		out := M{}
 		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "aliases", "retry", "web_port", "gateway_port"} {
