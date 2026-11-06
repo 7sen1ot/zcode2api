@@ -118,7 +118,7 @@ func (t *requestTiming) snapshot() M {
 }
 func (a *App) upstreamHeaders(token, session, id string) http.Header {
 	cfg := obj(a.config()["http"])
-	version := str(fallback(cfg["client_version"], "0.17.0"))
+	version := str(fallback(cfg["client_version"], defaultHTTPClientVersion))
 	osCategory := runtime.GOOS
 	if osCategory == "darwin" {
 		osCategory = "macos"
@@ -134,7 +134,7 @@ func (a *App) upstreamHeaders(token, session, id string) http.Header {
 		}
 	}
 	h := http.Header{}
-	for k, v := range map[string]string{"authorization": "Bearer " + token, "x-api-key": token, "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "ZCode/" + version + " ai-sdk/provider-utils/4.0.27 runtime/node.js/24", "x-zcode-app-version": version, "x-platform": platform(), "x-client-language": "zh-CN", "x-client-timezone": tz, "x-os-category": osCategory, "x-os-version": osVersion(), "x-release-channel": "production", "http-referer": "https://zcode.z.ai", "x-title": "Z Code@electron", "x-zcode-agent": "glm", "x-session-id": session, "x-request-id": id, "x-query-id": uuid(), "x-zcode-trace-id": uuid(), "x-zcode-session-type": "main", "x-zcode-query-source": "main_turn"} {
+	for k, v := range map[string]string{"authorization": "Bearer " + token, "x-api-key": token, "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "ZCode/" + version, "x-zcode-app-version": version, "x-platform": platform(), "x-client-language": "zh-CN", "x-client-timezone": tz, "x-os-category": osCategory, "x-os-version": osVersion(), "x-release-channel": "production", "http-referer": "https://zcode.z.ai", "x-title": "Z Code@electron", "x-zcode-agent": "glm", "x-session-id": session, "x-request-id": id, "x-query-id": uuidv7(), "x-zcode-trace-id": uuid(), "x-zcode-session-type": "main", "x-zcode-query-source": "main_turn"} {
 		h.Set(k, v)
 	}
 	return h
@@ -240,6 +240,11 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		session = hash(o.Affinity)[:32]
 	}
 	r.SessionID = session
+	upstreamBody := clone(o.Upstream)
+	metadata := obj(upstreamBody["metadata"])
+	metadata["user_id"] = js(M{"device_id": str(account["device_mid"]), "account_uuid": "", "session_id": session})
+	upstreamBody["metadata"] = metadata
+	requestID := uuid()
 	ctx, release, e := a.pinOutboundProxy(ctx, account)
 	if e != nil {
 		return nil, asProxyFailure(e)
@@ -280,7 +285,7 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		if f != nil {
 			return nil, f
 		}
-		req, err := http.NewRequestWithContext(ctx, "POST", a.origin+"/api/v1/zcode-plan/anthropic/v1/messages", strings.NewReader(js(o.Upstream)))
+		req, err := http.NewRequestWithContext(ctx, "POST", a.origin+"/api/v1/zcode-plan/anthropic/v1/messages", strings.NewReader(js(upstreamBody)))
 		if err != nil {
 			return nil, &Failure{Message: err.Error()}
 		}
@@ -288,7 +293,7 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		if failure := validateCaptchaRequestToken(verification, account, token); failure != nil {
 			return nil, failure
 		}
-		req.Header = a.upstreamHeaders(token, session, o.ID)
+		req.Header = a.upstreamHeaders(token, session, requestID)
 		for key, values := range verification.Headers {
 			req.Header[key] = values
 		}

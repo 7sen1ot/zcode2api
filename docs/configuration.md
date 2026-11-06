@@ -34,7 +34,7 @@ Docker 需在宿主机更新镜像并重建容器，其他部署方式使用页�
 | `http.idle_timeout_ms` | `120000` | 上游流空闲超时，毫秒 |
 | `http.total_timeout_ms` | `0` | 整轮推理超时；`0` 表示不设整轮时限 |
 | `app_version` | `3.17.2` | 额度、领卡等管理 API 的版本标识；上游活动可能按版本筛选 |
-| `http.client_version` | `0.17.0` | 推理 API 的版本标识 |
+| `http.client_version` | `3.17.2` | 推理 API 的版本标识，独立于 `app_version`；首次升级自动迁移旧默认值 `0.17.0`，保留其他自定义版本 |
 
 代理、订阅和验证码的字段、依赖与限制见[网络配置文档](network.md)。
 

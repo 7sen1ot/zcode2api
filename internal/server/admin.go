@@ -536,7 +536,7 @@ func validateSettings(b M) error {
 			}
 		}
 		if v, ok := h["client_version"]; ok && !versionPattern.MatchString(str(v)) {
-			return fmt.Errorf("推理 API 版本须为三段数字，例如 0.17.0")
+			return fmt.Errorf("推理 API 版本须为三段数字，例如 %s", defaultHTTPClientVersion)
 		}
 		if v, ok := h["captcha"]; ok {
 			if err := validateCaptchaOptions(v); err != nil {

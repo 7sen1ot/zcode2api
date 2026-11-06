@@ -18,7 +18,7 @@
     "refresh_interval_sec": 3600
   },
   "http": {
-    "client_version": "0.17.0",
+    "client_version": "3.17.2",
     "first_token_timeout_ms": 60000,
     "idle_timeout_ms": 120000,
     "total_timeout_ms": 0,

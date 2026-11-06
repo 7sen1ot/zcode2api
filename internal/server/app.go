@@ -105,6 +105,7 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	a.root = root
 	a.version = buildVersion
 	saved := obj(a.setting("config_overrides", M{}))
+	migrateHTTPVersion := !truth(a.setting("http_client_version_3_17_2_migrated", false))
 	clean := M{}
 	for k, v := range saved {
 		if _, exists := cfg[k]; !exists {
@@ -137,8 +138,24 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	if clean["inference_driver"] != nil {
 		clean["inference_driver"] = "http"
 	}
+	// Upgrade the old default once, preserving later edits and other custom versions.
+	if migrateHTTPVersion && str(obj(a.cfg["http"])["client_version"]) == "0.17.0" {
+		obj(a.cfg["http"])["client_version"] = defaultHTTPClientVersion
+		httpOverrides := obj(clean["http"])
+		httpOverrides["client_version"] = defaultHTTPClientVersion
+		clean["http"] = httpOverrides
+	}
 	if js(clean) != js(saved) {
-		_ = a.setSetting("config_overrides", clean)
+		if e = a.setSetting("config_overrides", clean); e != nil {
+			a.Close()
+			return nil, e
+		}
+	}
+	if migrateHTTPVersion {
+		if e = a.setSetting("http_client_version_3_17_2_migrated", true); e != nil {
+			a.Close()
+			return nil, e
+		}
 	}
 	a.ensureGroups()
 	a.background(a.runAccountQueue)

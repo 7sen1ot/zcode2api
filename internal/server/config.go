@@ -9,9 +9,11 @@ import (
 	"strings"
 )
 
+const defaultHTTPClientVersion = "3.17.2"
+
 func defaults() M {
 	return M{
-		"inference_driver": "http", "http": M{"client_version": "0.17.0", "first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": M{"mode": "off", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
+		"inference_driver": "http", "http": M{"client_version": defaultHTTPClientVersion, "first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": M{"mode": "off", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
 		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": 60, "poll_jitter_sec": 10, "poll_concurrency": 4, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "default_reasoning_level": "low", "app_version": "3.17.2",
 		"daily_claim_enabled": true,
 		"daily_claim_time":    defaultDailyClaimTime,

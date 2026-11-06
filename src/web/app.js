@@ -1344,7 +1344,7 @@ async function pageSettings(main) {
         <div class="settings-subsection"><div class="advanced-fields">
           <div class="settings-fields">
             <label class="f">额度与领卡 API 版本<input id="s-ver" value="${esc(s.app_version)}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 3.17.2" required><small>用于管理请求的版本标识，不改变设备指纹或上游验证规则。</small></label>
-            <label class="f">推理 API 版本<input id="s-http-version" value="${esc(s.http.client_version || '0.17.0')}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 0.17.0" required><small>对应 http.client_version，仅调整推理请求的版本标识。</small></label>
+            <label class="f">推理 API 版本<input id="s-http-version" value="${esc(s.http.client_version || '3.17.2')}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 3.17.2" required><small>对应 http.client_version，仅调整推理请求的版本标识。</small></label>
           </div>
           <div class="settings-code-grid">
             <div class="code-field"><label class="f" for="s-aliases">模型别名（JSON 对象）</label><textarea id="s-aliases" class="code-input" spellcheck="false" rows="6" aria-describedby="s-aliases-hint">${esc(JSON.stringify(s.aliases, null, 2))}</textarea><p id="s-aliases-hint" class="json-hint" data-for="s-aliases" aria-live="polite"></p></div>

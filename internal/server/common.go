@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	googleuuid "github.com/google/uuid"
 )
 
 type M = map[string]any
@@ -163,6 +165,7 @@ func uuid() string {
 	h := hex.EncodeToString(b)
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
+func uuidv7() string { return googleuuid.Must(googleuuid.NewV7()).String() }
 func contains(a []any, s string) bool {
 	for _, v := range a {
 		if str(v) == s {
