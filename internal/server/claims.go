@@ -192,10 +192,10 @@ func dailyFreePlans(plans []any) []any {
 	for _, v := range plans {
 		plan := obj(v)
 		id := strings.TrimSpace(str(plan["plan_id"]))
-		// The daily Global Build campaign changes its plan_id. Match its exact
-		// upstream name, and only use IDs supplied by an actionable delivery.
+		// Global Build and Weekend Build use changing plan IDs. Accept only
+		// these free-card campaigns from actionable upstream deliveries.
 		name := strings.Join(strings.Fields(strings.ToUpper(str(plan["name"]))), " ")
-		if id == "" || seen[id] || name != "ZCODE GLOBAL BUILD" {
+		if id == "" || seen[id] || (name != "ZCODE GLOBAL BUILD" && name != "ZCODE WEEKEND BUILD") {
 			continue
 		}
 		seen[id] = true

@@ -1,7 +1,6 @@
 function claimablePlans(preview) {
   const plans = new Map();
   for (const plan of preview.plans || []) {
-    if (String(plan.name || '').trim().replace(/\s+/g, ' ').toUpperCase() !== 'ZCODE GLOBAL BUILD') continue;
     if (plan.plan_id && !plans.has(plan.plan_id)) plans.set(plan.plan_id, plan);
   }
   return [...plans.values()];
