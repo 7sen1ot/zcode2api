@@ -8,7 +8,7 @@ function claimablePlans(preview) {
 
 let claimCaptchaScript, claimCaptchaSequence = 0;
 // The SDK requires more than two seconds before verification.
-const claimCaptchaAutoDelay = 2100;
+const claimCaptchaReadyDelay = 2100;
 function loadClaimCaptchaScript() {
   if (typeof window.initAliyunCaptcha === 'function') return Promise.resolve();
   if (!claimCaptchaScript) {
@@ -27,90 +27,136 @@ function loadClaimCaptchaScript() {
 }
 
 async function requestClaimCaptcha(config, label) {
-  window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
-  await loadClaimCaptchaScript();
   return new Promise((resolve, reject) => {
     const mountID = `claim-captcha-${++claimCaptchaSequence}`;
     const form = h(`<div><p class="dialog-intro">${esc(label)} · 验证后领取</p><div id="${mountID}"></div><button type="button" class="btn primary" id="${mountID}-start" disabled>开始验证</button><p class="quiet-message" data-captcha-status role="status">正在加载验证…</p><div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button></div></div>`);
-    const dialog = modal('领取验证', form, () => finish(null));
-    let instance, settled = false, autoTimer, verifying = false;
-    const status = $('[data-captcha-status]', form), startButton = $(`#${mountID}-start`, form);
+    const status = $('[data-captcha-status]', form), mount = $(`#${mountID}`, form);
+    let instance, dialog, observer, timeout, readyTimer, epoch = 0, settled = false, initializing = false, verifying = false;
+    let startButton = $(`#${mountID}-start`, form);
     const finish = (ticket, error) => {
       if (settled) return;
       settled = true;
+      epoch++;
       clearTimeout(timeout);
-      clearTimeout(autoTimer);
-      observer.disconnect();
+      clearTimeout(readyTimer);
+      observer?.disconnect();
       try { instance?.destroy?.(); } catch { }
-      dialog.close();
+      dialog?.close();
       error ? reject(error) : resolve(ticket);
     };
-    const observer = new MutationObserver(() => { if (!form.isConnected) finish(null); });
+    dialog = modal('领取验证', form, () => finish(null), { externalFocus: true });
+    observer = new MutationObserver(() => { if (!form.isConnected) finish(null); });
     observer.observe(document.body, { childList: true });
-    const timeout = setTimeout(() => finish(null, new Error('验证超时，请重新领取。')), 120000);
+    timeout = setTimeout(() => finish(null, new Error('验证超时，请重新领取。')), 120000);
     $('[data-cancel]', form).addEventListener('click', () => finish(null));
     const failed = value => {
       if (settled) return;
-      clearTimeout(autoTimer);
-      verifying = false;
       const result = value?.Result || value?.result || value || {};
       const code = String(result.VerifyCode || result.verifyCode || value?.verifyCode || '');
       status.textContent = code === 'F015'
         ? '请按组件提示完成验证。'
-        : '验证未通过，请重试或到 ZCode 客户端领取。';
+        : `验证未通过${/^[FT][0-9]{3}$/.test(code) ? `（${code}）` : ''}，请点击重新验证。`;
       status.classList.add('error');
+      verifying = false;
+      startButton.classList.remove('loading');
+      startButton.setAttribute('aria-busy', 'false');
+      startButton.disabled = false;
+      startButton.textContent = '重新验证';
     };
-    const autoStart = async () => {
-      if (settled || !instance || verifying) return;
-      verifying = true;
-      try {
-        status.classList.remove('error');
-        if (typeof instance.startTracelessVerification !== 'function') {
-          verifying = false;
-          status.textContent = '请点击“开始验证”并按组件提示完成验证。';
+    const initializationFailed = error => {
+      if (settled) return;
+      epoch++;
+      initializing = false;
+      clearTimeout(readyTimer);
+      try { instance?.destroy?.(); } catch { }
+      instance = null;
+      verifying = false;
+      startButton.classList.remove('loading');
+      startButton.setAttribute('aria-busy', 'false');
+      status.textContent = error?.message || '验证资源加载失败，请重新加载。';
+      status.classList.add('error');
+      startButton.textContent = '重新加载';
+      startButton.disabled = false;
+    };
+    async function initialize() {
+      if (settled || initializing) return;
+      initializing = true;
+      const current = ++epoch;
+      clearTimeout(readyTimer);
+      try { instance?.destroy?.(); } catch { }
+      instance = null;
+      verifying = false;
+      mount.replaceChildren();
+      // Replacing the trigger also removes listeners belonging to an old SDK
+      // instance, so retrying initialization cannot submit twice.
+      const button = startButton.cloneNode(false);
+      startButton.replaceWith(button);
+      startButton = button;
+      startButton.classList.remove('loading');
+      startButton.setAttribute('aria-busy', 'false');
+      startButton.textContent = '开始验证';
+      startButton.disabled = true;
+      status.classList.remove('error');
+      status.textContent = '正在加载验证…';
+      startButton.addEventListener('click', event => {
+        if (settled || current !== epoch || !instance) {
+          event.stopImmediatePropagation();
+          if (!settled && !instance) void initialize();
           return;
         }
-        status.textContent = '正在验证…';
-        await instance.startTracelessVerification();
-      } catch {
-        verifying = false;
-        if (!settled) status.textContent = '请按组件提示完成验证。';
-      }
-    };
-    const initializationFailed = () => finish(null, new Error('验证初始化失败，请重试。'));
-    try {
-      const initialization = window.initAliyunCaptcha({
-        SceneId: config.scene_id,
-        mode: 'popup', language: 'cn', element: `#${mountID}`, button: `#${mountID}-start`, delayBeforeSuccess: false,
-        getInstance(value) {
-          if (settled) { value?.destroy?.(); return; }
-          instance = value;
-          status.textContent = '准备验证…';
-          clearTimeout(autoTimer);
-          autoTimer = setTimeout(() => {
-            if (settled) return;
-            startButton.disabled = false;
-            void autoStart();
-          }, claimCaptchaAutoDelay);
-        },
-        success(param) {
-          if (settled) return;
-          if (typeof param !== 'string' || !param.trim()) { failed(); return; }
-          finish({ captcha_verify_param: param, captcha_region: config.region, verification_session: config.verification_session });
-        },
-        fail: failed,
-        onError: failed,
+        if (verifying) { event.stopImmediatePropagation(); return; }
+        verifying = true;
+        startButton.classList.add('loading');
+        startButton.setAttribute('aria-busy', 'true');
+        status.classList.remove('error');
+        status.textContent = '请按官方组件提示完成验证。';
       });
-      Promise.resolve(initialization).catch(initializationFailed);
-    } catch { initializationFailed(); }
+      try {
+        window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
+        await loadClaimCaptchaScript();
+        if (settled || current !== epoch) return;
+        const initialization = window.initAliyunCaptcha({
+          SceneId: config.scene_id,
+          mode: 'popup', language: 'cn', element: `#${mountID}`, button: `#${mountID}-start`, delayBeforeSuccess: false,
+          getInstance(value) {
+            if (settled || current !== epoch) { try { value?.destroy?.(); } catch {} return; }
+            if (!value) { initializationFailed(); return; }
+            if (instance) return;
+            instance = value;
+            status.textContent = '准备验证…';
+            readyTimer = setTimeout(() => {
+              if (settled || current !== epoch) return;
+              startButton.disabled = false;
+              status.textContent = '请点击“开始验证”，按官方组件提示完成验证。';
+              // Interactive scenes can display their official challenge now.
+              // Traceless scenes still require the SDK-bound button click.
+              if (typeof instance.startTracelessVerification !== 'function') {
+                try { instance.show?.(); } catch {}
+              }
+            }, claimCaptchaReadyDelay);
+          },
+          success(param) {
+            if (settled || current !== epoch) return;
+            if (typeof param !== 'string' || !param.trim()) { failed(); return; }
+            finish({ captcha_verify_param: param, captcha_region: config.region, verification_session: config.verification_session });
+          },
+          fail(value) { if (!settled && current === epoch) failed(value); },
+          onError() { if (!settled && current === epoch) initializationFailed(); },
+          onClose(reason) { if (!settled && current === epoch && reason === 'userDismiss') finish(null); },
+        });
+        Promise.resolve(initialization).catch(() => { if (!settled && current === epoch) initializationFailed(); });
+      } catch (error) { if (!settled && current === epoch) initializationFailed(error); }
+      finally { if (current === epoch) initializing = false; }
+    }
+    void initialize();
   });
 }
 
 async function submitClaim(job, label) {
-	const result = await api('/api/claims/claim', { method: 'POST', body: { ...job, auto_verify: true } });
-	if (result.ok || !result.requires_verification) return result;
+  const result = await api('/api/claims/claim', { method: 'POST', body: { ...job, auto_verify: true } });
+  if (result.ok || !result.requires_verification) return result;
   const config = await api('/api/claims/verification?account_id=' + encodeURIComponent(job.account_id) + '&plan_id=' + encodeURIComponent(job.plan_id));
-	if (!config.enabled) return result;
+  if (!config.enabled) throw new Error('上游要求验证，但当前未提供可用验证场景，请稍后重试。');
   try {
     const verification = await requestClaimCaptcha(config, label);
     if (verification === null) return null;

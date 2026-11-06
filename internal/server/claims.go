@@ -278,8 +278,11 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		return nil, e
 	}
 	var verificationFailure *Failure
+	initialStatus := res.Status
+	sdkAttempted := false
 	automatic := (trigger == "auto" || trigger == "scheduled" || truth(verification["auto_verify"])) && str(verification["captcha_verify_param"]) == ""
 	if automatic && claimResponseRequiresVerification(res) {
+		sdkAttempted = true
 		// A challenge on an unverified request does not reject the unused
 		// prefetched ticket. Keep it unless the cached scene is disabled.
 		a.prepareCaptchaChallenge(ctx)
@@ -332,13 +335,20 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		}
 	} else if requiresVerification {
 		failure.Kind, failure.Retryable = "risk", false
-		message = "请在领卡中心完成安全验证后领取（" + str(code) + "）"
+		message = "请完成浏览器安全验证后领取（" + str(code) + "）"
+		if sdkAttempted {
+			message = "服务器验证后仍需安全验证，请在浏览器完成（" + str(code) + "）"
+		}
 	} else if failure != nil {
 		code, message = failure.Code, conciseFailureMessage(failure)
 	}
 	end := secondsMS(p["ends_at"])
 	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger) VALUES(?,?,?,?,?,?,?,?,?)", id, nowMS(), plan, integer(ok), code, message, p["user_plan_id"], end, trigger)
-	a.audit("system", "claim", M{"account": id, "plan_id": plan, "ok": ok, "code": code}, "")
+	diagnostic := M{"sdk_attempted": sdkAttempted, "ticket_attached": str(headers["X-Aliyun-Captcha-Verify-Param"]) != "", "browser_ticket": str(verification["captcha_verify_param"]) != "", "initial_http_status": initialStatus, "http_status": res.Status, "requires_verification": requiresVerification}
+	if verificationFailure != nil {
+		diagnostic["sdk_error"] = verificationFailure.Code
+	}
+	a.audit("system", "claim", M{"account": id, "plan_id": plan, "ok": ok, "code": code, "verification": diagnostic}, "")
 	if ok {
 		a.acceptCaptchaVerification(ctx, &sdkVerification)
 		if b, e := a.fetchBalance(ctx, r); e == nil && truth(b["ok"]) {
@@ -349,7 +359,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if len(p) > 0 {
 		resultPlan = p
 	}
-	result = M{"ok": ok, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification}
+	result = M{"ok": ok, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification, "verification": diagnostic}
 	if failure != nil {
 		result["failure_kind"], result["retryable"] = failure.Kind, failure.Retryable
 		if failure.RetryAfter > 0 {

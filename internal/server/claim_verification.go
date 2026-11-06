@@ -20,6 +20,7 @@ func (a *App) claimVerification(ctx context.Context, id, plan string) (M, error)
 		return nil, err
 	}
 	defer release()
+	a.prepareCaptchaChallenge(ctx)
 	scene, failure := a.captchaScene(ctx, account)
 	if failure != nil {
 		return nil, failure
@@ -108,17 +109,25 @@ func captchaChallenge(failure *Failure) bool {
 }
 
 func claimResponseRequiresVerification(response apiResult) bool {
-	// A challenge is actionable only on a normal business response or 401/403.
-	// Proxy errors and upstream failures must never start account verification.
-	if response.Status != 200 && response.Status != 401 && response.Status != 403 {
+	// A structured business challenge can use HTTP 400 as well as 200/401/403.
+	// Redirects, proxy authentication, rate limits and server failures are not
+	// verification challenges, regardless of any text in their responses.
+	if response.Status < 200 || (response.Status >= 300 && response.Status < 400) || response.Status >= 500 || response.Status == 407 || response.Status == 429 {
 		return false
 	}
-	return captchaChallenge(apiResponseFailure(response))
+	failure := apiResponseFailure(response)
+	if failure.Kind == "rate_limit" || failure.Kind == "account_risk" || failure.Kind == "network" {
+		return false
+	}
+	return captchaChallenge(failure)
 }
 
 func claimBrowserFallback(failure *Failure) bool {
+	if failure == nil || failure.Kind == "rate_limit" || failure.Kind == "account_risk" || failure.Kind == "auth" || failure.Kind == "network" {
+		return false
+	}
 	switch failure.Code {
-	case "captcha_interaction_required", "captcha_scene_disabled", "captcha_jsdom_missing", "captcha_runtime_error", "captcha_timeout", "captcha_verification_failed", "captcha_duplicate_result", "captcha_invalid_result", "captcha_proxy_unsupported", "captcha_expired", "captcha_config_changed", "captcha_session_invalid":
+	case "captcha_interaction_required", "captcha_scene_disabled", "captcha_jsdom_missing", "captcha_runtime_error", "captcha_timeout", "captcha_verification_failed", "captcha_risk_blocked", "F001", "captcha_duplicate_result", "captcha_invalid_result", "captcha_proxy_unsupported", "captcha_expired", "captcha_config_changed", "captcha_session_invalid":
 		return true
 	}
 	return false

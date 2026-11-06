@@ -442,7 +442,7 @@ document.addEventListener('pointerdown', (e) => { if (openSelect && !openSelect.
 document.addEventListener('scroll', (e) => { if (openSelect && !openSelect.wrapper.contains(e.target)) openSelect.close(); }, true);
 window.addEventListener('resize', () => openSelect?.close());
 
-function modal(title, contentEl, onClose) {
+function modal(title, contentEl, onClose, options = {}) {
   const bg = h('<div class="modal-bg"></div>');
   const box = h(`<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" tabindex="-1"><div class="modal-header"><h2>${esc(title)}</h2><button type="button" class="modal-close" aria-label="关闭弹窗">×</button></div><div class="modal-body"></div></div>`);
   $('.modal-body', box).appendChild(contentEl);
@@ -465,6 +465,7 @@ function modal(title, contentEl, onClose) {
     setTimeout(finish, 350);
   };
   const onKey = (e) => {
+    if (options.externalFocus && !box.contains(e.target)) return;
     if (e.key === 'Escape' && !isImeComposing(e)) { e.preventDefault(); close(); return; }
     if (e.key !== 'Tab') return;
     const focusable = [...box.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])')].filter((el) => el.getClientRects().length);
@@ -636,8 +637,8 @@ async function pageDashboard(main) {
     <section class="dashboard-overview" aria-label="额度与账号池概览">
       <div class="quota-hero">
         <div class="dashboard-usage-heading"><span class="eyebrow">总使用额度 ${infoTip('网关调用的输入与输出 Token 合计，按所选时间范围统计。', '使用额度')}</span><select id="dashboard-hours" class="round" aria-label="用量统计时间范围"><option value="all">全部时间</option><option value="24">近 24 小时</option><option value="168">近 7 天</option><option value="720">近 30 天</option></select></div>
-        <div class="hero-number" title="${esc(fmtInt(usage.total_tokens))} Token">${fmtQuota(usage.total_tokens)}<small>Token</small></div>
-        <div class="dashboard-usage-breakdown"><div><span>输入</span><strong title="${esc(fmtInt(usage.input_tokens))} Token">${fmtQuota(usage.input_tokens)}</strong></div><div><span>输出</span><strong title="${esc(fmtInt(usage.output_tokens))} Token">${fmtQuota(usage.output_tokens)}</strong></div></div>
+        <div class="hero-number">${fmtInt(usage.total_tokens)}</div>
+        <div class="dashboard-usage-breakdown"><div><span>输入</span><strong>${fmtInt(usage.input_tokens)}</strong></div><div><span>输出</span><strong>${fmtInt(usage.output_tokens)}</strong></div></div>
       </div>
       <div class="pool-health">
         <div class="section-heading"><h2>账号池状态</h2><span class="badge ${d.summary.activeCount ? 'ok' : 'err'}">${d.summary.activeCount ? '有可用账号' : '无可用账号'}</span></div>
