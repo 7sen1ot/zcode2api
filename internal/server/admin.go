@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,10 +57,26 @@ func (a *App) AdminHandler() http.Handler {
 			writeJSON(w, 401, M{"ok": false, "error": "未登录或会话过期"})
 			return
 		}
+		if r.URL.Path == "/api/claims/verification" {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		result, status, e := a.adminRoute(r, b)
 		if e != nil {
 			a.log.Printf("admin %s: %v", r.URL.Path, e)
-			writeJSON(w, 502, M{"ok": false, "error": e.Error()})
+			status, body := http.StatusBadGateway, M{"ok": false, "error": e.Error()}
+			var failure *Failure
+			if errors.As(e, &failure) {
+				classify(failure)
+				body["error"], body["code"], body["failure_kind"] = conciseFailureMessage(failure), failure.Code, failure.Kind
+				if failure.Kind == "rate_limit" {
+					status = http.StatusTooManyRequests
+				}
+				if failure.RetryAfter > 0 {
+					body["retry_after_ms"] = failure.RetryAfter.Milliseconds()
+					w.Header().Set("Retry-After", fmt.Sprint(max(1, int(math.Ceil(failure.RetryAfter.Seconds())))))
+				}
+			}
+			writeJSON(w, status, body)
 			return
 		}
 		if r.Method != "GET" && status < 400 {
@@ -87,7 +105,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		a.mu.Unlock()
 		return ok, 200, nil
 	case "GET /api/runtime-info":
-		return M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": cfg["app_version"], "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"], "claim_auto_min": cfg["claim_auto_min"]}, 200, nil
+		return M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": cfg["app_version"], "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"]}, 200, nil
 	case "GET /api/accounts":
 		accounts := arr(a.summary()["accounts"])
 		a.addPlatformNames(ctx, accounts)
@@ -133,14 +151,48 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		return M{"ok": true, "acked": n}, 200, nil
 	case "GET /api/dashboard":
+		hours := int64(0)
+		if raw := r.URL.Query().Get("hours"); raw != "" && raw != "all" {
+			var err error
+			hours, err = logInteger(r, "hours", 0)
+			if err != nil || (hours != 24 && hours != 168 && hours != 720) {
+				return M{"ok": false, "error": "统计时间范围无效"}, 400, nil
+			}
+		}
+		until := nowMS()
+		days, err := logInteger(r, "days", 7)
+		if err != nil || (days != 7 && days != 30) {
+			return M{"ok": false, "error": "日用量统计范围无效"}, 400, nil
+		}
+		endTime := time.UnixMilli(until)
+		startDay := time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 0, 0, 0, 0, endTime.Location()).AddDate(0, 0, -int(days-1))
+		_, offset := endTime.Zone()
+		daily := a.rows("SELECT strftime('%Y-%m-%d',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", startDay.UnixMilli(), until)
+		if daily == nil {
+			daily = []any{}
+		}
+		dailyModels := a.rows("SELECT strftime('%Y-%m-%d',ts/1000,'unixepoch','localtime') bucket,COALESCE(NULLIF(model,''),'未知模型') model,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket,model ORDER BY bucket,model", startDay.UnixMilli(), until)
+		cacheTrend := a.rows("SELECT strftime('%Y-%m-%dT%H:00:00',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", until-86400000, until)
+		cache := a.row("SELECT COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) input_tokens FROM usage_log WHERE ts>=? AND ts<=?", until-86400000, until)
 		busy := a.row("SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN status='busy' THEN 1 ELSE 0 END),0) busy FROM usage_log WHERE ts>?", nowMS()-86400000)
+		usageQuery := "SELECT COALESCE(SUM(tokens_in),0) input_tokens,COALESCE(SUM(tokens_out),0) output_tokens,COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)),0) total_tokens FROM usage_log"
+		usage := a.row(usageQuery)
+		period := usage
+		if hours > 0 {
+			period = a.row(usageQuery+" WHERE ts>=? AND ts<=?", until-hours*3600000, until)
+		}
 		summary := a.summary()
 		a.addPlatformNames(ctx, arr(summary["accounts"]))
-		return M{"summary": summary, "groups": a.groups(), "busy_24h": busy, "default_chain": a.defaultChain()}, 200, nil
+		return M{"summary": summary, "groups": a.groups(), "busy_24h": busy, "cache_24h": cache, "cache_trend_24h": M{"hours": 24, "time_unit": "hour", "range_start": until - 86400000, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": cacheTrend}, "daily_usage": M{"hours": days * 24, "time_unit": "day", "range_start": startDay.UnixMilli(), "range_end": until, "utc_offset_minutes": offset / 60, "byHour": daily, "byModel": dailyModels}, "usage_total": usage, "usage_period": merge(period, M{"hours": hours}), "default_chain": a.defaultChain()}, 200, nil
 	case "GET /api/claims/discover":
-		return a.discover(ctx, r.URL.Query().Get("account_id")), 200, nil
+		return a.discover(ctx, r.URL.Query().Get("account_id"), r.URL.Query().Get("scope") == "daily"), 200, nil
 	case "GET /api/claims/verification":
-		return wrap(a.claimVerification(ctx, r.URL.Query().Get("account_id")))
+		return wrap(a.claimVerification(ctx, r.URL.Query().Get("account_id"), r.URL.Query().Get("plan_id")))
+	case "POST /api/claims/verification/cancel":
+		a.cancelClaimVerification(str(b["verification_session"]))
+		return ok, 200, nil
+	case "GET /api/claims/schedule":
+		return a.dailyClaimSchedule(), 200, nil
 	case "POST /api/claims/claim":
 		if !truth(b["account_id"]) || !truth(b["plan_id"]) {
 			return M{"ok": false, "error": "缺少 account_id / plan_id"}, 400, nil
@@ -212,7 +264,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return M{"ok": e == nil, "id": id}, 200, e
 	case "GET /api/settings":
 		out := M{}
-		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "claim_auto_enabled", "claim_auto_min", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "aliases", "retry", "web_port", "gateway_port"} {
+		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "aliases", "retry", "web_port", "gateway_port"} {
 			out[k] = cfg[k]
 		}
 		over := obj(a.setting("config_overrides", M{}))
@@ -270,7 +322,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			return M{"ok": false, "error": e.Error()}, 400, nil
 		}
 		allowed := map[string]bool{}
-		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency claim_auto_enabled claim_auto_min default_reasoning_level app_version aliases retry inference_driver http outbound_proxy") {
+		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time default_reasoning_level app_version aliases retry inference_driver http outbound_proxy") {
 			allowed[k] = true
 		}
 		a.configMu.Lock()
@@ -292,13 +344,21 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			return M{"ok": false, "error": e.Error()}, 400, nil
 		}
 		proxyChanged := js(next["outbound_proxy"]) != js(a.cfg["outbound_proxy"])
+		captchaChanged := proxyChanged || js(next["app_version"]) != js(a.cfg["app_version"]) || js(obj(next["http"])["captcha"]) != js(obj(a.cfg["http"])["captcha"])
+		timeChanged := js(next["daily_claim_time"]) != js(a.cfg["daily_claim_time"])
 		e := a.setSetting("config_overrides", over)
 		if e == nil {
 			a.cfg = next
 		}
 		a.configMu.Unlock()
+		if captchaChanged && e == nil {
+			a.resetCaptchaCache()
+		}
 		if proxyChanged && e == nil {
 			a.resetOutboundProxies()
+		}
+		if timeChanged && e == nil {
+			a.rescheduleClaims()
 		}
 		return ok, 200, e
 	case "GET /api/audit":
@@ -472,10 +532,18 @@ func validateSettings(b M) error {
 			}
 		}
 	}
-	for _, k := range []string{"poll_interval_sec", "poll_concurrency", "claim_auto_min"} {
+	for _, k := range []string{"poll_interval_sec", "poll_concurrency"} {
 		if v, ok := b[k]; ok && num(v) < 1 {
 			return fmt.Errorf("%s 必须大于等于 1", k)
 		}
+	}
+	if enabled, present := b["daily_claim_enabled"]; present {
+		if _, ok := enabled.(bool); !ok {
+			return fmt.Errorf("daily_claim_enabled 必须为布尔值")
+		}
+	}
+	if v, present := b["daily_claim_time"]; present && !validDailyClaimTime(str(v)) {
+		return fmt.Errorf("daily_claim_time 须为 00:00–23:59 的 HH:MM 时间")
 	}
 	if v, ok := b["default_reasoning_level"]; ok && !validLevel(str(v)) {
 		return fmt.Errorf("思考档位须为 low/high/max")

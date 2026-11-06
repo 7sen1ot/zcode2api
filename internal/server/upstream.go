@@ -155,11 +155,11 @@ func upstreamHTTPFailure(res *http.Response, body []byte) *Failure {
 	}
 	page := strings.ToLower(string(body))
 	switch {
-	case riskBlockMessage(page):
-		f.Kind, f.Code, f.Message = "risk", "upstream_risk_blocked", "上游风控拦截"
 	case (res.StatusCode == 403 || res.StatusCode == 405) && strings.Contains(page, "errors.aliyun.com/") && strings.Contains(page, "block_message"):
 		f.Kind, f.Code = "risk", "upstream_waf_blocked"
 		f.Message = "上游安全网关拦截"
+	case riskBlockMessage(page):
+		f.Kind, f.Code, f.Message = "account_risk", "upstream_risk_blocked", "账号风控拒绝"
 	case strings.TrimSpace(string(body)) == "":
 		f.Message += "：上游返回空响应体"
 	default:
@@ -245,16 +245,28 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		return nil, asProxyFailure(e)
 	}
 	defer release()
+	ctx, finish, gateFailure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, account, a.origin, true))
+	if gateFailure != nil {
+		return nil, gateFailure
+	}
+	defer func() { finish(failure) }()
 	defer func() {
 		if failure == nil || ctx.Err() != nil {
 			return
 		}
 		classify(failure)
-		if proxyExitFailure(failure) {
+		blocked := failure.Code == "upstream_waf_blocked"
+		if proxyExitFailure(failure) || blocked {
 			if _, pooled := ctx.Value(proxySelectionKey{}).(proxySelection); pooled {
-				failure.Retryable = a.markProxyFailure(ctx)
+				failure.Retryable = a.markProxyRoute(ctx, blocked)
 				failure.ProxyFailover = failure.Retryable
 			}
+		}
+	}()
+	var verification captchaVerification
+	defer func() {
+		if failure != nil {
+			a.rejectCaptchaVerification(verification)
 		}
 	}()
 	client, e := a.client(ctx)
@@ -263,7 +275,8 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	}
 	var res *http.Response
 	for verificationAttempt := 0; ; verificationAttempt++ {
-		verification, f := a.captchaHeaders(ctx, account, verificationAttempt > 0)
+		var f *Failure
+		verification, f = a.captchaHeaders(ctx, account, captchaPurposeInference, verificationAttempt > 0)
 		if f != nil {
 			return nil, f
 		}
@@ -271,29 +284,45 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		if err != nil {
 			return nil, &Failure{Message: err.Error()}
 		}
-		req.Header = a.upstreamHeaders(str(a.tokens(str(account["id"]))["zcode_jwt"]), session, o.ID)
-		for key, values := range verification {
+		token := str(a.tokens(str(account["id"]))["zcode_jwt"])
+		if failure := validateCaptchaRequestToken(verification, account, token); failure != nil {
+			return nil, failure
+		}
+		req.Header = a.upstreamHeaders(token, session, o.ID)
+		for key, values := range verification.Headers {
 			req.Header[key] = values
 		}
 		res, e = client.Do(req)
 		if e != nil {
-			code := "network"
-			if selectedProxy(ctx) != "" {
-				code = "proxy_connection_failed"
-			}
-			return nil, &Failure{Kind: "network", Code: code, Message: e.Error(), Retryable: true}
+			return nil, transportFailure(ctx, e)
 		}
 		resetIdle()
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
 			break
 		}
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		b, readError := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
+		if readError != nil {
+			if res.StatusCode == http.StatusTooManyRequests {
+				return nil, &Failure{Kind: "rate_limit", Code: "rate_limit_error", Status: res.StatusCode, Message: "请求频率受限", Retryable: true, RetryAfter: retryAfter(res.Header.Get("Retry-After"), time.Now())}
+			}
+			return nil, transportFailure(ctx, readError)
+		}
 		failure := upstreamHTTPFailure(res, b)
 		captchaMode := str(fallback(obj(obj(a.config()["http"])["captcha"])["mode"], "off"))
-		if verificationAttempt == 0 && captchaMode != "off" && captchaExpired(failure) {
-			a.invalidateCaptchaScene()
-			continue
+		if captchaExpired(failure) {
+			failure.Kind, failure.Retryable = "risk", false
+			if verification.Headers.Get("X-Aliyun-Captcha-Verify-Param") != "" {
+				a.rejectCaptchaVerification(verification)
+				if failure.Code == "F014" || failure.Code == "F020" {
+					a.invalidateCaptchaScene(a.captchaSceneKey(ctx))
+				}
+			} else {
+				a.prepareCaptchaChallenge(ctx)
+			}
+			if verificationAttempt == 0 && captchaMode != "off" {
+				continue
+			}
 		}
 		return nil, failure
 	}
@@ -340,6 +369,9 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		if typ == "message_start" {
 			r.Native = clone(obj(event["message"]))
 			usage = clone(obj(r.Native["usage"]))
+			if len(r.Native) > 0 {
+				a.acceptCaptchaVerification(ctx, &verification)
+			}
 		}
 		if typ == "content_block_start" {
 			if open[idx] {

@@ -11,10 +11,12 @@ import (
 
 func defaults() M {
 	return M{
-		"inference_driver": "http", "http": M{"client_version": "0.17.0", "first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": M{"mode": "off", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000}},
-		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": 60, "poll_jitter_sec": 10, "poll_concurrency": 4, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "claim_auto_min": 240, "claim_auto_enabled": true, "default_reasoning_level": "low", "app_version": "3.17.2",
-		"retry":   M{"rate_limit_retry_interval_ms": 1000, "max_attempts": 10, "base_delay_ms": 2000, "backoff_factor": 2, "max_delay_ms": 60000, "jitter": true, "busy_wait_sec": 60, "total_budget_ms": 120000, "min_request_window_sec": 60},
-		"aliases": M{"glm-flash": "GLM-5.3-Flash", "glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3"}, "bind_public": false, "proxy_url": "", "outbound_proxy": proxyDefaults(), "trust_proxy": false, "admin_bind_public": false,
+		"inference_driver": "http", "http": M{"client_version": "0.17.0", "first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": M{"mode": "off", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
+		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": 60, "poll_jitter_sec": 10, "poll_concurrency": 4, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "default_reasoning_level": "low", "app_version": "3.17.2",
+		"daily_claim_enabled": true,
+		"daily_claim_time":    defaultDailyClaimTime,
+		"retry":               M{"rate_limit_retry_interval_ms": 1000, "max_attempts": 10, "base_delay_ms": 2000, "backoff_factor": 2, "max_delay_ms": 60000, "jitter": true, "busy_wait_sec": 60, "total_budget_ms": 120000, "min_request_window_sec": 60},
+		"aliases":             M{"glm-flash": "GLM-5.3-Flash", "glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3"}, "bind_public": false, "proxy_url": "", "outbound_proxy": proxyDefaults(), "trust_proxy": false, "admin_bind_public": false,
 	}
 }
 func deepMerge(base, over M, unknown bool) M {

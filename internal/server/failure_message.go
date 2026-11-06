@@ -7,14 +7,33 @@ func conciseFailureMessage(f *Failure) string {
 	copy := *f
 	classify(&copy)
 	switch copy.Code {
+	case "3007":
+		if copy.Kind == "rate_limit" {
+			return "请求频率受限（3007）"
+		}
+		if copy.Kind == "risk" || explicitCaptchaChallenge(copy.Message) {
+			return "需要 SDK 验证（3007）"
+		}
 	case "upstream_waf_blocked":
 		return "上游安全网关拦截"
 	case "coding_plan_security_verification_required":
 		return "需要 SDK 验证"
 	case "CAPTCHA_VERIFY_FAILED":
 		return "SDK 验证未通过"
-	case "captcha_expired", "captcha_invalid", "F008", "F018", "F019":
+	case "captcha_expired", "captcha_invalid", "F019":
 		return "SDK 票据失效"
+	case "F008", "F018":
+		return "SDK 票据重复提交"
+	case "F014":
+		return "SDK 初始化记录缺失或失效"
+	case "F020":
+		return "SDK 票据与场景或用户不匹配"
+	case "captcha_risk_blocked", "F001":
+		return "SDK 风控拒绝（F001）"
+	case "captcha_ip_rate_limited", "F010":
+		return "SDK 出口访问频率受限（F010）"
+	case "captcha_device_rate_limited", "F011":
+		return "SDK 设备访问频率受限（F011）"
 	case "captcha_duplicate_result":
 		return "SDK 票据重复"
 	case "captcha_interaction_required":
@@ -25,10 +44,21 @@ func conciseFailureMessage(f *Failure) string {
 		return "SDK 验证超时"
 	case "captcha_network_error":
 		return "SDK 连接失败"
+	case "captcha_resource_http_error":
+		if copy.Status == 429 {
+			return "SDK 资源请求受限"
+		}
+		return "SDK 资源请求失败"
 	case "captcha_config_unavailable":
 		return "SDK 配置获取失败"
+	case "captcha_config_risk_blocked":
+		return "SDK 配置请求被风控拦截"
 	case "captcha_config_invalid":
 		return "SDK 配置无效"
+	case "captcha_config_changed":
+		return "SDK 配置已更新，请重试"
+	case "captcha_session_invalid":
+		return "领取验证会话失效或不匹配，请重新验证"
 	case "captcha_jsdom_missing":
 		return "SDK 缺少 jsdom"
 	case "captcha_runtime_error":
@@ -50,7 +80,9 @@ func conciseFailureMessage(f *Failure) string {
 	case "proxy_connection_failed":
 		return "代理连接失败"
 	case "proxy_pool_exhausted":
-		return "代理节点全部不可用"
+		return "代理池暂不可用"
+	case "proxy_upstream_blocked":
+		return "代理出口暂被上游拦截"
 	case "proxy_config_invalid":
 		return "代理配置无效"
 	case "proxy_unavailable":
@@ -121,6 +153,8 @@ func conciseFailureMessage(f *Failure) string {
 		return "上游请求超时"
 	}
 	switch copy.Kind {
+	case "account_risk":
+		return "账号风控拒绝"
 	case "risk":
 		return "上游风控拦截"
 	case "auth":

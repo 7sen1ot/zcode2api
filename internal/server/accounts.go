@@ -126,8 +126,12 @@ func (a *App) fetchBalance(ctx context.Context, r M) (M, error) {
 	if truth(data["server_time"]) {
 		server = integer(data["server_time"]) * 1000
 	}
-	out := M{"ok": res.OK && codeIs(res.JSON["code"], 0), "authFailed": res.Status == 401, "httpStatus": res.Status, "plans": []any{}, "balances": []any{}, "capabilities": []any{}, "serverNowMs": server, "card": nil, "raw": res.JSON}
+	out := M{"ok": res.OK && codeIs(res.JSON["code"], 0), "authFailed": false, "httpStatus": res.Status, "plans": []any{}, "balances": []any{}, "capabilities": []any{}, "serverNowMs": server, "card": nil, "raw": res.JSON}
 	if !truth(out["ok"]) {
+		failure := apiResponseFailure(res)
+		out["authFailed"] = failure.Kind == "auth"
+		out["failure_kind"], out["error_code"] = failure.Kind, failure.Code
+		out["retry_after_ms"] = failure.RetryAfter.Milliseconds()
 		return out, nil
 	}
 	plans := arr(data["plans"])

@@ -10,9 +10,7 @@ func profileName(p M) any {
 	for _, m := range []M{p, obj(p["customer"])} {
 		for _, k := range []string{"username", "userName", "customerName", "nickName"} {
 			if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
-				s = strings.TrimSpace(s)
-				r := []rune(s)
-				return string(r[:min(120, len(r))])
+				return s
 			}
 		}
 	}
@@ -21,7 +19,7 @@ func profileName(p M) any {
 func (a *App) platformName(ctx context.Context, r M) any {
 	id := str(r["id"])
 	tokens := a.tokens(id)
-	for _, k := range []string{"business_token", "web_jwt"} {
+	for _, k := range []string{"business_token", "web_jwt", "zcode_jwt"} {
 		if name := profileName(jwtPayload(str(tokens[k]))); name != nil {
 			return name
 		}

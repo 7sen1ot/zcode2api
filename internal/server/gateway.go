@@ -176,7 +176,7 @@ func countTokens(b M) int {
 }
 func (a *App) sendFailure(w http.ResponseWriter, f *Failure, protocol string) {
 	status, shape := errorShape(f, protocol)
-	if status == 429 || status == 503 || status == 529 {
+	if f.RetryAfter > 0 || status == 429 || status == 503 || status == 529 {
 		d := f.RetryAfter
 		if d <= 0 {
 			d = busyWait(a.retryParams())

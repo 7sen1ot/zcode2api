@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 )
@@ -133,7 +133,7 @@ func (a *App) incentives(ctx context.Context, r M) (M, error) {
 	}
 	return M{"active": str(obj(d["gameplay"])["status"]) == "online", "ends_at": obj(d["gameplay"])["ends_at"], "tasks": tasks, "rewards": rewards}, nil
 }
-func (a *App) discover(ctx context.Context, id string) M {
+func (a *App) discover(ctx context.Context, id string, dailyOnly bool) M {
 	accounts := a.rows("SELECT * FROM accounts ORDER BY created_at")
 	if id != "" {
 		accounts = []any{}
@@ -142,31 +142,70 @@ func (a *App) discover(ctx context.Context, id string) M {
 		}
 	}
 	previews := []any{}
+	checked := 0
 	for _, v := range accounts {
+		if ctx.Err() != nil {
+			break
+		}
 		r := obj(v)
 		if !truth(a.tokens(str(r["id"]))["zcode_jwt"]) {
 			continue
 		}
+		checked++
 		m := M{"account_id": r["id"], "label": r["label"], "plans": []any{}}
-		if p, e := a.preview(ctx, r); e == nil {
-			m["plans"] = arr(p["plans"])
+		load := a.preview
+		if dailyOnly {
+			// Current ZCode clients discover the daily card through marketing/touch.
+			// The legacy billing preview and referral rewards are unrelated here.
+			load = a.marketingPreview
+		}
+		if p, e := load(ctx, r); e == nil {
+			plans := arr(p["plans"])
+			if dailyOnly {
+				plans = dailyFreePlans(plans)
+			}
+			m["plans"] = plans
 			if p["warning"] != nil {
 				m["warning"] = p["warning"]
 			}
 		} else {
 			m["error"] = e.Error()
 		}
-		if reward, e := a.incentives(ctx, r); e == nil {
-			m["incentives"] = reward
-		} else {
-			m["incentives_error"] = e.Error()
+		if !dailyOnly {
+			if reward, e := a.incentives(ctx, r); e == nil {
+				m["incentives"] = reward
+			} else {
+				m["incentives_error"] = e.Error()
+			}
+		}
+		if dailyOnly && len(arr(m["plans"])) == 0 && m["error"] == nil {
+			continue
 		}
 		previews = append(previews, m)
 	}
-	return M{"previews": previews}
+	return M{"previews": previews, "checked": checked}
 }
-func (a *App) claim(ctx context.Context, id, plan, trigger string, verification M) (M, error) {
-	lock := id + ":" + plan
+
+func dailyFreePlans(plans []any) []any {
+	daily := []any{}
+	seen := map[string]bool{}
+	for _, v := range plans {
+		plan := obj(v)
+		id := strings.TrimSpace(str(plan["plan_id"]))
+		// The daily Global Build campaign changes its plan_id. Match its exact
+		// upstream name, and only use IDs supplied by an actionable delivery.
+		name := strings.Join(strings.Fields(strings.ToUpper(str(plan["name"]))), " ")
+		if id == "" || seen[id] || name != "ZCODE GLOBAL BUILD" {
+			continue
+		}
+		seen[id] = true
+		daily = append(daily, plan)
+	}
+	return daily
+}
+func (a *App) claim(ctx context.Context, id, plan, trigger string, verification M) (result M, err error) {
+	// Serialize all cards for one account, including manual and batch requests.
+	lock := id
 	a.mu.Lock()
 	if a.claimLocks[lock] {
 		a.mu.Unlock()
@@ -186,11 +225,46 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if e := validateClaimVerification(verification); e != nil {
 		return nil, e
 	}
-	ctx, release, e := a.pinOutboundProxy(ctx, r)
+	requestContext := ctx
+	defer func() {
+		if err == nil {
+			return
+		}
+		failure := transportFailure(context.WithoutCancel(ctx), err)
+		if failure.Code == "network" {
+			failure.Code, failure.Message = "claim_request_failed", "领取请求失败，请刷新领取状态后重试"
+		}
+		var known *Failure
+		if errors.As(err, &known) {
+			failure = classify(known)
+		}
+		if requestContext.Err() != nil {
+			failure = &Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
+		}
+		_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger) VALUES(?,?,?,?,?,?,?)", id, nowMS(), plan, 0, failure.Code, conciseFailureMessage(failure), trigger)
+		err = failure
+	}()
+	ctx, release, e := a.claimVerificationContext(ctx, r, plan, token, verification)
 	if e != nil {
 		return nil, e
 	}
 	defer release()
+	ctx, finish, gateFailure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, r, a.origin, true))
+	if gateFailure != nil {
+		return nil, gateFailure
+	}
+	var failure *Failure
+	var sdkVerification captchaVerification
+	defer func() {
+		if err != nil || failure != nil {
+			a.rejectCaptchaVerification(sdkVerification)
+		}
+		if err != nil {
+			finish(upstreamRequestFailure(ctx, err))
+		} else {
+			finish(failure)
+		}
+	}()
 	headers := M{"X-Device-Mid": r["device_mid"]}
 	if param := str(verification["captcha_verify_param"]); param != "" {
 		if failure := a.reserveCaptchaTicket(param); failure != nil {
@@ -204,13 +278,22 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		return nil, e
 	}
 	var verificationFailure *Failure
-	if trigger == "auto" && claimRequiresVerification(res.JSON["code"]) {
-		a.invalidateCaptchaScene()
-		var ticketHeaders http.Header
-		ticketHeaders, verificationFailure = a.captchaHeaders(ctx, r, true)
+	automatic := (trigger == "auto" || trigger == "scheduled" || truth(verification["auto_verify"])) && str(verification["captcha_verify_param"]) == ""
+	if automatic && claimResponseRequiresVerification(res) {
+		// A challenge on an unverified request does not reject the unused
+		// prefetched ticket. Keep it unless the cached scene is disabled.
+		a.prepareCaptchaChallenge(ctx)
+		sdkVerification, verificationFailure = a.captchaHeaders(ctx, r, captchaPurposeClaim, true)
+		if verificationFailure != nil && proxyExitFailure(verificationFailure) {
+			a.markProxyFailure(ctx)
+		}
 		if verificationFailure == nil {
-			for key := range ticketHeaders {
-				headers[key] = ticketHeaders.Get(key)
+			token = str(a.tokens(id)["zcode_jwt"])
+			if failure := validateCaptchaRequestToken(sdkVerification, r, token); failure != nil {
+				return nil, failure
+			}
+			for key := range sdkVerification.Headers {
+				headers[key] = sdkVerification.Headers.Get(key)
 			}
 			res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
 			if e != nil {
@@ -218,26 +301,46 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			}
 		}
 	}
+	if str(headers["X-Aliyun-Captcha-Verify-Param"]) != "" && claimResponseRequiresVerification(res) {
+		a.rejectCaptchaVerification(sdkVerification)
+		if failure := apiResponseFailure(res); failure.Code == "F014" || failure.Code == "F020" {
+			a.invalidateCaptchaScene(a.captchaSceneKey(ctx))
+		}
+	}
 	data := obj(res.JSON["data"])
 	p := obj(data["plan"])
 	ok := res.Status == 200 && codeIs(res.JSON["code"], 0) && len(p) > 0
 	var code any
-	if res.JSON["code"] != nil {
-		code = str(res.JSON["code"])
+	if raw := first(obj(res.JSON["error"])["code"], res.JSON["code"]); raw != nil {
+		code = str(raw)
 	}
 	message := first(data["message"], res.JSON["msg"], "")
-	requiresVerification := !ok && claimRequiresVerification(code)
+	if !ok {
+		failure = apiResponseFailure(res)
+		if res.OK && codeIs(res.JSON["code"], 0) && len(p) == 0 {
+			failure = &Failure{Kind: "server", Code: "claim_invalid_response", Message: "领取响应缺少卡片信息，请刷新领取状态"}
+		}
+	}
+	requiresVerification := !ok && claimResponseRequiresVerification(res)
 	if verificationFailure != nil {
+		failure = verificationFailure
 		code = verificationFailure.Code
-		message = conciseFailureMessage(verificationFailure) + "，请在领卡中心领取"
-		requiresVerification = true
+		message = conciseFailureMessage(verificationFailure)
+		requiresVerification = claimBrowserFallback(verificationFailure)
+		if requiresVerification {
+			message = str(message) + "，请完成浏览器验证后领取"
+		}
 	} else if requiresVerification {
+		failure.Kind, failure.Retryable = "risk", false
 		message = "请在领卡中心完成安全验证后领取（" + str(code) + "）"
+	} else if failure != nil {
+		code, message = failure.Code, conciseFailureMessage(failure)
 	}
 	end := secondsMS(p["ends_at"])
 	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger) VALUES(?,?,?,?,?,?,?,?,?)", id, nowMS(), plan, integer(ok), code, message, p["user_plan_id"], end, trigger)
 	a.audit("system", "claim", M{"account": id, "plan_id": plan, "ok": ok, "code": code}, "")
 	if ok {
+		a.acceptCaptchaVerification(ctx, &sdkVerification)
 		if b, e := a.fetchBalance(ctx, r); e == nil && truth(b["ok"]) {
 			a.applyBalance(r, b, true)
 		}
@@ -246,9 +349,20 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if len(p) > 0 {
 		resultPlan = p
 	}
-	return M{"ok": ok, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification}, nil
+	result = M{"ok": ok, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification}
+	if failure != nil {
+		result["failure_kind"], result["retryable"] = failure.Kind, failure.Retryable
+		if failure.RetryAfter > 0 {
+			result["retry_after_ms"] = failure.RetryAfter.Milliseconds()
+		}
+	}
+	return result, nil
 }
 func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
+	return a.autoClaimScope(ctx, dry, "")
+}
+
+func (a *App) autoClaimScope(ctx context.Context, dry bool, scheduledDay string) (result M, err error) {
 	lock := "__auto"
 	a.mu.Lock()
 	if a.claimLocks[lock] {
@@ -258,6 +372,26 @@ func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
 	a.claimLocks[lock] = true
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.claimLocks, lock); a.mu.Unlock() }()
+	if scheduledDay != "" {
+		last := obj(a.setting("daily_claim_last_run", M{}))
+		if str(last["day"]) >= scheduledDay {
+			return M{"skipped": true}, nil
+		}
+		state := M{"day": scheduledDay, "started_at": nowMS(), "status": "running"}
+		// Persist before contacting the upstream: a restart must not replay claims.
+		if err := a.setSetting("daily_claim_last_run", state); err != nil {
+			return nil, err
+		}
+		defer func() {
+			state["status"], state["finished_at"] = "completed", nowMS()
+			if ctx.Err() != nil {
+				state["status"] = "interrupted"
+			}
+			state["checked"], state["claimed"] = result["checked"], result["claimed"]
+			state["results"] = arr(result["results"])
+			_ = a.setSetting("daily_claim_last_run", state)
+		}()
+	}
 	checked, claimed := 0, 0
 	results := []any{}
 	for _, v := range a.rows("SELECT * FROM accounts WHERE status IN ('active','unverified','cooldown') ORDER BY created_at") {
@@ -270,7 +404,11 @@ func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
 			continue
 		}
 		checked++
-		p, e := a.preview(ctx, r)
+		load := a.preview
+		if scheduledDay != "" {
+			load = a.marketingPreview
+		}
+		p, e := load(ctx, r)
 		if e != nil {
 			results = append(results, M{"account": id, "error": e.Error()})
 			continue
@@ -278,21 +416,32 @@ func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
 		if p["warning"] != nil {
 			results = append(results, M{"account": id, "warning": p["warning"]})
 		}
-		for _, v := range arr(p["plans"]) {
+		plans := arr(p["plans"])
+		if scheduledDay != "" {
+			plans = dailyFreePlans(plans)
+		}
+		for _, v := range plans {
 			plan := str(obj(v)["plan_id"])
 			if dry {
 				results = append(results, M{"account": id, "plan_id": plan, "would_claim": true})
 				continue
 			}
-			res, e := a.claim(ctx, id, plan, "auto", nil)
+			trigger := "auto"
+			if scheduledDay != "" {
+				trigger = "scheduled"
+			}
+			res, e := a.claim(ctx, id, plan, trigger, nil)
 			if e != nil {
-				results = append(results, M{"account": id, "error": e.Error()})
-				continue
+				results = append(results, M{"account": id, "plan_id": plan, "error": e.Error()})
+				break
 			}
 			if truth(res["ok"]) {
 				claimed++
 			}
 			results = append(results, merge(res, M{"account": id, "plan_id": plan}))
+			if !truth(res["ok"]) && (truth(res["requires_verification"]) || res["failure_kind"] == "account_risk" || res["failure_kind"] == "auth" || res["failure_kind"] == "network" || res["failure_kind"] == "rate_limit") {
+				break
+			}
 		}
 	}
 	return M{"checked": checked, "claimed": claimed, "results": results}, nil

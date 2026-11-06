@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -13,10 +14,10 @@ func (a *App) startWorkers() {
 		a.scheduleNext(str(obj(v)["id"]), time.Duration(i)*300*time.Millisecond)
 	}
 	a.restoreOAuth()
+	a.startDailyClaims()
 	a.background(func() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
-		lastClaim := time.Now()
 		for {
 			select {
 			case <-a.ctx.Done():
@@ -34,14 +35,9 @@ func (a *App) startWorkers() {
 						active++
 					}
 				}
-				auto := truth(cfg["claim_auto_enabled"]) && time.Since(lastClaim) >= max(time.Minute, time.Duration(num(cfg["claim_auto_min"])*float64(time.Minute)))
 				a.mu.Unlock()
 				for _, id := range ids {
 					a.background(func() { defer func() { a.mu.Lock(); delete(a.polling, id); a.mu.Unlock() }(); a.pollAccount(a.ctx, id) })
-				}
-				if auto {
-					lastClaim = time.Now()
-					a.background(func() { _, _ = a.autoClaim(a.ctx, false) })
 				}
 			}
 		}
@@ -70,6 +66,12 @@ func (a *App) pollAccount(ctx context.Context, id string) {
 	}
 	b, e := a.fetchBalance(ctx, r)
 	if e != nil {
+		var failure *Failure
+		if errors.As(e, &failure) && failure.RetryAfter > 0 && (failure.Kind == "rate_limit" || failure.Kind == "account_risk") {
+			delay = max(delay, failure.RetryAfter)
+			_ = a.updateAccount(id, M{"last_error": conciseFailureMessage(failure)})
+			return
+		}
 		_ = a.updateAccount(id, M{"fail_streak": integer(r["fail_streak"]) + 1, "last_error": "balance 异常: " + e.Error()})
 		delay *= 3
 		return
@@ -81,6 +83,11 @@ func (a *App) pollAccount(ctx context.Context, id string) {
 	if truth(b["authFailed"]) {
 		_ = a.updateAccount(id, M{"status": "needs_relogin", "fail_streak": integer(r["fail_streak"]) + 1, "last_error": "balance 401"})
 		_, _ = a.startOAuth(ctx, str(r["family"]), id, false)
+		return
+	}
+	if b["failure_kind"] == "rate_limit" || b["failure_kind"] == "account_risk" {
+		delay = max(delay, ms(b["retry_after_ms"]))
+		_ = a.updateAccount(id, M{"last_error": conciseFailureMessage(&Failure{Kind: str(b["failure_kind"]), Code: str(b["error_code"])})})
 		return
 	}
 	streak := integer(r["fail_streak"]) + 1

@@ -7,19 +7,35 @@ import (
 	"time"
 )
 
-func (a *App) claimVerification(ctx context.Context, id string) (M, error) {
+func (a *App) claimVerification(ctx context.Context, id, plan string) (M, error) {
+	if strings.TrimSpace(plan) == "" {
+		return nil, invalid("缺少 plan_id")
+	}
 	account := a.account(id)
 	if account == nil {
 		return nil, fmt.Errorf("账号不存在")
 	}
-	scene, failure := a.fetchCaptchaScene(ctx, account)
+	ctx, release, err := a.pinOutboundProxy(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	scene, failure := a.captchaScene(ctx, account)
 	if failure != nil {
 		return nil, failure
 	}
 	if !truth(scene["enabled"]) {
 		return M{"enabled": false}, nil
 	}
-	return M{"enabled": true, "scene_id": scene["sceneId"], "region": scene["region"], "prefix": scene["prefix"]}, nil
+	scope, failure := a.captchaScope(ctx, account, captchaPurposeClaim, scene)
+	if failure != nil {
+		return nil, failure
+	}
+	token, failure := a.newClaimCaptchaSession(ctx, scope, plan, str(scene["region"]))
+	if failure != nil {
+		return nil, failure
+	}
+	return M{"enabled": true, "scene_id": scene["sceneId"], "region": scene["region"], "prefix": scene["prefix"], "verification_session": token}, nil
 }
 
 func validCaptchaParam(param string) bool {
@@ -35,14 +51,23 @@ func validCaptchaParam(param string) bool {
 }
 
 func validateClaimVerification(value M) error {
+	if automatic, present := value["auto_verify"]; present {
+		if _, ok := automatic.(bool); !ok {
+			return fmt.Errorf("auto_verify 必须为布尔值")
+		}
+	}
 	param, supplied := value["captcha_verify_param"]
 	region, hasRegion := value["captcha_region"]
-	if !supplied && !hasRegion {
+	session, hasSession := value["verification_session"]
+	if !supplied && !hasRegion && !hasSession {
 		return nil
 	}
 	ticket, ok := param.(string)
 	if !ok || !validCaptchaParam(ticket) || (region != "cn" && region != "sgp") {
 		return fmt.Errorf("领取验证票据或地域无效，请重新完成安全验证")
+	}
+	if token, ok := session.(string); !ok || !validClaimCaptchaSessionID(token) {
+		return fmt.Errorf("领取验证票据缺少有效会话，请重新完成安全验证")
 	}
 	return nil
 }
@@ -69,9 +94,31 @@ func (a *App) reserveCaptchaTicket(param string) *Failure {
 	return nil
 }
 
-func claimRequiresVerification(code any) bool {
-	switch str(code) {
-	case "3007", "CAPTCHA_VERIFY_FAILED", "coding_plan_security_verification_required", "captcha_expired", "captcha_invalid", "F008", "F018", "F019":
+func captchaChallenge(failure *Failure) bool {
+	if failure == nil {
+		return false
+	}
+	switch failure.Code {
+	case "3007":
+		return failure.Kind == "risk" || explicitCaptchaChallenge(failure.Message)
+	case "CAPTCHA_VERIFY_FAILED", "coding_plan_security_verification_required", "captcha_expired", "captcha_invalid", "F008", "F014", "F018", "F019", "F020":
+		return true
+	}
+	return false
+}
+
+func claimResponseRequiresVerification(response apiResult) bool {
+	// A challenge is actionable only on a normal business response or 401/403.
+	// Proxy errors and upstream failures must never start account verification.
+	if response.Status != 200 && response.Status != 401 && response.Status != 403 {
+		return false
+	}
+	return captchaChallenge(apiResponseFailure(response))
+}
+
+func claimBrowserFallback(failure *Failure) bool {
+	switch failure.Code {
+	case "captcha_interaction_required", "captcha_scene_disabled", "captcha_jsdom_missing", "captcha_runtime_error", "captcha_timeout", "captcha_verification_failed", "captcha_duplicate_result", "captcha_invalid_result", "captcha_proxy_unsupported", "captcha_expired", "captcha_config_changed", "captcha_session_invalid":
 		return true
 	}
 	return false

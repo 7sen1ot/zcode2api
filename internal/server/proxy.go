@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -152,6 +153,8 @@ type outboundProxyManager struct {
 	runtimes    map[*managedProxyRuntime]bool
 	closing     bool
 	unavailable map[string]bool
+	retryAt     map[string]time.Time
+	blocked     map[string]time.Time
 }
 
 func asProxyFailure(err error) *Failure {
@@ -223,6 +226,12 @@ func (a *App) pinOutboundProxy(parent context.Context, account M) (context.Conte
 	}
 	if index < 0 {
 		release()
+		a.proxies.mu.Lock()
+		blocked := len(a.proxies.blocked) > 0 && len(a.proxies.unavailable) == 0
+		a.proxies.mu.Unlock()
+		if blocked {
+			return parent, func() {}, proxyFailure("proxy_upstream_blocked", "代理连接可达，但出口暂被上游安全网关拦截")
+		}
 		return parent, func() {}, proxyFailure("proxy_pool_exhausted", "无可用代理节点，请检查代理配置")
 	}
 	ctx = context.WithValue(ctx, proxySelectionKey{}, proxySelection{generation, endpoints[index].identity()})
@@ -237,6 +246,8 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 		manager.key, manager.selected = key, ""
 		manager.generation++
 		manager.unavailable = map[string]bool{}
+		manager.retryAt = map[string]time.Time{}
+		manager.blocked = map[string]time.Time{}
 		for _, endpoint := range endpoints {
 			if endpoint.selectionID() == str(options["preferred_node"]) {
 				manager.selected = endpoint.identity()
@@ -245,6 +256,21 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 		}
 	}
 	manager.endpoints = append([]proxyEndpoint(nil), endpoints...)
+	present := map[string]bool{}
+	for _, endpoint := range endpoints {
+		present[endpoint.identity()] = true
+	}
+	for identity, until := range manager.retryAt {
+		if !present[identity] || !time.Now().Before(until) {
+			delete(manager.retryAt, identity)
+			delete(manager.unavailable, identity)
+		}
+	}
+	for identity, until := range manager.blocked {
+		if !present[identity] || !time.Now().Before(until) {
+			delete(manager.blocked, identity)
+		}
+	}
 	start := 0
 	for index, endpoint := range endpoints {
 		if endpoint.identity() == manager.selected {
@@ -255,7 +281,7 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 	for offset := 0; offset < len(endpoints); offset++ {
 		index := (start + offset) % len(endpoints)
 		identity := endpoints[index].identity()
-		if !manager.unavailable[identity] {
+		if !manager.unavailable[identity] && manager.blocked[identity].IsZero() {
 			manager.selected = identity
 			return index, manager.generation
 		}
@@ -265,6 +291,10 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 
 // Only current pooled routes may retire nodes; canceled and override routes cannot.
 func (a *App) markProxyFailure(ctx context.Context) bool {
+	return a.markProxyRoute(ctx, false)
+}
+
+func (a *App) markProxyRoute(ctx context.Context, blocked bool) bool {
 	selection, ok := ctx.Value(proxySelectionKey{}).(proxySelection)
 	if !ok || ctx.Err() != nil {
 		return false
@@ -274,27 +304,79 @@ func (a *App) markProxyFailure(ctx context.Context) bool {
 	if selection.generation != a.proxies.generation {
 		return false
 	}
-	a.proxies.unavailable[selection.identity] = true
+	if blocked {
+		a.proxies.blocked[selection.identity] = time.Now().Add(time.Minute)
+	} else {
+		a.proxies.unavailable[selection.identity] = true
+		a.proxies.retryAt[selection.identity] = time.Now().Add(30 * time.Second)
+	}
 	for _, endpoint := range a.proxies.endpoints {
-		if !a.proxies.unavailable[endpoint.identity()] {
+		if !a.proxies.unavailable[endpoint.identity()] && a.proxies.blocked[endpoint.identity()].IsZero() {
 			return true
 		}
 	}
 	return false
 }
 
-// Ticket and runtime failures do not identify a broken exit.
+// Account refusals, ticket and runtime failures do not identify a broken exit.
 func proxyExitFailure(failure *Failure) bool {
-	if failure.Kind == "network" && failure.Retryable {
-		return true
-	}
 	switch failure.Code {
-	case "3012", "upstream_waf_blocked", "upstream_risk_blocked":
+	case "proxy_auth_failed", "proxy_connection_failed":
 		return true
-	case "captcha_verification_failed":
-		return failure.VerifyCode == "F001"
 	}
-	return failure.Kind == "risk" && riskBlockMessage(failure.Message)
+	return false
+}
+
+// A failed request through a proxy does not by itself identify a failed proxy.
+// Only connection errors naming the proxy hop can quarantine the route.
+type proxyDialError struct{ error }
+
+func (e *proxyDialError) Unwrap() error { return e.error }
+
+func transportFailure(ctx context.Context, err error) *Failure {
+	f := &Failure{Kind: "network", Code: "network", Message: "上游连接失败", Retryable: true}
+	address := selectedProxy(ctx)
+	if address == "" || ctx.Err() != nil {
+		return f
+	}
+	var dialError *proxyDialError
+	if errors.As(err, &dialError) {
+		f.Code, f.Message = "proxy_connection_failed", "代理连接失败"
+		return f
+	}
+	proxy, parseErr := url.Parse(address)
+	if parseErr != nil {
+		return f
+	}
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if cause.Error() == "Proxy Authentication Required" {
+			f.Code, f.Message = "proxy_auth_failed", "代理认证失败"
+			return f
+		}
+	}
+	var operation *net.OpError
+	if errors.As(err, &operation) {
+		port := proxy.Port()
+		if port == "" {
+			port = "80"
+			if proxy.Scheme == "https" {
+				port = "443"
+			}
+		}
+		proxyHop := operation.Op == "proxyconnect"
+		if operation.Op == "dial" && operation.Addr != nil {
+			host, targetPort, splitErr := net.SplitHostPort(operation.Addr.String())
+			proxyHop = splitErr == nil && strings.EqualFold(host, proxy.Hostname()) && targetPort == port
+		}
+		var dns *net.DNSError
+		if operation.Op == "dial" && errors.As(operation, &dns) && strings.EqualFold(dns.Name, proxy.Hostname()) {
+			proxyHop = true
+		}
+		if proxyHop {
+			f.Code, f.Message = "proxy_connection_failed", "代理连接失败"
+		}
+	}
+	return f
 }
 
 func maskedProxy(address string) string {
@@ -334,6 +416,8 @@ func (a *App) resetOutboundProxies() {
 	a.proxies.generation++
 	a.proxies.endpoints = nil
 	a.proxies.unavailable = nil
+	a.proxies.retryAt = nil
+	a.proxies.blocked = nil
 	stop := old != nil && old.references == 0
 	if old != nil {
 		old.retired = true
@@ -392,23 +476,41 @@ func (a *App) testOutboundProxies(parent context.Context, options M) (M, error) 
 			for index := range jobs {
 				endpoint := endpoints[index]
 				started := time.Now()
-				result := M{"name": endpoint.Name, "reachable": false, "message": "连接失败或超时"}
+				result := M{"name": endpoint.Name, "reachable": false, "transport_reachable": false, "failure_kind": "network", "message": "连接失败或超时"}
 				probeCtx, end := context.WithTimeout(context.WithValue(ctx, proxyContextKey{}, proxyRoute{endpoint.URL}), 8*time.Second)
 				client, err := a.client(probeCtx)
 				if err == nil {
 					request, _ := http.NewRequestWithContext(probeCtx, "POST", a.origin+"/api/v1/zcode-plan/anthropic/v1/messages", strings.NewReader("{}"))
 					request.Header.Set("Content-Type", "application/json")
 					response, failure := client.Do(request)
+					if failure != nil {
+						result["code"] = transportFailure(probeCtx, failure).Code
+					}
 					if failure == nil {
+						result["transport_reachable"] = true
 						body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 						response.Body.Close()
 						result["status"] = response.StatusCode
-						failure := upstreamHTTPFailure(response, body)
-						blocked := (response.StatusCode == 403 || response.StatusCode == 405) && (strings.Contains(string(body), "block_message") || failure.Code == "3012")
-						result["reachable"] = response.StatusCode == 401
+						failure := classify(upstreamHTTPFailure(response, body))
+						blocked := failure.Code == "upstream_waf_blocked" || failure.Kind == "account_risk"
+						reachable := response.StatusCode == 401 && !blocked
+						result["reachable"] = reachable
 						result["blocked"] = blocked
-						if blocked {
-							result["message"] = "上游拒绝了此出口"
+						result["code"], result["failure_kind"] = failure.Code, failure.Kind
+						if failure.Kind == "account_risk" {
+							result["failure_kind"] = "risk"
+						}
+						if reachable {
+							result["failure_kind"], result["code"] = "", ""
+						}
+						if failure.Kind == "account_risk" {
+							// Anonymous probes cannot identify an affected account or exit.
+							result["message"] = "上游风控拒绝"
+							if failure.Code == "3012" {
+								result["message"] = "上游风控拒绝（3012）"
+							}
+						} else if blocked {
+							result["message"] = "上游安全网关拦截"
 						} else if response.StatusCode == 401 {
 							result["message"] = "出口可达；仍需用真实推理确认账号与模型可用"
 						} else {

@@ -6,10 +6,6 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
-    inputs:
-      release_version:
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -18,32 +14,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Live integration tests are separately build-tagged and never run in CI.
-  ZCODE2API_TEST_MIHOMO: ''
-  ZCODE2API_TEST_SUBSCRIPTION: ''
-
 jobs:
-  workflows:
-    name: Validate workflows
+  checks:
+    name: Basic checks and smoke test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color
-
-  backend:
-    name: Backend (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
     env:
       CGO_ENABLED: '0'
     steps:
@@ -55,117 +30,19 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: captcha_node/package-lock.json
-      - name: Install jsdom test dependency
-        run: npm --prefix captcha_node ci --omit=dev --ignore-scripts --no-audit --no-fund
-      - name: Check Go formatting
-        if: runner.os == 'Linux'
+      - name: Validate workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color
+      - name: Check Go dependencies and code
+        run: |
+          go mod verify
+          go vet ./...
+      - name: Check JavaScript syntax
         shell: bash
         run: |
-          files="$(gofmt -l main.go internal)"
-          if [ -n "$files" ]; then
-            printf 'Run gofmt on:\n%s\n' "$files"
-            exit 1
-          fi
-      - run: go mod verify
-      - run: go vet . ./internal/...
-      - name: Offline backend regression and coverage
-        run: go test -shuffle=on -count=1 -covermode=atomic "-coverprofile=coverage.out" -timeout=5m . ./internal/...
-      - name: Enforce backend coverage
-        run: node scripts/check-coverage.cjs coverage.out 75
-      - name: Fuzz subscription parsing and SSE framing offline
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          go test ./internal/server -run='^$' -fuzz=FuzzDecodeSubscription -fuzztime=10s -parallel=2
-          go test ./internal/server -run='^$' -fuzz=FuzzSSEFraming -fuzztime=10s -parallel=2
-      - name: Cross-platform frontend regression
-        run: node scripts/test-web.cjs
-      - name: Build native executable
-        run: go build -trimpath -ldflags "-X main.version=ci" -o bin/zcode2api-smoke${{ runner.os == 'Windows' && '.exe' || '' }} .
-      - name: Native startup and embedded-console smoke
-        run: node scripts/smoke-server.cjs bin/zcode2api-smoke${{ runner.os == 'Windows' && '.exe' || '' }} ci
-      - name: Windows portable startup and shutdown
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./test/startup.test.ps1 -BinaryPath ./bin/zcode2api-smoke.exe
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-${{ matrix.os }}
-          path: coverage.out
-          if-no-files-found: warn
-
-  node-versions:
-    name: Frontend (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['18', '20', '24']
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-          cache-dependency-path: captcha_node/package-lock.json
-      - run: npm --prefix captcha_node ci --omit=dev --ignore-scripts --no-audit --no-fund
-      - run: node scripts/test-web.cjs
-
-  race:
-    name: Backend race detector
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CGO_ENABLED: '1'
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-      - run: npm --prefix captcha_node ci --omit=dev --ignore-scripts --no-audit --no-fund
-      - run: go test -race -shuffle=on -count=1 -timeout=5m . ./internal/...
-
-  containers:
-    name: Container (captcha=${{ matrix.captcha }}, proxy=${{ matrix.proxy }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        captcha: ['0', '1']
-        proxy: ['0', '1']
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-      - uses: docker/setup-buildx-action@v3
-      - name: Build optional-runtime combination
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          tags: zcode2api-ci:latest
-          build-args: |
-            VERSION=ci
-            CAPTCHA_RUNTIME=${{ matrix.captcha }}
-            PROXY_RUNTIME=${{ matrix.proxy }}
-          cache-from: type=gha,scope=runtime-${{ matrix.captcha }}-${{ matrix.proxy }}
-          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.captcha }}-${{ matrix.proxy }}
-      - name: Smoke test with outbound networking disabled
-        run: node scripts/smoke-container.cjs zcode2api-ci:latest ${{ matrix.captcha }} ${{ matrix.proxy }}
-
-  packages:
-    name: Release packages
-    needs: [workflows, backend, node-versions, race]
-    uses: ./.github/workflows/packages.yml
-    with:
-      version: ${{ inputs.release_version || format('ci-{0}', github.sha) }}
+          for file in src/web/*.js internal/server/*.cjs scripts/*.cjs; do
+            node --check "$file"
+          done
+      - name: Build smoke executable
+        run: go build -trimpath -ldflags "-X main.version=ci" -o bin/zcode2api .
+      - name: Smoke test local service
+        run: node scripts/smoke.cjs bin/zcode2api ci

@@ -101,7 +101,7 @@ func errorShape(f *Failure, protocol string) (int, M) {
 			typ = "overloaded_error"
 		case "quota", "context":
 			typ = "invalid_request_error"
-		case "canceled", "timeout", "risk", "unknown", "server", "network":
+		case "canceled", "timeout", "risk", "account_risk", "unknown", "server", "network":
 			typ = "api_error"
 		}
 	}

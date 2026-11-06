@@ -50,6 +50,8 @@ type App struct {
 	cfg                  M
 	mu                   sync.Mutex
 	states               map[string]*accountState
+	upstreamCooldowns    map[string]*upstreamCooldown
+	cooldownGeneration   uint64
 	available            chan struct{}
 	scheduleMu           sync.Mutex
 	waiters              []*accountWaiter
@@ -61,6 +63,7 @@ type App struct {
 	clients              map[string]*http.Client
 	jars                 map[string]*diskJar
 	claimLocks           map[string]bool
+	claimReschedule      chan struct{}
 	flowLocks            map[string]bool
 	reauth               map[string]int64
 	pollDue              map[string]int64
@@ -96,7 +99,7 @@ func New(root, data string, web fs.FS) (*App, error) {
 		out = io.MultiWriter(os.Stdout, lf)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &App{db: d, data: data, secret: secret, log: log.New(out, "", log.LstdFlags), logfile: lf, web: web, cfg: cfg, ctx: ctx, cancel: cancel, states: map[string]*accountState{}, sticky: map[string]stickyEntry{}, sessions: map[string]int64{}, responses: map[string]responseEntry{}, clients: map[string]*http.Client{}, jars: map[string]*diskJar{}, claimLocks: map[string]bool{}, flowLocks: map[string]bool{}, reauth: map[string]int64{}, pollDue: map[string]int64{}, polling: map[string]bool{}, origin: "https://zcode.z.ai"}
+	a := &App{db: d, data: data, secret: secret, log: log.New(out, "", log.LstdFlags), logfile: lf, web: web, cfg: cfg, ctx: ctx, cancel: cancel, states: map[string]*accountState{}, sticky: map[string]stickyEntry{}, sessions: map[string]int64{}, responses: map[string]responseEntry{}, clients: map[string]*http.Client{}, jars: map[string]*diskJar{}, claimLocks: map[string]bool{}, claimReschedule: make(chan struct{}, 1), flowLocks: map[string]bool{}, reauth: map[string]int64{}, pollDue: map[string]int64{}, polling: map[string]bool{}, origin: "https://zcode.z.ai"}
 	a.root = root
 	saved := obj(a.setting("config_overrides", M{}))
 	clean := M{}

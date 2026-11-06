@@ -95,26 +95,50 @@ async function verifyInWindow(config, outcome) {
       document.head.appendChild(script);
     });
   }
-  await pause(config.delayMs);
   return new Promise(resolve => {
     let settled = false;
-    const finish = value => { if (!settled) { settled = true; resolve(value); } };
-    window.initAliyunCaptcha({
+    let instance, verificationStartedAt;
+    const finish = value => {
+      if (!settled) {
+        settled = true;
+        resolve(value.ok ? { ...value, issued_at_ms: verificationStartedAt || Date.now() } : value);
+      }
+    };
+    const failed = () => finish({ ok: false, code: 'captcha_sdk_error', message: '验证码 SDK 初始化失败' });
+    window.addEventListener('error', failed);
+    window.addEventListener('unhandledrejection', failed);
+    window.__disposeCaptcha = () => {
+      settled = true;
+      window.removeEventListener('error', failed);
+      window.removeEventListener('unhandledrejection', failed);
+      try { instance?.destroy?.(); } catch {}
+    };
+    const initialization = window.initAliyunCaptcha({
       SceneId: config.sceneId, mode: 'popup', element: '#z2a-captcha', button: '#z2a-captcha-button',
+      delayBeforeSuccess: false,
       success: param => finish(typeof param === 'string' && param.trim()
         ? { ok: true, param, region: config.region }
         : { ok: false, code: 'captcha_empty_result', message: '验证结果为空' }),
       fail: value => finish(outcome(value, config.region)),
-      onError: () => finish({ ok: false, code: 'captcha_sdk_error', message: '验证码 SDK 初始化或网络请求失败' }),
-      getInstance: async instance => {
-        await pause(config.delayMs);
-        try {
-          instance.startTracelessVerification();
-        } catch {
-          finish({ ok: false, code: 'captcha_sdk_error', message: '验证码 SDK 启动失败' });
-        }
+      onError: failed,
+      getInstance: value => {
+        if (settled) { try { value?.destroy?.(); } catch {} return; }
+        if (instance) { if (value !== instance) { try { value?.destroy?.(); } catch {} } return; }
+        instance = value;
+        // Initializing immediately and waiting here satisfies both official
+        // >2s intervals (script loading and initialization) without two sleeps.
+        pause(config.delayMs).then(() => {
+          if (settled) return;
+          if (typeof instance?.startTracelessVerification !== 'function') {
+            finish({ ok: false, code: 'captcha_interaction_required', message: '当前验证场景需要人工交互' });
+            return;
+          }
+          verificationStartedAt = Date.now();
+          return instance.startTracelessVerification();
+        }).catch(failed);
       },
     });
+    Promise.resolve(initialization).catch(failed);
   });
 }
 
@@ -127,6 +151,20 @@ function loadJSDOM(config) {
   return require(path.join(path.resolve(config.module_path), 'node_modules', 'jsdom'));
 }
 
+function proxyConnectionError(error, address) {
+  if (!address) return false;
+  const proxy = new URL(address);
+  const hostname = proxy.hostname.replace(/^\[|\]$/g, '');
+  const port = Number(proxy.port || (proxy.protocol === 'https:' ? 443 : 80));
+  const inspect = error => {
+    if (!error || typeof error !== 'object') return false;
+    if (['ENOTFOUND', 'EAI_AGAIN'].includes(error.code) && error.hostname === hostname) return true;
+    if (error.syscall === 'connect' && ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH'].includes(error.code) && error.address === hostname && Number(error.port) === port) return true;
+    return inspect(error.cause) || (Array.isArray(error.errors) && error.errors.some(inspect));
+  };
+  return inspect(error);
+}
+
 async function run(config, dependencies = {}) {
   try {
     if (new URL(config.origin).protocol !== 'https:') throw new Error('invalid origin');
@@ -134,14 +172,14 @@ async function run(config, dependencies = {}) {
   if (config.proxy_url) {
     try {
       const proxy = new URL(config.proxy_url);
-      if (proxy.username || proxy.password || !['http:', 'https:'].includes(proxy.protocol)) throw new Error('unsupported proxy');
-    } catch { return { ok: false, code: 'captcha_proxy_unsupported', message: '验证仅支持无认证的 HTTP/HTTPS 代理' }; }
+      if (!['http:', 'https:'].includes(proxy.protocol) || !proxy.hostname || (proxy.pathname && proxy.pathname !== '/') || proxy.search || proxy.hash || /[\r\n\x00]/.test(config.proxy_url)) throw new Error('unsupported proxy');
+    } catch { return { ok: false, code: 'captcha_proxy_unsupported', message: '验证需要有效的 HTTP/HTTPS 代理' }; }
   }
   let library;
   try { library = (dependencies.loadJSDOM || loadJSDOM)(config); }
   catch { return { ok: false, code: 'captcha_jsdom_missing', message: '未找到 jsdom，请安装验证码运行时依赖' }; }
   const { JSDOM, ResourceLoader, VirtualConsole } = library;
-  let dom, timer, interrupt, networkFailed = false;
+  let dom, timer, interrupt, networkFailed = false, proxyFailed = false, resourceStatus = 0, resourceRetryAfter = '';
   try {
     const canceled = new Promise(resolve => {
       interrupt = () => resolve({ ok: false, code: 'captcha_canceled', message: '验证码请求已取消' });
@@ -151,7 +189,17 @@ async function run(config, dependencies = {}) {
     class VerificationResources extends ResourceLoader {
       fetch(url, options) {
         const request = super.fetch(url, options);
-        request?.catch(() => { networkFailed = true; });
+        request?.catch(error => {
+          const status = request.response?.statusCode;
+          if (status) {
+            resourceStatus = status;
+            resourceRetryAfter = String(request.response?.headers?.['retry-after'] || '');
+          }
+          else {
+            networkFailed = true;
+            proxyFailed ||= proxyConnectionError(error, config.proxy_url);
+          }
+        });
         return request;
       }
     }
@@ -170,11 +218,19 @@ async function run(config, dependencies = {}) {
       canceled,
       new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: 'captcha_timeout', message: '验证码请求超时或需要人工交互' }), timeoutMs); }),
     ]);
+    if (resourceStatus && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
+      return { ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: resourceRetryAfter, message: '验证码 SDK 资源返回 HTTP 错误' };
+    }
+    if (proxyFailed && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
+      return { ok: false, code: 'proxy_connection_failed', message: '验证码代理连接失败' };
+    }
     if (networkFailed && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
       return { ok: false, code: 'captcha_network_error', message: '验证码 SDK 资源连接失败' };
     }
     return result;
   } catch {
+    if (resourceStatus) return { ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: resourceRetryAfter, message: '验证码 SDK 资源返回 HTTP 错误' };
+    if (proxyFailed) return { ok: false, code: 'proxy_connection_failed', message: '验证码代理连接失败' };
     return { ok: false, code: networkFailed ? 'captcha_network_error' : 'captcha_sdk_error', message: '验证码 SDK 初始化或网络请求失败' };
   } finally {
     clearTimeout(timer);
@@ -182,7 +238,8 @@ async function run(config, dependencies = {}) {
       process.removeListener('SIGINT', interrupt);
       process.removeListener('SIGTERM', interrupt);
     }
-    dom?.window.close();
+    try { dom?.window.__disposeCaptcha?.(); } catch {}
+    try { dom?.window.close(); } catch {}
   }
 }
 
@@ -198,11 +255,15 @@ function captchaOutcome(value, region) {
 
 
 if (require.main === module) {
+  // SDK requests may leave Node handles alive even after window.close(). A
+  // completed result must reach Go immediately, while the ticket is fresh.
+  const output = (result, status = 0) => {
+    process.stdout.write(JSON.stringify(result) + '\n', () => process.exit(status));
+  };
   Promise.resolve().then(() => run(JSON.parse(fs.readFileSync(0, 'utf8')))).then(result => {
-    process.stdout.write(JSON.stringify(result) + '\n');
+    output(result);
   }, () => {
-    process.stdout.write(JSON.stringify({ ok: false, code: 'captcha_runtime_error', message: '验证码运行环境不可用' }) + '\n');
-    process.exitCode = 1;
+    output({ ok: false, code: 'captcha_runtime_error', message: '验证码运行环境不可用' }, 1);
   });
 }
 

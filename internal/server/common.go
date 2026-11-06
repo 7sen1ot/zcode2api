@@ -195,6 +195,7 @@ type Failure struct {
 	VerifyCode           string
 	RetryAfter           time.Duration
 	Attempts             int
+	cooldownRecorded     bool
 }
 
 func (e *Failure) Error() string { return e.Message }

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 // Listing a draft does not start Mihomo, select a route or save configuration.
@@ -38,10 +39,13 @@ func (a *App) outboundProxyNodes(ctx context.Context, options M) (M, error) {
 	active := a.proxies.key == hash(js(options))
 	rows := []any{}
 	for _, endpoint := range endpoints {
+		blocked := active && time.Now().Before(a.proxies.blocked[endpoint.identity()])
+		unavailable := active && a.proxies.unavailable[endpoint.identity()] && time.Now().Before(a.proxies.retryAt[endpoint.identity()])
 		rows = append(rows, M{
 			"id": endpoint.selectionID(), "name": endpoint.Name, "protocol": protocols[endpoint.selectionID()],
-			"current":     active && endpoint.identity() == a.proxies.selected && !a.proxies.unavailable[endpoint.identity()],
-			"unavailable": active && a.proxies.unavailable[endpoint.identity()],
+			"current":     active && endpoint.identity() == a.proxies.selected && !unavailable && !blocked,
+			"unavailable": unavailable,
+			"blocked":     blocked,
 		})
 	}
 	return M{"ok": true, "nodes": rows}, nil

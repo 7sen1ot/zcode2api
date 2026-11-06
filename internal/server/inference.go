@@ -13,7 +13,7 @@ func retryAfter(s string, now time.Time) time.Duration {
 	if s == "" {
 		return 0
 	}
-	if n, e := strconv.ParseFloat(s, 64); e == nil && n >= 0 {
+	if n, e := strconv.ParseFloat(s, 64); e == nil && n >= 0 && !math.IsNaN(n) && !math.IsInf(n, 0) && n < float64(1<<63-1)/float64(time.Second) {
 		return time.Duration(n * float64(time.Second))
 	}
 	if t, e := http.ParseTime(s); e == nil {
@@ -22,16 +22,38 @@ func retryAfter(s string, now time.Time) time.Duration {
 	return 0
 }
 func classify(f *Failure) *Failure {
+	if f == nil {
+		return nil
+	}
+	if f.Code == "captcha_verification_failed" {
+		switch f.VerifyCode {
+		case "F001":
+			f.Kind, f.Code, f.Retryable = "risk", "captcha_risk_blocked", false
+		case "F010":
+			f.Kind, f.Code, f.Retryable = "rate_limit", "captcha_ip_rate_limited", true
+		case "F011":
+			f.Kind, f.Code, f.Retryable = "rate_limit", "captcha_device_rate_limited", true
+		}
+	}
 	if f.Kind != "" {
+		return f
+	}
+	if f.Status == http.StatusTooManyRequests {
+		f.Kind, f.Retryable = "rate_limit", true
 		return f
 	}
 	kind := ""
 	retry := false
 	switch f.Code {
-	case "rate_limit_error", "1302", "1303", "1305", "3002":
+	case "rate_limit_error", "1302", "1303", "1305", "3002", "F010", "F011", "captcha_ip_rate_limited", "captcha_device_rate_limited":
 		kind, retry = "rate_limit", true
-	case "authentication_error", "3007":
+	case "authentication_error":
 		kind = "auth"
+	case "3007":
+		kind = "auth"
+		if explicitCaptchaChallenge(f.Message) {
+			kind = "risk"
+		}
 	case "permission_error":
 		kind = "permission"
 	case "invalid_request_error", "3001", "3006":
@@ -50,7 +72,9 @@ func classify(f *Failure) *Failure {
 		kind = "context"
 	case "1113", "1309", "1311", "1304", "1308", "1310", "1313", "1008", "1314", "1315":
 		kind = "terminal"
-	case "3012", "CAPTCHA_VERIFY_FAILED", "coding_plan_security_verification_required", "captcha_expired", "captcha_invalid", "captcha_verification_failed", "captcha_duplicate_result", "upstream_waf_blocked", "upstream_risk_blocked", "F008", "F018", "F019":
+	case "3012", "upstream_risk_blocked":
+		kind = "account_risk"
+	case "CAPTCHA_VERIFY_FAILED", "coding_plan_security_verification_required", "captcha_expired", "captcha_invalid", "captcha_verification_failed", "captcha_duplicate_result", "captcha_config_risk_blocked", "captcha_risk_blocked", "upstream_waf_blocked", "F001", "F008", "F014", "F018", "F019", "F020":
 		kind = "risk"
 	case "timeout", "first_token_timeout", "stream_idle_timeout", "inference_timeout", "captcha_config_timeout", "retry_budget_exhausted":
 		kind, retry = "timeout", true
@@ -60,7 +84,7 @@ func classify(f *Failure) *Failure {
 	if kind == "" {
 		switch {
 		case riskBlockMessage(f.Message):
-			kind = "risk"
+			kind = "account_risk"
 		case f.Status == 429:
 			kind, retry = "rate_limit", true
 		case f.Status == 401:
@@ -246,6 +270,13 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			return fail(f)
 		}
 		switch f.Kind {
+		case "account_risk":
+			// Shared admission already cooled this account. It remains enabled;
+			// this request may use another account within its existing budget.
+			excluded[id] = true
+			delete(throttled, id)
+			remainingBudget -= time.Since(attemptStart)
+			continue
 		case "auth":
 			_ = a.updateAccount(id, M{"status": "needs_relogin", "fail_streak": integer(account["fail_streak"]) + 1, "last_error": "推理鉴权失效"})
 			a.mu.Lock()

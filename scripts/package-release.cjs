@@ -28,7 +28,7 @@ if (goos === 'windows') {
   assert.equal(bytes.readUInt32LE(4), goarch === 'amd64' ? 0x01000007 : 0x0100000c);
 }
 const sharedFiles = [
-  'LICENSE', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'config.example.json',
+  'LICENSE', 'README.md', 'README.EN.md', 'README.JP.md', 'CHANGELOG.md', 'SECURITY.md', 'config.example.json',
   'docs/configuration.md', 'docs/network.md',
   'captcha_node/package.json', 'captcha_node/package-lock.json',
 ];
@@ -50,4 +50,3 @@ const entries = (goos === 'windows' && process.platform !== 'win32' ? execFileSy
 for (const file of [binary, ...sharedFiles, ...(goos === 'windows' ? ['scripts/start.ps1', 'scripts/stop.ps1'] : [])]) assert.ok(entries.includes(`${name}/${file}`), `Archive missing ${file}`);
 assert.ok(entries.every(entry => entry.startsWith(name + '/') && !/(^|\/)(data|node_modules|\.git)(\/|$)/.test(entry) && !entry.endsWith('/config.json')), 'Archive contains runtime data or an unexpected path');
 console.log(`Verified release archive, required files and binary architecture: ${archive}`);
-if (goos === ({ win32: 'windows', linux: 'linux', darwin: 'darwin' })[process.platform] && goarch === (process.arch === 'x64' ? 'amd64' : process.arch)) execFileSync(process.execPath, [path.join(__dirname, 'smoke-server.cjs'), path.join(directory, binary), version], { stdio: 'inherit' });

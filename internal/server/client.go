@@ -100,6 +100,16 @@ func (a *App) client(ctx context.Context) (*http.Client, error) {
 			return nil, invalid("proxy_url 仅支持 http(s)://host:port")
 		}
 		t.Proxy = http.ProxyURL(u)
+		// Record failures at the proxy dial itself, before DNS resolution loses
+		// the configured hostname. Later TLS/target/stream errors remain upstream.
+		dial := t.DialContext
+		t.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			connection, err := dial(ctx, network, address)
+			if err != nil {
+				return nil, &proxyDialError{err}
+			}
+			return connection, nil
+		}
 	}
 	c := &http.Client{Transport: t, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	a.clients[proxy] = c
@@ -112,6 +122,7 @@ type apiResult struct {
 	Header    http.Header
 	OK        bool
 	errorBody []byte
+	failure   *Failure
 }
 
 func validProxy(s string) bool {
@@ -126,7 +137,7 @@ func validProxy(s string) bool {
 	return !strings.HasSuffix(u.Host, ":")
 }
 
-func (a *App) api(ctx context.Context, account M, method, path, token string, body any, headers M, jar *diskJar) (apiResult, error) {
+func (a *App) api(ctx context.Context, account M, method, path, token string, body any, headers M, jar *diskJar) (result apiResult, err error) {
 	if !strings.HasPrefix(path, "https://") && !strings.HasPrefix(path, "http://") {
 		path = a.origin + path
 	}
@@ -137,6 +148,17 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 		return apiResult{}, err
 	}
 	defer release()
+	ctx, finish, failure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, account, path, token != "" || str(headers["Authorization"]) != ""))
+	if failure != nil {
+		return apiResult{}, failure
+	}
+	defer func() {
+		if err != nil {
+			finish(upstreamRequestFailure(ctx, err))
+		} else {
+			finish(result.failure)
+		}
+	}()
 	var reader io.Reader
 	if body != nil {
 		reader = strings.NewReader(js(body))
@@ -170,7 +192,9 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	}
 	res, e := c.Do(req)
 	if e != nil {
-		a.markProxyFailure(ctx)
+		if proxyExitFailure(transportFailure(ctx, e)) {
+			a.markProxyFailure(ctx)
+		}
 		return apiResult{}, e
 	}
 	defer res.Body.Close()
@@ -179,27 +203,44 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	}
 	b, e := io.ReadAll(io.LimitReader(res.Body, (32<<20)+1))
 	if e != nil {
-		a.markProxyFailure(ctx)
+		if res.StatusCode == http.StatusTooManyRequests {
+			return apiResult{}, &Failure{Kind: "rate_limit", Code: "rate_limit_error", Status: res.StatusCode, Message: "请求频率受限", Retryable: true, RetryAfter: retryAfter(res.Header.Get("Retry-After"), time.Now())}
+		}
 		return apiResult{}, e
 	}
 	if len(b) > 32<<20 {
 		return apiResult{}, invalid("上游响应超过 32MB")
 	}
 	j := obj(parse(string(b), nil))
-	result := apiResult{Status: res.StatusCode, JSON: j, Header: res.Header, OK: res.StatusCode == 200 && (codeIs(j["code"], 0) || codeIs(j["code"], 200))}
+	result = apiResult{Status: res.StatusCode, JSON: j, Header: res.Header, OK: res.StatusCode == 200 && (codeIs(j["code"], 0) || codeIs(j["code"], 200))}
 	if !result.OK {
 		result.errorBody = append([]byte(nil), b[:min(len(b), 64<<10)]...)
 		failure := classify(upstreamHTTPFailure(res, result.errorBody))
-		if failure.Kind == "risk" || res.StatusCode == http.StatusProxyAuthRequired {
+		result.failure = failure
+		if proxyExitFailure(failure) {
 			a.markProxyFailure(ctx)
+		} else if failure.Code == "upstream_waf_blocked" {
+			a.markProxyRoute(ctx, true)
 		}
 	}
 	return result, nil
 }
 func apiFailure(r apiResult, label string) error {
-	failure := providerFailure(r.JSON, r.Status, r.Header.Get("Retry-After"))
+	failure := apiResponseFailure(r)
 	failure.Message = label + ": " + conciseFailureMessage(failure)
 	return failure
+}
+
+func apiResponseFailure(r apiResult) *Failure {
+	if r.failure != nil {
+		failure := *r.failure
+		return &failure
+	}
+	failure := providerFailure(r.JSON, r.Status, r.Header.Get("Retry-After"))
+	if len(r.errorBody) > 0 {
+		failure = upstreamHTTPFailure(&http.Response{StatusCode: r.Status, Header: r.Header}, r.errorBody)
+	}
+	return classify(failure)
 }
 func (a *App) customer(ctx context.Context, account M, token string) (apiResult, error) {
 	host := "https://bigmodel.cn"

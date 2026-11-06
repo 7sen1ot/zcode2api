@@ -22,12 +22,10 @@
 <a class="skip-link" href="#main">跳转到主要内容</a>
 <div id="login-view" class="login-wrap hidden">
   <form id="login-form" class="login-card">
-    <span class="login-logo">
-      <svg class="lucide" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></svg>
-    </span>
+    <img class="login-logo" src="/favicon.svg" alt="" width="40" height="40">
     <h1>zcode2api</h1>
-    <p class="sub">ZCode 多账号免费额度管理器与推理网关</p>
     <div class="pw-wrap">
+      <label class="visually-hidden" for="login-password">管理员密码</label>
       <input type="password" id="login-password" placeholder="管理员密码" autocomplete="current-password" required>
       <button type="button" class="pw-toggle" id="pw-toggle" aria-label="显示密码" aria-pressed="false">
         <svg class="lucide" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>
@@ -41,7 +39,7 @@
 <div id="app-view" class="hidden">
   <div class="shell">
     <div class="utilrow">
-      <span class="pill" id="ports-label2" style="cursor:default"></span>
+      <span class="pill" id="ports-label2" style="cursor:default" title="端口修改需编辑 config.json 后重启服务"></span>
       <button class="pill" id="theme-btn" aria-label="切换亮/暗主题" title="切换亮/暗主题">
         <svg class="lucide" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
         <span id="theme-btn-label">浅色</span>
@@ -56,6 +54,7 @@
   <nav id="nav" class="dock-wrap" aria-label="页面导航"></nav>
 </div>
 <script src="/ui-state.js"></script>
+<script src="/dashboard-charts.js"></script>
 <script src="/claims-view.js"></script>
 <script src="/logs-view.js"></script>
 <script src="/app.js"></script>
