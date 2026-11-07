@@ -316,11 +316,11 @@ func buildRequest(body M, protocol, model, level string, catalog *toolCatalog, i
 			request["output_config"] = M{"format": M{"type": "json_schema", "schema": first(obj(format["json_schema"])["schema"], format["schema"])}}
 		}
 	}
-	if len(system) > 0 {
-		request["system"] = system
-	} else {
-		delete(request, "system")
+	upstreamSystem, e := upstreamSystemBlocks(system)
+	if e != nil {
+		return nil, e
 	}
+	request["system"] = upstreamSystem
 	request["model"], request["stream"] = model, true
 	if request["max_tokens"] == nil {
 		request["max_tokens"] = 128000

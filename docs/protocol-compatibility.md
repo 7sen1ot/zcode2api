@@ -36,7 +36,7 @@ Chat 格式将语法放在 `custom.format.grammar.{syntax,definition}`；Respons
 
 ## System / developer 指令
 
-网关不注入 ZCode 固定模板。请求开头存在明确的 ZCode 身份前缀时，按已识别的 ZCode 3.17.2 完整段落指纹清理默认模板；遇到未知或自定义内容就停止这部分前缀清理。另对 ZCode 身份、`You are an agent working with the user toward their goals…` 身份段落，以及 `IMPORTANT: Assist with authorized security testing…` 完整默认段落清理所有重复项，即使它们出现在未知内容之后；兼容身份末尾的句号和段落内换行，保留 Markdown 代码围栏中的示例。只处理顶层 `system`、开头的 `system/developer` 消息和 `instructions`，不扫描用户消息、工具结果或 `tools` 定义。未知、自定义或改写过的内容未命中指纹时原样保留。
+网关在发送上游时添加 ZCode 3.17.2 所需的三段固定模板，并将调用方的 system/developer 文本指令合并到第三段，保持恰好三个系统块；缺少模板或改变分块结构可能导致上游返回 3012。合并时保留一致的 cache_control；非文本块、额外字段或互相冲突的缓存策略会被拒绝。为避免模板重复，请求开头存在明确的 ZCode 身份前缀时，按已识别的 ZCode 3.17.2 完整段落指纹清理默认模板；遇到未知或自定义内容就停止这部分前缀清理。另对 ZCode 身份、`You are an agent working with the user toward their goals…` 身份段落，以及 `IMPORTANT: Assist with authorized security testing…` 完整默认段落清理所有重复项，即使它们出现在未知内容之后；兼容身份末尾的句号和段落内换行，保留 Markdown 代码围栏中的示例。只处理顶层 `system`、开头的 `system/developer` 消息和 `instructions`，不扫描用户消息、工具结果或 `tools` 定义。未知、自定义或改写过的内容未命中指纹时原样保留。
 
 Anthropic 上游只有顶层 `system`，没有独立的 `developer` 角色，也不能原生表达对话中途的 `system` 更新。不能保证与 OpenAI 的角色优先级、冲突处理和历史作用域完全等价。
 

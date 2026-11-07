@@ -2,6 +2,13 @@
 
 按版本标签及对应提交整理；日期使用北京时间。
 
+## v1.6.1 — 2026-11-07
+
+- 回退了ZCode 必需的三段 system 模板。
+- 将客户端自定义指令合并到第三段、保持固定三段结构的逻辑。
+
+感谢 [@ybtou](https://github.com/ybtou) 在 [Issue #3](https://github.com/7sen1ot/zcode2api/issues/3) 中反馈此问题。
+
 ## v1.6.0 — 2026-11-07
 
 ### 协议兼容
