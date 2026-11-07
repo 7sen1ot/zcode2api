@@ -13,7 +13,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555)](#快速开始)
 [![License](https://img.shields.io/badge/License-Apache_2.0-orange?logo=apache&logoColor=white)](LICENSE)
 
-[界面预览](#界面预览) · [快速开始](#快速开始) · [接入客户端](#接入客户端) · [配置说明](docs/configuration.md) · [更新记录](CHANGELOG.md)
+[界面预览](#界面预览) · [快速开始](#快速开始) · [接入客户端](#接入客户端) · [配置说明](docs/configuration.md) · [更新记录](CHANGELOG.md) · [免责声明](SECURITY.md)
 
 </div>
 
@@ -44,16 +44,6 @@
 
 ## 快速开始
 
-### 源码运行
-
-需要 Git 和 Go 1.26+。
-
-```sh
-git clone https://github.com/7sen1ot/zcode2api.git
-cd zcode2api
-go run . --root .
-```
-
 ### 可执行文件
 
 从 [Releases](https://github.com/7sen1ot/zcode2api/releases) 下载对应系统和架构的完整压缩包，解压后在其根目录运行，无需安装 Go。
@@ -71,15 +61,17 @@ chmod +x ./zcode2api
 ./zcode2api --root .
 ```
 
-### Windows 脚本
+### 源码运行
 
-在源码或完整 Windows 发行包的根目录运行，后台启动；源码部署需要 Go 1.26+，脚本会自动编译。
+需要 Git 和 Go 1.26+。
 
-```powershell
-.\scripts\start.ps1
+```sh
+git clone https://github.com/7sen1ot/zcode2api.git
+cd zcode2api
+go run . --root .
 ```
 
-停止时运行 `.\scripts\stop.ps1`。
+Windows 源码或完整发行包也可通过 `.\scripts\start.ps1` 后台启动、`.\scripts\stop.ps1` 停止；源码方式会自动编译。
 
 ### Docker Compose
 
@@ -92,9 +84,11 @@ docker compose build --build-arg CAPTCHA_RUNTIME=1
 docker compose up -d
 ```
 
+节点订阅代理需再加 `--build-arg PROXY_RUNTIME=1`，custom 工具的 grammar 校验需加 `--build-arg GRAMMAR_RUNTIME=1`；按需选择。
+
 ### 访问与配置
 
-源码、可执行文件和 Windows 脚本部署若需自动验证，另需安装 Node.js 18+，并在项目或解压目录执行：
+直接运行程序且需要服务端自动验证时，安装 Node.js 18+，并在项目或解压目录安装 jsdom：
 
 ```sh
 npm --prefix captcha_node ci --omit=dev --ignore-scripts
@@ -102,7 +96,7 @@ npm --prefix captcha_node ci --omit=dev --ignore-scripts
 
 打开控制台 [http://127.0.0.1:6789](http://127.0.0.1:6789)，默认管理密码见 `data/admin-password.txt`。账号、设置和日志保存在 `data/`，请保留该目录。
 
-本地部署可复制 `config.example.json` 为 `config.json` 后修改配置；容器配置见[配置说明](docs/configuration.md)。
+运行参数可在 Web 中设置，或复制 `config.example.json` 为 `config.json`；Web 保存的设置优先。
 
 ## 接入客户端
 
@@ -126,8 +120,54 @@ curl http://127.0.0.1:6780/v1/chat/completions \
   -d '{"model":"glm-flash","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-## 文档
+## SDK 验证
 
-[配置说明](docs/configuration.md) · [代理与安全验证](docs/network.md) · [更新记录](CHANGELOG.md) · [安全说明](SECURITY.md) · [Apache 2.0](LICENSE)
+### SDK 验证
 
-本项目为非官方项目，与 ZCode、智谱、Z.ai 无隶属关系。
+服务端通过 Node.js 18+ 与 jsdom 运行官方阿里云 SDK，无需 Chrome；依赖安装见[访问与配置](#访问与配置)。在「设置 → 上游安全验证」选择推理策略并保存：
+
+| 策略 | 行为 |
+| --- | --- |
+| `off`（默认） | 推理不运行验证 SDK |
+| `auto(推荐)` | 遵循上游验证场景的启用与免验证配置，明确要求验证时取票 |
+| `always` | 上游启用验证场景时，每次推理前取票 |
+
+启用推理验证后，票据失效且尚未输出时，可在原出口重新验证一次；已经输出正文、思考或工具调用时，不重放整轮请求。
+
+## 日志报错说明
+
+调用记录中的 `error_message` 是中文分类摘要，`error_code` 是具体错误码。
+
+| 错误码 / 提示 | 含义与处理方式 |
+| --- | --- |
+| `upstream_waf_blocked` | 明确的上游安全网关拦截；暂避当前出口，有可用备用节点时切换代理 |
+| `proxy_connection_failed` / `proxy_auth_failed` | 代理连接或认证失败；检查代理地址、服务状态及凭据，使用代理池时将节点短时隔离 |
+| `proxy_pool_exhausted` / `proxy_upstream_blocked` | 代理池没有可用节点，或出口仍在上游拦截冷却中；检查节点或等待冷却结束 |
+| `3012` / `upstream_risk_blocked` | 按账号风控拒绝处理；本次请求可换其他可用账号，不因此剔除代理或自动禁用账号，也不能据此判定永久封禁 |
+| `3008` / `3009` / `3010` | 上游账号并发暂忙；优先使用其他可用账号，没有可用名额时排队等待 |
+| `account_busy` | 网关等待可用账号槽位超时；检查账号数量、并发占用和排队时长 |
+| `rate_limit_error` / 请求频率受限 | 上游限流；遵守等待时间和重试窗口，不因此判定代理损坏 |
+| `authentication_error` / `insufficient_quota` | 分别表示上游账号凭据失效、账号额度不足；需要重新授权或补充可用额度，本次请求可使用其他可用账号 |
+| `coding_plan_security_verification_required`，或带明确验证提示的 `3007` | 上游要求安全验证，进入对应的 SDK 或人工验证流程；`3007` 需结合提示判断，不能一律视为验证码问题 |
+| `captcha_risk_blocked` / `F001` | SDK 风控拒绝；不据此认定账号或代理失效，也不触发代理节点切换 |
+| `F010` / `F011` | SDK 出口 / 设备访问频率受限；分别按对应作用域冷却 |
+| `captcha_expired`、`F019`、`F008`、`F018` | 验证票据失效或重复提交；需要新票据，不能复用已提交的结果 |
+| `captcha_jsdom_missing` / `captcha_runtime_error` / `captcha_timeout` | SDK 依赖缺失、运行异常或验证超时；检查 Node.js、jsdom、网络及验证配置 |
+| `first_token_timeout` / `stream_idle_timeout` / `inference_timeout` | 分别表示首个有效输出超时、流式输出空闲超时、整轮推理超时 |
+| `proxy_subscription_auth_failed` | 订阅认证失败，令牌可能错误或已失效；重新复制有效的订阅链接 |
+
+## 详细文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [配置与重试](docs/configuration.md) | 参数与环境变量、版本更新、额度刷新、定时领卡、调度和日志 |
+| [代理与安全验证](docs/network.md) | 节点选择与切换、SDK 依赖、票据管理、人工验证及错误码排查 |
+| [协议兼容](docs/protocol-compatibility.md) | 工具调用、grammar 校验、系统提示词去重和指令转换限制 |
+
+## 安全与免责
+
+本项目为非官方项目，与 ZCode、智谱、Z.ai、BigModel 无隶属或背书关系。仅接入本人拥有或已获明确授权的账号，并遵守第三方服务条款。
+
+数据目录包含数据库、主密钥、管理密码及可能明文保存的 Cookie，应限制访问并妥善备份。
+
+上游接口、活动、额度和账号限制可能变化，重试与 SDK 验证不保证请求成功。项目按 [Apache License 2.0](LICENSE) 开源，软件按“现状”提供，担保免责与责任限制以许可证第 7、8 条及适用法律为准。完整声明见[免责声明](SECURITY.md)。
