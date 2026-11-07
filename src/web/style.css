@@ -947,7 +947,7 @@ main[data-page="logs"] { gap: 18px; }
 .proxy-test-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .proxy-test-actions small { color: var(--muted-fg); }
 .settings-section.formcard { display: block; padding: 0; background: var(--card); }
-.settings-section-summary { display: flex; align-items: center; gap: 12px; padding: 20px 24px; cursor: pointer; list-style: none; transition: background 160ms var(--ease-out); border-radius: inherit; }
+.settings-section-summary { display: flex; align-items: center; gap: 12px; padding: 20px 24px; cursor: pointer; list-style: none; transition: background 160ms var(--ease-out); border-radius: calc(var(--r-card) - 1px); }
 .settings-section-summary:hover { background: var(--accent); }
 .settings-section-summary::-webkit-details-marker { display: none; }
 .settings-section-summary::before { content: '›'; font-size: 20px; color: var(--muted-fg); transition: transform 150ms; }
@@ -956,7 +956,7 @@ main[data-page="logs"] { gap: 18px; }
 .settings-section-summary strong { display: block; font-size: 14px; font-weight: 600; }
 .settings-section-summary small { display: block; color: var(--muted-fg); font-size: 12px; }
 .settings-section-summary .pill { pointer-events: none; }
-.settings-section[open] > summary { border-bottom: 1px solid var(--border); }
+.settings-section[open] > summary { border-bottom: 1px solid var(--border); border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0; }
 .settings-section-body { border-radius: 0 0 var(--r-card) var(--r-card); }
 @supports (interpolate-size: allow-keywords) {
   :is(.settings-section, .import-advanced)::details-content { interpolate-size: allow-keywords; block-size: 0; overflow: clip; transition: block-size 240ms var(--ease-out), content-visibility 240ms allow-discrete; }

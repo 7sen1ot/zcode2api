@@ -18,6 +18,8 @@
 - 检查进度与版本配置持久化；重启后沿用检查计划，同步失败或官方清单版本低于当前配置时保留已有版本。
 - 默认账号余额轮询间隔调整为 5 秒、抖动为 0；控制台概览、账号和日志每秒刷新。
 - 更新检查、发行包下载和镜像入口迁移至 `7sen1ot/zcode2api`，自动忽略旧仓库的版本缓存。
+- 修复设置卡片悬停背景的圆角，折叠时与卡片边缘一致，展开时保留顶部圆角。
+- 同步中、英、日 README 的仓库地址与截图预览，统一为四行两列，并在发行包中附带截图。
 
 Grammar 校验需要 Python 3.10+ 与 `grammar_python/requirements.txt` 中的 llguidance；普通 function 和无 grammar 的 custom 工具不需要该依赖。Docker 可使用 `GRAMMAR_RUNTIME=1` 构建参数安装。六个平台发行包均附带依赖清单与[协议兼容说明](https://github.com/7sen1ot/zcode2api/blob/v1.6.0/docs/protocol-compatibility.md)；一键更新只替换程序，可选运行时依赖仍需单独安装。
 

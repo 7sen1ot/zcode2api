@@ -32,6 +32,7 @@ const sharedFiles = [
   'docs/configuration.md', 'docs/network.md',
   'docs/protocol-compatibility.md', 'grammar_python/requirements.txt',
   'captcha_node/package.json', 'captcha_node/package-lock.json',
+  ...fs.readdirSync(path.join(root, 'docs')).filter(file => file.endsWith('.png')).map(file => `docs/${file}`),
 ];
 for (const file of sharedFiles) {
   const destination = path.join(directory, file);

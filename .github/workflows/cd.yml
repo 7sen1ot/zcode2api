@@ -102,7 +102,13 @@ jobs:
             found { print }
           ' CHANGELOG.md > "$notes"
           test -s "$notes"
-          gh release create "$TAG" dist/* --verify-tag --title "zcode2api $TAG" --notes-file "$notes" --generate-notes "${flags[@]}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.zip --clobber
+            gh release upload "$TAG" dist/SHA256SUMS --clobber
+            gh release edit "$TAG" --title "zcode2api $TAG" --notes-file "$notes" "${flags[@]}"
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "zcode2api $TAG" --notes-file "$notes" --generate-notes "${flags[@]}"
+          fi
 
   validation:
     name: Verify release artifacts

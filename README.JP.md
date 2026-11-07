@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/do-whilefor/zcode2api/main/src/web/favicon.svg" alt="zcode2api" width="80" height="80">
+<img src="https://raw.githubusercontent.com/7sen1ot/zcode2api/main/src/web/favicon.svg" alt="zcode2api" width="80" height="80">
 
 # zcode2api
 
@@ -13,13 +13,34 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555)](#クイックスタート)
 [![License](https://img.shields.io/badge/License-Apache_2.0-orange?logo=apache&logoColor=white)](LICENSE)
 
-[クイックスタート](#クイックスタート) · [クライアント設定](#クライアント設定) · [設定ガイド（中国語）](docs/configuration.md) · [変更履歴（中国語）](CHANGELOG.md)
+[スクリーンショット](#スクリーンショット) · [クイックスタート](#クイックスタート) · [クライアント設定](#クライアント設定) · [設定ガイド（中国語）](docs/configuration.md) · [変更履歴（中国語）](CHANGELOG.md)
 
 </div>
 
 ZCode の無料アカウント向けリバースプロキシゲートウェイです。OpenAI Chat Completions、Responses、Anthropic Messages の各プロトコルに対応しています。
 
 Alibaba Cloud の不可視 CAPTCHA SDK の連携とリスク判定時のエラー処理に対応します。使い捨てチケットの分離、必要に応じた事前取得と期限切れ時の補充、サーバーの接続経路の統一、エラー分類とクールダウン付きリトライを実装しています。複数アカウントの振り分け、カードの自動取得、公式の対話型認証への切り替えにも対応します。認証の成否は上流サービスが決定します。
+
+## スクリーンショット
+
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="docs/仪表盘1.png" alt="ダッシュボード1" width="100%"><br>ダッシュボード1</td>
+    <td width="50%" align="center"><img src="docs/仪表盘2.png" alt="ダッシュボード2" width="100%"><br>ダッシュボード2</td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/账号管理.png" alt="アカウント管理" width="100%"><br>アカウント管理</td>
+    <td width="50%" align="center"><img src="docs/领卡中心.png" alt="カード取得" width="100%"><br>カード取得</td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/用量.png" alt="使用量" width="100%"><br>使用量</td>
+    <td width="50%" align="center"><img src="docs/日志.png" alt="ログ" width="100%"><br>ログ</td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/密钥.png" alt="API キー" width="100%"><br>API キー</td>
+    <td width="50%" align="center"><img src="docs/设置.png" alt="設定" width="100%"><br>設定</td>
+  </tr>
+</table>
 
 ## クイックスタート
 
@@ -28,14 +49,14 @@ Alibaba Cloud の不可視 CAPTCHA SDK の連携とリスク判定時のエラ�
 Git と Go 1.26+ が必要です。
 
 ```sh
-git clone https://github.com/do-whilefor/zcode2api.git
+git clone https://github.com/7sen1ot/zcode2api.git
 cd zcode2api
 go run . --root .
 ```
 
 ### ビルド済み実行ファイル
 
-[Releases](https://github.com/do-whilefor/zcode2api/releases) から OS とアーキテクチャに合う完全なアーカイブをダウンロードし、展開先のルートで実行します。Go のインストールは不要です。
+[Releases](https://github.com/7sen1ot/zcode2api/releases) から OS とアーキテクチャに合う完全なアーカイブをダウンロードし、展開先のルートで実行します。Go のインストールは不要です。
 
 Windows（PowerShell）：
 
@@ -65,7 +86,7 @@ chmod +x ./zcode2api
 Git と Docker Compose が必要です。以下のビルドには、CAPTCHA の自動検証に必要な Node.js と jsdom が含まれます。
 
 ```sh
-git clone https://github.com/do-whilefor/zcode2api.git
+git clone https://github.com/7sen1ot/zcode2api.git
 cd zcode2api
 docker compose build --build-arg CAPTCHA_RUNTIME=1
 docker compose up -d
