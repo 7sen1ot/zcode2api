@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-const updateRepository = "do-whilefor/zcode2api"
+const updateRepository = "7sen1ot/zcode2api"
 const updateArchiveLimit = 128 << 20
 const updateBinaryLimit = 128 << 20
 
@@ -111,6 +111,10 @@ func (a *App) loadUpdater() {
 	a.updates.once.Do(func() {
 		a.updates.support = detectUpdateSupport(a.version)
 		_ = readUpdateJSON(filepath.Join(a.updateDirectory(), "release.json"), &a.updates.cache)
+		cached := a.updates.cache.Release
+		if cached.URL != "https://github.com/"+updateRepository+"/releases/tag/"+cached.Tag {
+			a.updates.cache = updateReleaseCache{}
+		}
 		var state updateState
 		filename := filepath.Join(a.updateDirectory(), "state.json")
 		if readUpdateJSON(filename, &state) == nil && (state.Phase == "downloading" || state.Phase == "preparing") {

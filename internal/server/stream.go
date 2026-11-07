@@ -16,6 +16,7 @@ type streamBlock struct {
 }
 type streamTool struct {
 	ID, Name, ItemID   string
+	Definition         toolDefinition
 	Args               strings.Builder
 	Index, OutputIndex int
 	Ended              bool
@@ -33,15 +34,17 @@ type protocolStream struct {
 	terminal            bool
 	block               *streamBlock
 	tools               map[int]*streamTool
+	toolCatalog         *toolCatalog
 	output              []any
 	done                chan struct{}
 	worker              sync.WaitGroup
 	writeError          error
 }
 
-func newStream(w http.ResponseWriter, r *http.Request, protocol, id, model string, include bool) *protocolStream {
+func newStream(w http.ResponseWriter, r *http.Request, protocol, id, model string, include bool, tools *toolCatalog) *protocolStream {
 	ctx, cancel := context.WithCancel(r.Context())
 	s := &protocolStream{w: w, ctx: ctx, cancel: cancel, protocol: protocol, id: id, model: model, created: time.Now().Unix(), index: -1, includeUsage: include, tools: map[int]*streamTool{}, output: []any{}, done: make(chan struct{})}
+	s.toolCatalog = tools
 	s.writer = http.NewResponseController(w)
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -159,7 +162,9 @@ func (s *protocolStream) onEvent(e Event) error {
 		return s.writeError
 	}
 	if e.Type == "tool_start" || e.Type == "tool_delta" || e.Type == "tool_end" {
-		s.toolEvent(e)
+		if err := s.toolEvent(e); err != nil {
+			return err
+		}
 		return s.writeError
 	}
 	if (e.Type != "text_delta" && e.Type != "reasoning_delta") || e.Text == "" {
@@ -183,29 +188,41 @@ func (s *protocolStream) onEvent(e Event) error {
 	}
 	return s.writeError
 }
-func (s *protocolStream) toolEvent(e Event) {
+func (s *protocolStream) toolEvent(e Event) error {
 	if e.Type == "tool_start" {
 		if s.protocol == "responses" {
 			s.closeBlock()
 		}
 		s.index++
-		t := &streamTool{ID: e.ID, Name: e.Name, Index: len(s.tools), OutputIndex: s.index, ItemID: "fc_" + uuid()}
+		definition := s.toolCatalog.definition(e.Name)
+		prefix := "fc_"
+		if s.protocol == "responses" && definition.Kind == "custom" {
+			prefix = "ctc_"
+		}
+		t := &streamTool{ID: e.ID, Name: e.Name, Definition: definition, Index: len(s.tools), OutputIndex: s.index, ItemID: prefix + uuid()}
 		s.tools[e.Index] = t
 		if s.protocol == "chat" {
-			s.chunk(M{"tool_calls": []any{M{"index": t.Index, "id": t.ID, "type": "function", "function": M{"name": t.Name, "arguments": ""}}}}, nil)
+			call := M{"index": t.Index, "id": t.ID, "type": "function", "function": M{"name": definition.Name, "arguments": ""}}
+			if definition.Kind == "custom" {
+				call = M{"index": t.Index, "id": t.ID, "type": "custom", "custom": M{"name": definition.Name, "input": ""}}
+			}
+			s.chunk(M{"tool_calls": []any{call}}, nil)
 		} else {
 			s.output = append(s.output, nil)
-			s.event("response.output_item.added", M{"output_index": t.OutputIndex, "item": M{"id": t.ItemID, "type": "function_call", "call_id": t.ID, "name": t.Name, "arguments": "", "status": "in_progress"}})
+			s.event("response.output_item.added", M{"output_index": t.OutputIndex, "item": definition.startItem(t.ItemID, t.ID)})
 		}
-		return
+		return nil
 	}
 	t := s.tools[e.Index]
 	if t == nil || t.Ended {
-		return
+		return nil
 	}
 	loc := M{"item_id": t.ItemID, "output_index": t.OutputIndex}
 	if e.Type == "tool_delta" {
-		if s.protocol == "chat" {
+		if t.Definition.Kind == "custom" {
+			// Keep every custom input private until the JSON wrapper and grammar pass.
+			t.Args.WriteString(e.Delta)
+		} else if s.protocol == "chat" {
 			s.chunk(M{"tool_calls": []any{M{"index": t.Index, "function": M{"arguments": e.Delta}}}}, nil)
 		} else {
 			t.Args.WriteString(e.Delta)
@@ -213,14 +230,29 @@ func (s *protocolStream) toolEvent(e Event) {
 		}
 	} else {
 		t.Ended = true
-		if s.protocol == "responses" {
-			args := t.Args.String()
-			item := M{"id": t.ItemID, "type": "function_call", "call_id": t.ID, "name": t.Name, "arguments": args, "status": "completed"}
-			s.event("response.function_call_arguments.done", merge(loc, M{"arguments": args}))
+		if s.protocol == "chat" && t.Definition.Kind == "custom" {
+			input, err := customToolInput(t.Args.String())
+			if err != nil {
+				return err
+			}
+			s.chunk(M{"tool_calls": []any{M{"index": t.Index, "custom": M{"input": input}}}}, nil)
+		} else if s.protocol == "responses" {
+			item, err := t.Definition.completedItem(t.ItemID, t.ID, t.Args.String())
+			if err != nil {
+				return err
+			}
+			if t.Definition.Kind == "custom" {
+				// Decode the complete JSON wrapper before emitting raw text, preserving escapes.
+				s.event("response.custom_tool_call_input.delta", merge(loc, M{"delta": item["input"]}))
+				s.event("response.custom_tool_call_input.done", merge(loc, M{"input": item["input"]}))
+			} else {
+				s.event("response.function_call_arguments.done", merge(loc, M{"arguments": item["arguments"]}))
+			}
 			s.event("response.output_item.done", M{"output_index": t.OutputIndex, "item": item})
 			s.output[t.OutputIndex] = item
 		}
 	}
+	return nil
 }
 func (s *protocolStream) complete(r *Result, response M) M {
 	s.mu.Lock()

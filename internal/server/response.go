@@ -29,9 +29,9 @@ func chatFinishReason(r *Result) string {
 	}
 	return "stop"
 }
-func buildResponse(protocol string, r *Result, model, id string) M {
+func buildResponse(protocol string, r *Result, model, id string, tools *toolCatalog) (M, error) {
 	if protocol == "anthropic" {
-		return r.Native
+		return r.Native, nil
 	}
 	if protocol == "chat" {
 		m := M{"role": "assistant", "content": nullable(r.Text)}
@@ -42,11 +42,15 @@ func buildResponse(protocol string, r *Result, model, id string) M {
 			calls := []any{}
 			for _, v := range r.Calls {
 				c := obj(v)
-				calls = append(calls, M{"id": c["id"], "type": "function", "function": M{"name": c["name"], "arguments": js(c["arguments"])}})
+				call, e := tools.definition(str(c["name"])).chatCall(str(c["id"]), c["arguments"])
+				if e != nil {
+					return nil, e
+				}
+				calls = append(calls, call)
 			}
 			m["tool_calls"] = calls
 		}
-		return M{"id": id, "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{M{"index": 0, "message": m, "finish_reason": chatFinishReason(r)}}, "usage": chatUsage(r.Usage)}
+		return M{"id": id, "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{M{"index": 0, "message": m, "finish_reason": chatFinishReason(r)}}, "usage": chatUsage(r.Usage)}, nil
 	}
 	output := []any{}
 	if r.Reasoning != "" {
@@ -57,7 +61,16 @@ func buildResponse(protocol string, r *Result, model, id string) M {
 	}
 	for _, v := range r.Calls {
 		c := obj(v)
-		output = append(output, M{"id": "fc_" + uuid(), "type": "function_call", "call_id": c["id"], "name": c["name"], "arguments": js(c["arguments"]), "status": "completed"})
+		definition := tools.definition(str(c["name"]))
+		prefix := "fc_"
+		if definition.Kind == "custom" {
+			prefix = "ctc_"
+		}
+		item, e := definition.completedItem(prefix+uuid(), str(c["id"]), c["arguments"])
+		if e != nil {
+			return nil, e
+		}
+		output = append(output, item)
 	}
 	status := "completed"
 	var incomplete any
@@ -65,7 +78,7 @@ func buildResponse(protocol string, r *Result, model, id string) M {
 		status = "incomplete"
 		incomplete = M{"reason": "max_output_tokens"}
 	}
-	return M{"id": id, "object": "response", "created_at": time.Now().Unix(), "status": status, "model": model, "output": output, "output_text": r.Text, "incomplete_details": incomplete, "usage": responsesUsage(r.Usage)}
+	return M{"id": id, "object": "response", "created_at": time.Now().Unix(), "status": status, "model": model, "output": output, "output_text": r.Text, "incomplete_details": incomplete, "usage": responsesUsage(r.Usage)}, nil
 }
 func errorShape(f *Failure, protocol string) (int, M) {
 	status, typ := 502, "server_error"

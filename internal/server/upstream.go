@@ -72,6 +72,7 @@ type Result struct {
 type contentBuffer struct{ text, thinking, signature, partial strings.Builder }
 type inferOptions struct {
 	Key, Body, Upstream                      M
+	Tools                                    *toolCatalog
 	Protocol, Model, Level, ID, IP, Affinity string
 	Sticky                                   float64
 	Stream                                   bool
@@ -468,7 +469,13 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 					}
 					b["input"] = input
 				}
-				r.Calls = append(r.Calls, M{"id": b["id"], "name": b["name"], "arguments": first(b["input"], M{})})
+				arguments := first(b["input"], M{})
+				if o.Tools != nil {
+					if e := o.Tools.validateCall(ctx, str(b["name"]), arguments); e != nil {
+						return e
+					}
+				}
+				r.Calls = append(r.Calls, M{"id": b["id"], "name": b["name"], "arguments": arguments})
 				if e := emit(Event{Type: "tool_end", Index: idx}); e != nil {
 					return e
 				}

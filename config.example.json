@@ -3,7 +3,8 @@
   "web_port": 6789,
   "gateway_port": 6780,
   "host": "127.0.0.1",
-  "poll_interval_sec": 60,
+  "poll_interval_sec": 5,
+  "poll_jitter_sec": 0,
   "daily_claim_enabled": true,
   "daily_claim_time": "19:02",
   "default_reasoning_level": "low",
@@ -37,6 +38,8 @@
     "total_budget_ms": 120000
   },
   "app_version": "3.17.2",
+  "zcode_version_auto_update": true,
+  "zcode_version_check_interval_sec": 432000,
   "trust_proxy": false,
   "admin_bind_public": false,
   "conversation_affinity_minutes": 10

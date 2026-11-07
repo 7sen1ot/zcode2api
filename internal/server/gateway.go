@@ -14,7 +14,8 @@ import (
 func (a *App) GatewayHandler() http.Handler {
 	return a.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-session-id")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-session-id, x-zcode-instruction-mode")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Zcode-Instruction-Mode, X-Zcode-Compatibility, X-Zcode-Grammar-Validation")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
@@ -231,10 +232,31 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 		payload["input"] = append(items, inputItems(body["input"])...)
 	}
 	level := a.effectiveEffort(body, k)
-	upstream, e := buildRequest(payload, protocol, model, level)
+	mode := str(fallback(r.Header.Get("X-Zcode-Instruction-Mode"), payload["instruction_mode"]))
+	instructions, e := newInstructionContext(mode)
 	if e != nil {
 		a.sendFailure(w, e.(*Failure), protocol)
 		return
+	}
+	tools, e := newToolCatalog(r.Context(), a.root, payload["tools"], protocol)
+	if e != nil {
+		a.sendFailure(w, e.(*Failure), protocol)
+		return
+	}
+	upstream, e := buildRequest(payload, protocol, model, level, tools, instructions)
+	if e != nil {
+		a.sendFailure(w, e.(*Failure), protocol)
+		return
+	}
+	if instructions.Used {
+		w.Header().Set("X-Zcode-Instruction-Mode", "scoped-system")
+		w.Header().Set("X-Zcode-Compatibility", "instruction-roles-and-scope-approximated")
+	}
+	for _, definition := range tools.byName {
+		if definition.Grammar != nil {
+			w.Header().Set("X-Zcode-Grammar-Validation", "llguidance-post-generation")
+			break
+		}
 	}
 	prefix := "chatcmpl-"
 	if protocol == "responses" {
@@ -245,7 +267,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 	}
 	id := prefix + uuid()
 	affinity, sticky := a.affinity(r, body, k)
-	o := inferOptions{Key: k, Body: payload, Upstream: upstream, Protocol: protocol, Model: model, Level: level, ID: id, IP: a.ip(r), Affinity: affinity, Sticky: sticky, Stream: truth(body["stream"]), Timing: newTiming()}
+	o := inferOptions{Key: k, Body: payload, Upstream: upstream, Tools: tools, Protocol: protocol, Model: model, Level: level, ID: id, IP: a.ip(r), Affinity: affinity, Sticky: sticky, Stream: truth(body["stream"]), Timing: newTiming()}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	stop := context.AfterFunc(a.ctx, cancel)
@@ -253,7 +275,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 	w.Header().Set("X-Inference-Driver", "http")
 	var stream *protocolStream
 	if o.Stream {
-		stream = newStream(w, r, protocol, id, model, truth(obj(body["stream_options"])["include_usage"]))
+		stream = newStream(w, r, protocol, id, model, truth(obj(body["stream_options"])["include_usage"]), tools)
 		defer stream.end()
 		o.OnEvent = stream.onEvent
 		stopStream := context.AfterFunc(stream.ctx, cancel)
@@ -268,7 +290,15 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 		}
 		return
 	}
-	response := buildResponse(protocol, result, model, id)
+	response, e := buildResponse(protocol, result, model, id, tools)
+	if e != nil {
+		if stream != nil {
+			stream.fail(e.(*Failure))
+		} else {
+			a.sendFailure(w, e.(*Failure), protocol)
+		}
+		return
+	}
 	if stream != nil {
 		response = stream.complete(result, response)
 	}

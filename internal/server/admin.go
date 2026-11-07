@@ -276,13 +276,20 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return a.updateStatus(), 202, nil
 	case "GET /api/settings":
 		out := M{}
-		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "aliases", "retry", "web_port", "gateway_port"} {
+		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "zcode_version_auto_update", "zcode_version_check_interval_sec", "aliases", "retry", "web_port", "gateway_port"} {
 			out[k] = cfg[k]
 		}
 		over := obj(a.setting("config_overrides", M{}))
 		delete(over, "notify_webhook")
 		out["overrides"] = over
+		out["zcode_version_status"] = a.setting("zcode_version_status", M{})
 		return out, 200, nil
+	case "POST /api/settings/zcode-version/sync":
+		if err := a.syncZCodeVersion(ctx); err != nil {
+			return M{"ok": false, "error": err.Error()}, 502, nil
+		}
+		current := a.config()
+		return M{"ok": true, "app_version": current["app_version"], "client_version": obj(current["http"])["client_version"], "status": a.setting("zcode_version_status", M{})}, 200, nil
 	case "GET /api/settings/captcha/runtime":
 		options := obj(obj(cfg["http"])["captcha"])
 		for _, key := range []string{"node_path", "jsdom_path"} {
@@ -334,16 +341,27 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			return M{"ok": false, "error": e.Error()}, 400, nil
 		}
 		allowed := map[string]bool{}
-		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time default_reasoning_level app_version aliases retry inference_driver http outbound_proxy") {
+		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time default_reasoning_level app_version zcode_version_auto_update zcode_version_check_interval_sec aliases retry inference_driver http outbound_proxy") {
 			allowed[k] = true
 		}
 		a.configMu.Lock()
 		over := obj(a.setting("config_overrides", M{}))
 		delete(over, "notify_webhook")
 		next := clone(a.cfg)
+		autoVersion := truth(next["zcode_version_auto_update"])
+		if value, present := b["zcode_version_auto_update"]; present {
+			autoVersion = truth(value)
+		}
 		for k, v := range b {
 			if !allowed[k] {
 				continue
+			}
+			if autoVersion && k == "app_version" {
+				continue
+			}
+			if autoVersion && k == "http" {
+				v = clone(obj(v))
+				delete(obj(v), "client_version")
 			}
 			if k == "retry" || k == "http" || k == "outbound_proxy" {
 				v = deepMerge(obj(next[k]), obj(v), false)
@@ -358,6 +376,8 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		proxyChanged := js(next["outbound_proxy"]) != js(a.cfg["outbound_proxy"])
 		captchaChanged := proxyChanged || js(next["app_version"]) != js(a.cfg["app_version"]) || js(obj(next["http"])["captcha"]) != js(obj(a.cfg["http"])["captcha"])
 		timeChanged := js(next["daily_claim_time"]) != js(a.cfg["daily_claim_time"])
+		versionSyncEnabled := autoVersion && (proxyChanged || !truth(a.cfg["zcode_version_auto_update"]))
+		versionScheduleChanged := js(next["zcode_version_auto_update"]) != js(a.cfg["zcode_version_auto_update"]) || js(next["zcode_version_check_interval_sec"]) != js(a.cfg["zcode_version_check_interval_sec"])
 		e := a.setSetting("config_overrides", over)
 		if e == nil {
 			a.cfg = next
@@ -371,6 +391,16 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		if timeChanged && e == nil {
 			a.rescheduleClaims()
+		}
+		if versionScheduleChanged && e == nil {
+			a.rescheduleZCodeVersionChecks()
+		}
+		if versionSyncEnabled && e == nil {
+			a.background(func() {
+				if err := a.syncZCodeVersion(a.ctx); err != nil && a.ctx.Err() == nil {
+					a.log.Printf("ZCode 版本同步失败，沿用当前版本：%v", err)
+				}
+			})
 		}
 		return ok, 200, e
 	case "GET /api/audit":
@@ -505,6 +535,19 @@ func (a *App) pendingFlows() []any {
 var versionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 func validateSettings(b M) error {
+	if value, present := b["zcode_version_check_interval_sec"]; present {
+		_, isFloat := value.(float64)
+		_, isJSONNumber := value.(json.Number)
+		n := num(value)
+		if (!isFloat && !isJSONNumber) || n != math.Trunc(n) || n < minZCodeVersionCheckIntervalSec || n > maxZCodeVersionCheckIntervalSec {
+			return fmt.Errorf("ZCode 版本检查间隔须为 1 分钟到 365 天之间的整数秒数")
+		}
+	}
+	if value, present := b["zcode_version_auto_update"]; present {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("zcode_version_auto_update 必须为布尔值")
+		}
+	}
 	if value, present := b["outbound_proxy"]; present {
 		if err := validateOutboundProxyFields(value); err != nil {
 			return err

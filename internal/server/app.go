@@ -40,45 +40,47 @@ type profileEntry struct {
 	Done  chan struct{}
 }
 type App struct {
-	db                   *sql.DB
-	data, secret         string
-	root                 string
-	version              string
-	log                  *log.Logger
-	logfile              *os.File
-	web                  fs.FS
-	configMu             sync.RWMutex
-	cfg                  M
-	mu                   sync.Mutex
-	states               map[string]*accountState
-	upstreamCooldowns    map[string]*upstreamCooldown
-	cooldownGeneration   uint64
-	available            chan struct{}
-	scheduleMu           sync.Mutex
-	waiters              []*accountWaiter
-	sticky               map[string]stickyEntry
-	sessions             map[string]int64
-	responses            map[string]responseEntry
-	responseOrder        []string
-	responseBytes        int
-	clients              map[string]*http.Client
-	jars                 map[string]*diskJar
-	claimLocks           map[string]bool
-	claimReschedule      chan struct{}
-	flowLocks            map[string]bool
-	reauth               map[string]int64
-	pollDue              map[string]int64
-	polling              map[string]bool
-	profiles             map[string]*profileEntry
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	wg                   sync.WaitGroup
-	webPort, gatewayPort int
-	origin               string
-	captcha              captchaManager
-	proxies              outboundProxyManager
-	mihomoInstallMu      sync.Mutex
-	updates              updateManager
+	db                     *sql.DB
+	data, secret           string
+	root                   string
+	version                string
+	log                    *log.Logger
+	logfile                *os.File
+	web                    fs.FS
+	configMu               sync.RWMutex
+	cfg                    M
+	mu                     sync.Mutex
+	states                 map[string]*accountState
+	upstreamCooldowns      map[string]*upstreamCooldown
+	cooldownGeneration     uint64
+	available              chan struct{}
+	scheduleMu             sync.Mutex
+	waiters                []*accountWaiter
+	sticky                 map[string]stickyEntry
+	sessions               map[string]int64
+	responses              map[string]responseEntry
+	responseOrder          []string
+	responseBytes          int
+	clients                map[string]*http.Client
+	jars                   map[string]*diskJar
+	claimLocks             map[string]bool
+	claimReschedule        chan struct{}
+	flowLocks              map[string]bool
+	reauth                 map[string]int64
+	pollDue                map[string]int64
+	polling                map[string]bool
+	profiles               map[string]*profileEntry
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	wg                     sync.WaitGroup
+	webPort, gatewayPort   int
+	origin                 string
+	captcha                captchaManager
+	proxies                outboundProxyManager
+	mihomoInstallMu        sync.Mutex
+	updates                updateManager
+	zcodeVersionMu         sync.Mutex
+	zcodeVersionReschedule chan struct{}
 }
 
 func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
@@ -104,6 +106,7 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	a := &App{db: d, data: data, secret: secret, log: log.New(out, "", log.LstdFlags), logfile: lf, web: web, cfg: cfg, ctx: ctx, cancel: cancel, states: map[string]*accountState{}, sticky: map[string]stickyEntry{}, sessions: map[string]int64{}, responses: map[string]responseEntry{}, clients: map[string]*http.Client{}, jars: map[string]*diskJar{}, claimLocks: map[string]bool{}, claimReschedule: make(chan struct{}, 1), flowLocks: map[string]bool{}, reauth: map[string]int64{}, pollDue: map[string]int64{}, polling: map[string]bool{}, origin: "https://zcode.z.ai"}
 	a.root = root
 	a.version = buildVersion
+	a.zcodeVersionReschedule = make(chan struct{}, 1)
 	saved := obj(a.setting("config_overrides", M{}))
 	migrateHTTPVersion := !truth(a.setting("http_client_version_3_17_2_migrated", false))
 	clean := M{}

@@ -13,8 +13,10 @@ FROM docker.io/metacubex/mihomo:v1.19.33@sha256:9211361a3ed85305383288d38c05e858
 
 FROM debian:bookworm-slim AS runtime-base
 ARG CAPTCHA_RUNTIME=0
+ARG GRAMMAR_RUNTIME=0
 WORKDIR /app
 COPY captcha_node/package.json captcha_node/package-lock.json ./captcha_node/
+COPY grammar_python/requirements.txt ./grammar_python/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && case "$CAPTCHA_RUNTIME" in \
@@ -23,6 +25,13 @@ RUN apt-get update \
            && npm --prefix /app/captcha_node ci --omit=dev --ignore-scripts --no-audit --no-fund \
            && npm cache clean --force ;; \
          *) echo 'CAPTCHA_RUNTIME must be 0 or 1' >&2; exit 1 ;; \
+       esac \
+    && case "$GRAMMAR_RUNTIME" in \
+         0) ;; \
+         1) apt-get install -y --no-install-recommends python3 python3-venv \
+           && python3 -m venv /app/grammar_python/.venv \
+           && /app/grammar_python/.venv/bin/python -m pip install --no-cache-dir --only-binary=:all: -r /app/grammar_python/requirements.txt ;; \
+         *) echo 'GRAMMAR_RUNTIME must be 0 or 1' >&2; exit 1 ;; \
        esac \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/zcode2api /usr/local/bin/zcode2api

@@ -1293,6 +1293,8 @@ async function pageSettings(main) {
   const [mihomoOS, mihomoArch] = (mihomo.platform || '').split('/');
   const mihomoTarget = mihomo.platform ? `${({ windows: 'Windows', linux: 'Linux', darwin: 'macOS' })[mihomoOS] || mihomoOS} / ${({ amd64: 'x64', arm64: 'ARM64' })[mihomoArch] || mihomoArch}` : '';
   const httpParams = { ...s.http };
+  const versionIntervalSeconds = Number(s.zcode_version_check_interval_sec) || 432000;
+  const versionIntervalUnit = versionIntervalSeconds % 86400 === 0 ? 86400 : versionIntervalSeconds % 3600 === 0 ? 3600 : 60;
   const captcha = { mode: 'off', node_path: 'node', jsdom_path: '', simulate_canvas_webgl: true, timeout_ms: 30000, ticket_ttl_ms: 75000, ...s.http.captcha };
   const proxy = { enabled: false, source: 'manual', urls: [], subscription_url: '', preferred_node: '', mihomo_path: 'mihomo', refresh_interval_sec: 3600, ...s.outbound_proxy };
   delete httpParams.client_version;
@@ -1342,6 +1344,13 @@ async function pageSettings(main) {
       <div class="settings-panel settings-section-body settings-section-content"><div class="network-settings-fields">
         <label class="f">默认思考强度<select id="s-level" required aria-describedby="s-level-hint"><option value="low">低（low）</option><option value="high">高（high）</option><option value="max">最高（max）</option></select><small id="s-level-hint">优先级：客户端 → 密钥 → 此处设置。低强度仍开启思考；客户端关闭思考时不覆盖。始终思考的模型可能返回 1210，请在客户端开启思考。</small></label>
         <div class="settings-subsection"><div class="advanced-fields">
+          <div class="settings-fields settings-version-schedule">
+            <div class="settings-version-actions">
+              <label class="settings-check" title="按设置间隔检查官方稳定版，同时更新推理、额度与领卡版本；获取失败时保留当前版本。关闭后可手动设置。"><input id="s-zcode-version-auto" type="checkbox" ${s.zcode_version_auto_update ? 'checked' : ''}><span>自动跟随 ZCode 稳定版</span></label>
+              <button type="button" class="btn proxy-small-button" id="s-zcode-version-sync">立即同步</button>
+            </div>
+            <div class="field-group f"><label for="s-zcode-version-interval">版本检查间隔</label><div class="settings-version-interval" title="从上次检查时间起计算，保存后立即生效；重启不会重复检查。"><input id="s-zcode-version-interval" type="number" min="1" step="any" required value="${versionIntervalSeconds / versionIntervalUnit}"><select id="s-zcode-version-unit" aria-label="版本检查间隔单位"><option value="60">分钟</option><option value="3600">小时</option><option value="86400">天</option></select></div></div>
+          </div>
           <div class="settings-fields">
             <label class="f">额度与领卡 API 版本<input id="s-ver" value="${esc(s.app_version)}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 3.17.2" required><small>用于管理请求的版本标识，不改变设备指纹或上游验证规则。</small></label>
             <label class="f">推理 API 版本<input id="s-http-version" value="${esc(s.http.client_version || '3.17.2')}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" title="请输入三段数字版本，例如 3.17.2" required><small>对应 http.client_version，仅调整推理请求的版本标识。</small></label>
@@ -1364,7 +1373,21 @@ async function pageSettings(main) {
   $('#s-level').value = s.default_reasoning_level || 'low';
   $('#s-captcha-mode').value = captcha.mode;
   $('#s-proxy-source').value = proxy.source;
-  const ids = ['s-poll', 's-jitter', 's-conc', 's-level', 's-ver', 's-http-version', 's-aliases', 's-retry', 's-http', 's-captcha-mode', 's-captcha-timeout', 's-captcha-ttl', 's-captcha-canvas', 's-captcha-node', 's-captcha-jsdom', 's-proxy-enabled', 's-proxy-source', 's-proxy-urls', 's-proxy-subscription', 's-proxy-node', 's-proxy-mihomo', 's-proxy-refresh'];
+  const versionAuto = $('#s-zcode-version-auto'), versionSync = $('#s-zcode-version-sync');
+  const versionInterval = $('#s-zcode-version-interval'), versionUnit = $('#s-zcode-version-unit');
+  versionUnit.value = String(versionIntervalUnit);
+  let versionSyncing = false;
+  const syncVersionFields = () => {
+    const automatic = versionAuto.checked;
+    $('#s-ver').disabled = automatic; $('#s-http-version').disabled = automatic;
+    const unit = Number(versionUnit.value);
+    versionInterval.min = String(60 / unit); versionInterval.max = String(31536000 / unit);
+    syncSelect(versionUnit);
+    versionSync.disabled = !automatic || !s.zcode_version_auto_update || settingsDirty || settingsSaving || versionSyncing;
+    const checked = s.zcode_version_status?.checked_at;
+    versionSync.title = s.zcode_version_status?.error || (checked ? '最近检查：' + new Date(checked).toLocaleString() + '\n下次检查：' + new Date(Number(checked) + (Number(s.zcode_version_check_interval_sec) || 432000) * 1000).toLocaleString() : '查询 ZCode 官方稳定版清单');
+  };
+  const ids = ['s-poll', 's-jitter', 's-conc', 's-level', 's-ver', 's-http-version', 's-zcode-version-auto', 's-zcode-version-interval', 's-zcode-version-unit', 's-aliases', 's-retry', 's-http', 's-captcha-mode', 's-captcha-timeout', 's-captcha-ttl', 's-captcha-canvas', 's-captcha-node', 's-captcha-jsdom', 's-proxy-enabled', 's-proxy-source', 's-proxy-urls', 's-proxy-subscription', 's-proxy-node', 's-proxy-mihomo', 's-proxy-refresh'];
   const values = () => Object.fromEntries(ids.map(id => [id, $('#' + id).type === 'checkbox' ? $('#' + id).checked : $('#' + id).value]));
   const apply = data => ids.forEach(id => { if (Object.hasOwn(data, id)) { const input = $('#' + id); if (input.type === 'checkbox') input.checked = !!data[id]; else input.value = data[id]; syncSelect(input); } });
   let fingerprint = JSON.stringify(values()), savedAt = '';
@@ -1378,7 +1401,24 @@ async function pageSettings(main) {
     try { if (settingsDirty) { const draft = values(); delete draft['s-proxy-urls']; delete draft['s-proxy-subscription']; sessionStorage.setItem(draftKey, JSON.stringify(draft)); } else sessionStorage.removeItem(draftKey); }
     catch { if (settingsDirty) status.textContent = '有未保存修改 · 浏览器暂时无法保存草稿，请及时保存'; }
     save.title = status.textContent;
+    syncVersionFields();
   };
+  versionSync.addEventListener('click', async () => {
+    if (versionSync.disabled) return;
+    versionSyncing = true; btnLoading(versionSync, true); syncVersionFields();
+    try {
+      const response = await api('/api/settings/zcode-version/sync', { method: 'POST', body: {} });
+      if (response.ok === false) throw new Error(response.error || '同步失败');
+      if (!form.isConnected) return;
+      s.app_version = response.app_version; s.http.client_version = response.client_version; s.zcode_version_status = response.status;
+      if (versionAuto.checked) { $('#s-ver').value = response.app_version; $('#s-http-version').value = response.client_version; }
+      const saved = JSON.parse(fingerprint);
+      saved['s-ver'] = response.app_version; saved['s-http-version'] = response.client_version;
+      fingerprint = JSON.stringify(saved);
+      toast('已同步 ZCode ' + response.app_version, 'ok');
+    } catch (error) { if (form.isConnected) toast('版本同步失败：' + error.message, 'err'); }
+    finally { versionSyncing = false; if (form.isConnected) { btnLoading(versionSync, false); updateDirty(); } }
+  });
   try {
     const draft = JSON.parse(sessionStorage.getItem(draftKey) || 'null');
     if (draft && typeof draft === 'object' && !Array.isArray(draft)) {
@@ -1586,10 +1626,12 @@ async function pageSettings(main) {
     try {
       const response = await api('/api/settings', { method: 'PUT', body: {
         poll_interval_sec: Number(submitted['s-poll']), poll_jitter_sec: Number(submitted['s-jitter']), poll_concurrency: Number(submitted['s-conc']),
-        default_reasoning_level: submitted['s-level'], app_version: submitted['s-ver'],
+        default_reasoning_level: submitted['s-level'], app_version: submitted['s-ver'], zcode_version_auto_update: submitted['s-zcode-version-auto'], zcode_version_check_interval_sec: Math.round(Number(submitted['s-zcode-version-interval']) * Number(submitted['s-zcode-version-unit'])),
         inference_driver: 'http', http: { ...JSON.parse(submitted['s-http']), client_version: submitted['s-http-version'], captcha: { mode: submitted['s-captcha-mode'], node_path: submitted['s-captcha-node'].trim() || 'node', jsdom_path: submitted['s-captcha-jsdom'].trim(), simulate_canvas_webgl: submitted['s-captcha-canvas'], timeout_ms: Number(submitted['s-captcha-timeout']), ticket_ttl_ms: Number(submitted['s-captcha-ttl']) } }, outbound_proxy: outboundValues(submitted), aliases: JSON.parse(submitted['s-aliases']), retry: JSON.parse(submitted['s-retry']),
       } });
       if (response.ok === false) throw new Error(response.error || '保存失败');
+      s.zcode_version_auto_update = submitted['s-zcode-version-auto'];
+      s.zcode_version_check_interval_sec = Math.round(Number(submitted['s-zcode-version-interval']) * Number(submitted['s-zcode-version-unit']));
       fingerprint = JSON.stringify(submitted);
       savedAt = '已保存并生效 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
       toast('设置已保存并生效', 'ok');
@@ -1622,7 +1664,7 @@ async function boot() {
   if (window._refreshTimer) clearInterval(window._refreshTimer);
   window._refreshTimer = setInterval(() => {
     if (!TOKEN || document.hidden || $('#app-view').classList.contains('hidden')) return;
-    const period = ['dashboard', 'accounts'].includes(currentPage) ? 3000 : currentPage === 'logs' ? 1000 : 0;
+    const period = ['dashboard', 'accounts', 'logs'].includes(currentPage) ? 1000 : 0;
     if (!period || Date.now() - lastRefreshAt < period) return;
     const main = $('#main');
     if (document.querySelector('.modal-bg') || main.dataset.loading === '1' || openSelect) return;

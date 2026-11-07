@@ -1022,6 +1022,10 @@ main[data-page="logs"] { gap: 18px; }
 .proxy-test-results ul { display: grid; gap: 10px; margin: 0; padding-left: 18px; }
 .proxy-test-results li > span { display: block; margin-top: 3px; }
 .advanced-fields { display: flex; flex-direction: column; gap: 20px; }
+.settings-version-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.settings-version-schedule { align-items: end; }
+.settings-version-schedule .settings-version-actions { min-height: 36px; }
+.settings-version-interval { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 8px; }
 .settings-code-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .code-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .code-field-wide { grid-column: 1 / -1; }
