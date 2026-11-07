@@ -74,6 +74,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -95,7 +96,13 @@ jobs:
           if [[ "$TAG" == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "$TAG" dist/* --verify-tag --title "zcode2api $TAG" --generate-notes "${flags[@]}"
+          notes="$RUNNER_TEMP/release-notes.md"
+          awk -v version="$TAG" '
+            $1 == "##" { if (found) exit; found = ($2 == version); next }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          test -s "$notes"
+          gh release create "$TAG" dist/* --verify-tag --title "zcode2api $TAG" --notes-file "$notes" --generate-notes "${flags[@]}"
 
   validation:
     name: Verify release artifacts

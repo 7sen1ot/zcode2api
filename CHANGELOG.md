@@ -2,6 +2,25 @@
 
 按版本标签及对应提交整理；日期使用北京时间。
 
+## v1.6.0 — 2026-11-07
+
+### 协议兼容
+
+- 对齐 ZCode 3.17.2 的请求版本、请求 ID、UUIDv7 查询标识及 `metadata.user_id`，并保留按运行平台生成的标识。感谢 [@Heking114514](https://github.com/Heking114514) 在 [PR #1](https://github.com/7sen1ot/zcode2api/pull/1) 中提供请求指纹的排查与修复方案，本版本已按网关架构适配。
+- 支持 Chat Completions 的 `function` / `custom` 工具，以及 Responses 的 `function` / `custom` / `namespace` 工具，补齐工具声明、调用历史、工具选择与流式响应转换。感谢 [@amzqing](https://github.com/amzqing) 在 [Issue #2](https://github.com/7sen1ot/zcode2api/issues/2) 中反馈 namespace 工具兼容问题。
+- 使用 LLGuidance 校验 custom 工具的 Lark 与 Rust regex grammar；生成结果不符合语法时返回明确错误，不将无效输入作为可执行工具调用返回。此功能是生成后的校验，不是上游逐 token 约束生成。
+- 移除网关注入的固定 ZCode 系统模板，按已知段落指纹清理客户端默认模板，保留未知或自定义内容与代码示例。
+- 增加 `instruction_mode`：默认通过带作用域的顶层 system 近似转换 developer 和中途 system 指令，并返回兼容性响应头；严格模式拒绝无法等价保留的指令语义。
+
+### 版本与控制台
+
+- 新增 ZCode 官方稳定版自动跟随，统一同步推理、额度和领卡 API 的版本标识；默认每 5 天检查，支持按分钟、小时或天设置间隔，以及手动同步。
+- 检查进度与版本配置持久化；重启后沿用检查计划，同步失败或官方清单版本低于当前配置时保留已有版本。
+- 默认账号余额轮询间隔调整为 5 秒、抖动为 0；控制台概览、账号和日志每秒刷新。
+- 更新检查、发行包下载和镜像入口迁移至 `7sen1ot/zcode2api`，自动忽略旧仓库的版本缓存。
+
+Grammar 校验需要 Python 3.10+ 与 `grammar_python/requirements.txt` 中的 llguidance；普通 function 和无 grammar 的 custom 工具不需要该依赖。Docker 可使用 `GRAMMAR_RUNTIME=1` 构建参数安装。六个平台发行包均附带依赖清单与[协议兼容说明](https://github.com/7sen1ot/zcode2api/blob/v1.6.0/docs/protocol-compatibility.md)；一键更新只替换程序，可选运行时依赖仍需单独安装。
+
 ## v1.5.0 — 2026-11-06
 
 - 新增「设置 → 版本更新」，检查 GitHub 最新正式 Release，展示当前版本、最新版本与发布说明；同一发行版本不会覆盖本地热修复。
