@@ -116,6 +116,19 @@ type proxyContextKey struct{}
 type proxyRoute struct{ URL string }
 type proxyEndpoint struct{ URL, Name, ID string }
 
+func manualProxyEndpoints(urls []any) []proxyEndpoint {
+	endpoints := []proxyEndpoint{}
+	seen := map[string]bool{}
+	for _, value := range urls {
+		address := str(value)
+		if !seen[address] {
+			endpoints = append(endpoints, proxyEndpoint{URL: address, Name: maskedProxy(address)})
+			seen[address] = true
+		}
+	}
+	return endpoints
+}
+
 func (endpoint proxyEndpoint) identity() string {
 	if endpoint.ID != "" {
 		return endpoint.ID
@@ -205,14 +218,7 @@ func (a *App) pinOutboundProxy(parent context.Context, account M) (context.Conte
 		}
 		endpoints = runtime.endpoints
 	} else {
-		seen := map[string]bool{}
-		for _, value := range arr(options["urls"]) {
-			address := str(value)
-			if !seen[address] {
-				endpoints = append(endpoints, proxyEndpoint{URL: address, Name: maskedProxy(address)})
-				seen[address] = true
-			}
-		}
+		endpoints = manualProxyEndpoints(arr(options["urls"]))
 	}
 	index, generation := a.proxies.selectEndpoint(options, endpoints)
 	var once sync.Once
@@ -256,66 +262,97 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 		}
 	}
 	manager.endpoints = append([]proxyEndpoint(nil), endpoints...)
+	return manager.selectAvailableEndpointLocked(time.Now()), manager.generation
+}
+
+// Call with mu held. Expired cooldowns are eligible on selection and failover.
+func (manager *outboundProxyManager) selectAvailableEndpointLocked(now time.Time) int {
 	present := map[string]bool{}
-	for _, endpoint := range endpoints {
+	for _, endpoint := range manager.endpoints {
 		present[endpoint.identity()] = true
 	}
 	for identity, until := range manager.retryAt {
-		if !present[identity] || !time.Now().Before(until) {
+		if !present[identity] || !now.Before(until) {
 			delete(manager.retryAt, identity)
 			delete(manager.unavailable, identity)
 		}
 	}
 	for identity, until := range manager.blocked {
-		if !present[identity] || !time.Now().Before(until) {
+		if !present[identity] || !now.Before(until) {
 			delete(manager.blocked, identity)
 		}
 	}
 	start := 0
-	for index, endpoint := range endpoints {
+	for index, endpoint := range manager.endpoints {
 		if endpoint.identity() == manager.selected {
 			start = index
 			break
 		}
 	}
-	for offset := 0; offset < len(endpoints); offset++ {
-		index := (start + offset) % len(endpoints)
-		identity := endpoints[index].identity()
+	for offset := 0; offset < len(manager.endpoints); offset++ {
+		index := (start + offset) % len(manager.endpoints)
+		identity := manager.endpoints[index].identity()
 		if !manager.unavailable[identity] && manager.blocked[identity].IsZero() {
 			manager.selected = identity
-			return index, manager.generation
+			return index
 		}
 	}
-	return -1, manager.generation
+	return -1
+}
+
+// A route failure changes the shared selection, never an in-flight pinned exit.
+func (a *App) prepareProxyFailover(ctx context.Context, failure *Failure) {
+	if failure == nil || ctx.Err() != nil {
+		return
+	}
+	blocked := failure.Code == "upstream_waf_blocked"
+	if !blocked && !proxyExitFailure(failure) {
+		return
+	}
+	if _, pooled := ctx.Value(proxySelectionKey{}).(proxySelection); !pooled {
+		return
+	}
+	failure.Retryable = a.markProxyRoute(ctx, blocked, failure.RetryAfter)
+	failure.ProxyFailover = failure.Retryable
 }
 
 // Only current pooled routes may retire nodes; canceled and override routes cannot.
-func (a *App) markProxyFailure(ctx context.Context) bool {
-	return a.markProxyRoute(ctx, false)
-}
-
-func (a *App) markProxyRoute(ctx context.Context, blocked bool) bool {
+func (a *App) markProxyRoute(ctx context.Context, blocked bool, retryAfter time.Duration) bool {
 	selection, ok := ctx.Value(proxySelectionKey{}).(proxySelection)
 	if !ok || ctx.Err() != nil {
 		return false
 	}
 	a.proxies.mu.Lock()
-	defer a.proxies.mu.Unlock()
 	if selection.generation != a.proxies.generation {
+		a.proxies.mu.Unlock()
 		return false
 	}
+	now := time.Now()
+	reason := "代理连接失败"
 	if blocked {
-		a.proxies.blocked[selection.identity] = time.Now().Add(time.Minute)
+		reason = "上游安全网关拦截"
+		a.proxies.blocked[selection.identity] = maxTime(a.proxies.blocked[selection.identity], now.Add(max(time.Minute, retryAfter)))
 	} else {
 		a.proxies.unavailable[selection.identity] = true
-		a.proxies.retryAt[selection.identity] = time.Now().Add(30 * time.Second)
+		a.proxies.retryAt[selection.identity] = maxTime(a.proxies.retryAt[selection.identity], now.Add(max(30*time.Second, retryAfter)))
 	}
-	for _, endpoint := range a.proxies.endpoints {
-		if !a.proxies.unavailable[endpoint.identity()] && a.proxies.blocked[endpoint.identity()].IsZero() {
-			return true
+	previous := a.proxies.selected
+	index := a.proxies.selectAvailableEndpointLocked(now)
+	var previousName, nextName string
+	if index >= 0 && previous != a.proxies.selected {
+		nextName = a.proxies.endpoints[index].Name
+		for _, endpoint := range a.proxies.endpoints {
+			if endpoint.identity() == previous {
+				previousName = endpoint.Name
+				break
+			}
 		}
 	}
-	return false
+	a.proxies.mu.Unlock()
+	if nextName != "" {
+		a.log.Printf("代理节点切换（%s）: %q -> %q", reason, previousName, nextName)
+	}
+	return index >= 0
 }
 
 // Account refusals, ticket and runtime failures do not identify a broken exit.
@@ -463,9 +500,7 @@ func (a *App) testOutboundProxies(parent context.Context, options M) (M, error) 
 			defer runtime.stop()
 			endpoints = runtime.endpoints
 		} else {
-			for _, value := range arr(options["urls"]) {
-				endpoints = append(endpoints, proxyEndpoint{URL: str(value), Name: maskedProxy(str(value))})
-			}
+			endpoints = manualProxyEndpoints(arr(options["urls"]))
 		}
 	}
 	results := make([]any, len(endpoints))

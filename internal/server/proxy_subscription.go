@@ -262,8 +262,24 @@ func (a *App) subscriptionNodes(ctx context.Context, options M) ([]subscriptionN
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
 	response.Body.Close()
-	if response.StatusCode != 200 || readErr != nil || len(body) > 2<<20 {
-		return nil, proxyFailure("proxy_subscription_unavailable", "订阅响应无效或超过 2 MB")
+	if response.StatusCode != http.StatusOK {
+		failure := &Failure{Kind: "server", Code: "proxy_subscription_unavailable", Status: response.StatusCode,
+			Message: fmt.Sprintf("代理订阅获取失败（HTTP %d）", response.StatusCode)}
+		// Recognize only known authentication errors; never expose response bodies
+		// or request errors, which can contain the private subscription URL.
+		text := strings.ToLower(string(body))
+		if response.StatusCode == http.StatusUnauthorized || (response.StatusCode == http.StatusForbidden &&
+			(strings.Contains(text, "token is error") || strings.Contains(text, "invalid token") || strings.Contains(text, "token expired"))) {
+			failure.Code = "proxy_subscription_auth_failed"
+			failure.Message = fmt.Sprintf("订阅令牌错误或已失效（HTTP %d），请重新复制有效订阅链接", response.StatusCode)
+		}
+		return nil, failure
+	}
+	if readErr != nil {
+		return nil, proxyFailure("proxy_subscription_unavailable", "读取代理订阅响应失败，请稍后重试")
+	}
+	if len(body) > 2<<20 {
+		return nil, proxyFailure("proxy_subscription_response_too_large", "代理订阅响应超过 2 MB")
 	}
 	return decodeSubscription(body, str(options["subscription_filter"]))
 }

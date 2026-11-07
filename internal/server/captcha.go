@@ -377,7 +377,7 @@ func (a *App) fetchCaptchaScene(ctx context.Context, account M) (M, *Failure) {
 		return nil, &Failure{Kind: "network", Code: "captcha_config_unavailable", Message: "读取上游安全验证配置的网络请求失败", Retryable: true}
 	}
 	if !response.OK {
-		failure := classify(upstreamHTTPFailure(&http.Response{StatusCode: response.Status, Header: response.Header}, response.errorBody))
+		failure := apiResponseFailure(response)
 		// Configuration requests carry no account token. Their refusals cannot
 		// establish account risk, even when they reuse a business error code.
 		if failure.Kind == "account_risk" {
@@ -406,16 +406,6 @@ func (a *App) fetchCaptchaScene(ctx context.Context, account M) (M, *Failure) {
 	return scene, nil
 }
 
-type limitedCaptchaOutput struct{ value []byte }
-
-func (w *limitedCaptchaOutput) Write(p []byte) (int, error) {
-	if len(w.value)+len(p) > 64<<10 {
-		return 0, fmt.Errorf("captcha runtime output limit exceeded")
-	}
-	w.value = append(w.value, p...)
-	return len(p), nil
-}
-
 func (a *App) runCaptcha(ctx context.Context, options, parameters M) (M, error) {
 	directory := filepath.Join(a.data, "runtime")
 	if err := os.MkdirAll(directory, 0700); err != nil {
@@ -432,7 +422,7 @@ func (a *App) runCaptcha(ctx context.Context, options, parameters M) (M, error) 
 	command := exec.CommandContext(ctx, node, helper)
 	hideChildWindow(command)
 	command.Stdin = strings.NewReader(js(parameters))
-	output := &limitedCaptchaOutput{}
+	output := &limitedProcessOutput{}
 	command.Stdout, command.Stderr = output, io.Discard
 	command.WaitDelay = 2 * time.Second
 	command.Cancel = func() error {

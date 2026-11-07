@@ -72,7 +72,7 @@ func (g *toolGrammar) check(parent context.Context, input *string) error {
 	command := exec.CommandContext(ctx, g.Python, "-I", "-c", grammarCheckScript)
 	hideChildWindow(command)
 	command.Stdin = strings.NewReader(js(request))
-	output := &limitedCaptchaOutput{}
+	output := &limitedProcessOutput{}
 	command.Stdout, command.Stderr = output, io.Discard
 	command.WaitDelay = time.Second
 	if e := command.Run(); e != nil {

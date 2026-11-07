@@ -287,9 +287,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		// prefetched ticket. Keep it unless the cached scene is disabled.
 		a.prepareCaptchaChallenge(ctx)
 		sdkVerification, verificationFailure = a.captchaHeaders(ctx, r, captchaPurposeClaim, true)
-		if verificationFailure != nil && proxyExitFailure(verificationFailure) {
-			a.markProxyFailure(ctx)
-		}
+		a.prepareProxyFailover(ctx, verificationFailure)
 		if verificationFailure == nil {
 			token = str(a.tokens(id)["zcode_jwt"])
 			if failure := validateCaptchaRequestToken(sdkVerification, r, token); failure != nil {

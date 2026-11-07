@@ -150,13 +150,20 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	defer release()
 	ctx, finish, failure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, account, path, token != "" || str(headers["Authorization"]) != ""))
 	if failure != nil {
+		a.prepareProxyFailover(ctx, failure)
 		return apiResult{}, failure
 	}
 	defer func() {
 		if err != nil {
-			finish(upstreamRequestFailure(ctx, err))
+			failure := upstreamRequestFailure(ctx, err)
+			finish(failure)
+			a.prepareProxyFailover(ctx, failure)
+			if proxyExitFailure(failure) {
+				err = failure
+			}
 		} else {
 			finish(result.failure)
+			a.prepareProxyFailover(ctx, result.failure)
 		}
 	}()
 	var reader io.Reader
@@ -192,9 +199,6 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	}
 	res, e := c.Do(req)
 	if e != nil {
-		if proxyExitFailure(transportFailure(ctx, e)) {
-			a.markProxyFailure(ctx)
-		}
 		return apiResult{}, e
 	}
 	defer res.Body.Close()
@@ -215,13 +219,7 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	result = apiResult{Status: res.StatusCode, JSON: j, Header: res.Header, OK: res.StatusCode == 200 && (codeIs(j["code"], 0) || codeIs(j["code"], 200))}
 	if !result.OK {
 		result.errorBody = append([]byte(nil), b[:min(len(b), 64<<10)]...)
-		failure := classify(upstreamHTTPFailure(res, result.errorBody))
-		result.failure = failure
-		if proxyExitFailure(failure) {
-			a.markProxyFailure(ctx)
-		} else if failure.Code == "upstream_waf_blocked" {
-			a.markProxyRoute(ctx, true)
-		}
+		result.failure = classify(upstreamHTTPFailure(res, result.errorBody))
 	}
 	return result, nil
 }

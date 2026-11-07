@@ -155,16 +155,7 @@ func random(n int) string {
 	}
 	return hex.EncodeToString(b)
 }
-func uuid() string {
-	b := make([]byte, 16)
-	if _, e := rand.Read(b); e != nil {
-		panic(e)
-	}
-	b[6] = (b[6] & 15) | 64
-	b[8] = (b[8] & 63) | 128
-	h := hex.EncodeToString(b)
-	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
-}
+func uuid() string   { return googleuuid.NewString() }
 func uuidv7() string { return googleuuid.Must(googleuuid.NewV7()).String() }
 func contains(a []any, s string) bool {
 	for _, v := range a {

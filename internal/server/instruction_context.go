@@ -39,6 +39,16 @@ func (c *instructionContext) message(m M, conversation bool) (M, error) {
 	if c.Mode == "strict" {
 		return nil, &Failure{Kind: "invalid", Code: "unsupported_instruction_semantics", Message: "strict 模式拒绝无法等价转换的 developer/中途 system 指令；请使用原生 Anthropic 协议，或显式选择 instruction_mode=scoped 接受近似角色与作用域语义"}
 	}
+	if conversation {
+		// The fixed upstream template also applies to later instruction updates.
+		// Remove only exact defaults here; legacy prefix cleanup is leading-only.
+		cleaner := &zcodePromptCleaner{stopped: true}
+		cleaned, _ := cleaner.content(content)
+		content = arr(cleaned)
+		if len(content) == 0 {
+			return nil, nil
+		}
+	}
 	texts := []string{}
 	for _, value := range content {
 		block := obj(value)

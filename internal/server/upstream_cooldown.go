@@ -135,6 +135,8 @@ func (a *App) beginUpstreamRequest(ctx context.Context, scope upstreamRequestSco
 			key := ""
 			delay := baseDelay
 			switch {
+			case failure.Code == "upstream_waf_blocked":
+				key, delay = scope.exit, time.Minute
 			case failure.VerifyCode == "F010" || failure.Code == "F010":
 				key, delay = scope.exit, time.Minute
 			case failure.VerifyCode == "F011" || failure.Code == "F011":

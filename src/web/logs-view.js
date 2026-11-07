@@ -86,7 +86,7 @@ globalThis.Z2ALogs = (() => {
     const live = globalThis._logLive !== false && (globalThis._logPage[globalThis._logTab] || 1) === 1;
     button.classList.remove('is-reconnecting');
     button.setAttribute('aria-pressed', String(live));
-    button.title = live ? '每 3 秒刷新；编辑筛选、查看详情时暂缓' : globalThis._logLive === false ? '开启实时刷新' : '查看历史时暂停；点击返回最新记录';
+    button.title = live ? '约每 1 秒刷新；编辑筛选、查看详情时暂缓' : globalThis._logLive === false ? '开启实时刷新' : '查看历史时暂停；点击返回最新记录';
     button.lastChild.textContent = live ? '实时' : '已暂停';
   }
   function queryFor(tab, fresh = false) {
