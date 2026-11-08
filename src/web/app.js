@@ -732,7 +732,7 @@ function renderAccPage(accounts, groups) {
   </div>
   <nav class="status-pills account-filters" id="acc-status" aria-label="按账号状态筛选">${pill('all', '全部')}${pill('active', '可用')}${pill('needs_relogin', '需处理')}${pill('cooldown', '冷却中')}${pill('expired', '已过期')}${pill('web_only', '仅网页')}</nav>
   <section><div id="acc-table"></div></section>`;
-  $('#add-btn').addEventListener('click', () => addAccountModal(groups));
+  $('#add-btn').addEventListener('click', () => addAccountModal());
   $('#accounts-refresh').addEventListener('click', () => render({ swap: true }));
   $('#acc-q').addEventListener('input', (e) => { f.q = e.target.value; f.page = 1; renderAccTable(); syncRoute(); });
   $('#acc-sort').value = f.sort || 'default';
@@ -809,7 +809,7 @@ async function onAccountAction(e) {
     const accounts = await api('/api/accounts');
     const a = accounts.find((item) => item.id === id);
     if (!a) return toast('账号不存在', 'err');
-    addAccountModal([], a);
+    addAccountModal(a);
   } else if (btn.dataset.act === 'verify') {
     btn.disabled = true;
     btnLoading(btn, true);
@@ -842,7 +842,7 @@ async function onAccountAction(e) {
   }
 }
 
-function addAccountModal(groups, target = null) {
+function addAccountModal(target = null) {
   const form = h(`<div>
     <section class="import-option">
       <div class="section-heading"><h2>从客户端导入</h2>${infoTip('读取运行服务的机器上的 ZCode 客户端凭据，并验证账号。', '客户端导入')}</div>

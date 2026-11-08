@@ -164,6 +164,20 @@ In request logs, `error_message` is a categorized summary in Chinese, and `error
 | [Proxies and security verification (Chinese)](docs/network.md) | Node selection and failover, SDK dependencies, ticket management, manual verification and error troubleshooting |
 | [Protocol compatibility (Chinese)](docs/protocol-compatibility.md) | Tool calls, grammar validation, system prompt deduplication and instruction conversion limitations |
 
+## Contributing
+
+You are welcome to report problems and suggest improvements through **Issues**, or help develop and improve the project through **Pull Requests (PRs)**.
+
+**How to contribute:**
+
+1. **Fork** this repository and create a new development branch.
+2. **Commit your changes**, keeping the code clear and consistent with the project's conventions. Add explanations where needed.
+3. **Open a PR**, describe your changes and their purpose, and wait for review and merging.
+
+Whether you fix a bug, improve a feature or update the documentation, every contribution is appreciated.
+
+If this project helps you, consider giving it a **Star** to support its continued maintenance and development!
+
 ## Security and disclaimer
 
 This is an unofficial project with no affiliation with or endorsement from ZCode, Zhipu, Z.ai or BigModel. Only connect accounts you own or are explicitly authorized to use, and comply with the third-party service terms.

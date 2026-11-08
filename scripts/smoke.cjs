@@ -35,7 +35,7 @@ async function main() {
     stream.on('data', chunk => { output = (output + chunk).slice(-16000); });
   }
   child.on('error', error => { spawnError = error; });
-  const closed = new Promise(resolve => child.once('close', code => { exited = true; resolve(code); }));
+  const closed = new Promise(resolve => child.once('close', (code, signal) => { exited = true; resolve({ code, signal }); }));
   let passed = false;
 
   try {
@@ -94,13 +94,17 @@ async function main() {
     console.error(output);
     throw error;
   } finally {
-    if (!exited) child.kill('SIGTERM');
+    const terminated = !exited && child.kill('SIGTERM');
     const force = setTimeout(() => child.kill('SIGKILL'), 5000);
     force.unref();
-    const code = await closed;
+    const { code, signal } = await closed;
     clearTimeout(force);
     await fs.rm(root, { recursive: true, force: true });
-    if (passed) assert.equal(code, 0, 'Service must shut down cleanly');
+    if (passed) {
+      // Windows kills the child directly instead of delivering SIGTERM.
+      const killedOnWindows = process.platform === 'win32' && terminated && code === null && signal === 'SIGTERM';
+      assert.ok(code === 0 || killedOnWindows, `Service must shut down cleanly (code=${code}, signal=${signal})`);
+    }
   }
   console.log('Smoke passed: startup, health, console assets, admin login and gateway keys.');
 }
