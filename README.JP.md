@@ -17,7 +17,7 @@
 
 </div>
 
-ZCode の無料アカウント向けリバースプロキシゲートウェイです。OpenAI Chat Completions、Responses、Anthropic Messages の各プロトコルに対応しています。
+ZCode の無料アカウント向けリバースプロキシゲートウェイです。OpenAI Chat Completions、Responses、Anthropic Messages（推奨）の各プロトコルに対応しています。
 
 Alibaba Cloud の不可視 CAPTCHA SDK の連携とリスク判定時のエラー処理に対応します。使い捨てチケットの分離、必要に応じた事前取得と期限切れ時の補充、サーバーの接続経路の統一、エラー分類とクールダウン付きリトライを実装しています。複数アカウントの振り分け、カードの自動取得、公式の対話型認証への切り替えにも対応します。認証の成否は上流サービスが決定します。
 

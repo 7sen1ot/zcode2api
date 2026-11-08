@@ -71,7 +71,7 @@ Anthropic 上游只有顶层 `system`，无法原生表达独立的 developer �
 
 | 模式 | 行为 |
 | --- | --- |
-| `scoped`（默认） | developer 和中途 system 指令保留在顶层 system，标注来源角色和生效边界，对话中仅放随机位置标记。Responses `instructions` 按 developer 处理 |
+| `scoped`（默认） | developer 和中途 system 指令保留在顶层 system，标注来源角色和生效边界，对话中仅放位置标记。标记按首条转换指令的角色与内容稳定生成，避免相同请求因随机标记破坏缓存前缀。Responses `instructions` 按 developer 处理 |
 | `strict` | 拒绝需要角色或作用域近似转换的指令，返回 `400 unsupported_instruction_semantics`，不发送上游；开头的普通 system 可直接转换 |
 
 scoped 依赖模型理解角色和位置标记，可能误解或扩大指令范围；发生近似转换时，响应附带：

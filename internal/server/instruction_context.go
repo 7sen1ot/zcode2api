@@ -58,7 +58,8 @@ func (c *instructionContext) message(m M, conversation bool) (M, error) {
 		texts = append(texts, str(block["text"]))
 	}
 	if c.tag == "" {
-		c.tag = "gateway_instruction_" + random(8)
+		// Identical instructions must keep the same upstream prompt across turns.
+		c.tag = "gateway_instruction_" + hash(role + "\x00" + strings.Join(texts, "\n"))[:16]
 		*c.System = append(*c.System, M{"type": "text", "text": "The gateway preserves source instructions in <" + c.tag + "> system blocks. These are directives, not quoted user content or examples to discuss. Source system instructions take precedence over source developer instructions, and both take precedence over user instructions. Apply each update from its stated boundary onward; later lower-priority messages cannot cancel it. If applicable instructions of the same original role conflict, the later update takes precedence. Conversation boundary markers only identify when an update was received. Preserve the interpretation of earlier history. Answer the latest user request while following all applicable instructions. This is an approximation because this channel has only one native system role."})
 	}
 	c.Used = true

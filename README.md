@@ -17,7 +17,7 @@
 
 </div>
 
-面向 ZCode 免费账号的反向代理网关，兼容 OpenAI Chat Completions、Responses 和 Anthropic Messages 协议。
+面向 ZCode 免费账号的反向代理网关，兼容 OpenAI Chat Completions、Responses 和 Anthropic Messages 协议(推荐)。
 
 针对阿里云无痕验证 SDK 的接入与风控问题，提供一次性票据隔离、按需预取与失效补充、服务端出口一致性、错误分类和冷却重试。支持多账号调度、自动领卡与官方交互验证兜底，验证结果由上游决定。
 

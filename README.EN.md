@@ -17,7 +17,7 @@
 
 </div>
 
-A reverse proxy gateway for ZCode free accounts, supporting OpenAI Chat Completions, Responses and Anthropic Messages protocols.
+A reverse proxy gateway for ZCode free accounts, supporting OpenAI Chat Completions, Responses and Anthropic Messages (recommended) protocols.
 
 Handles Alibaba Cloud's invisible CAPTCHA SDK integration and risk-control errors through isolated single-use tickets, on-demand prefetching and replacement of expired tickets, consistent server egress, error classification and retry cooldowns. Includes account scheduling, automatic card claims and fallback to the official interactive verification widget. Verification outcomes are determined by the upstream service.
 
