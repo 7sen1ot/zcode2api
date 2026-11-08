@@ -131,6 +131,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 	throttled := map[string]time.Time{}
 	accountFailures := map[string]int{}
 	attempts, regular := 0, 0
+	rotations := 0
 	rotated := []any{}
 	var last, lastThrottle *Failure
 	var lastAccount M
@@ -310,6 +311,14 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			}
 			throttled[id] = time.Now().Add(max(50*time.Millisecond, delay))
 			round[id] = true
+			// Rotation destroys the per-account prompt cache, so cap how many
+			// accounts one request may burn. At the cap, stop rotating and let
+			// the throttled accounts back into selection so the request waits
+			// out their windows instead of failing or walking the whole pool.
+			rotations++
+			if rotations >= 2 {
+				round = map[string]bool{}
+			}
 			continue
 		}
 		if !f.Retryable {

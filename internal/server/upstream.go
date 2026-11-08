@@ -325,6 +325,12 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 			return nil, transportFailure(ctx, e)
 		}
 		resetIdle()
+		// The upstream answered: the request left the local queue, so the
+		// admission window has done its job and must not cancel an in-flight
+		// prefill. first_token_timeout owns the wait for the first token.
+		if admission != nil {
+			admission.Stop()
+		}
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
 			break
 		}
