@@ -308,11 +308,6 @@ html.dark select.round { background: oklch(1 0 0 / 4%); border-color: oklch(1 0 
 select.round:hover { background: var(--muted); }
 td, th { transition: background var(--fast) var(--ease-out); }
 
-.toolbar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-  border-radius: var(--r-card); background: var(--muted);
-  padding: 8px 12px;
-}
 .status-pills { display: inline-flex; align-items: center; gap: 2px; border-radius: 10px; background: var(--muted); border: 1px solid transparent; padding: 3px; }
 html.dark .status-pills { background: oklch(1 0 0 / 5%); }
 .status-pills button {
@@ -336,7 +331,7 @@ html.dark .status-pills button.active { background: oklch(1 0 0 / 10%); }
 html.dark .status-pills .cnt { background: oklch(1 0 0 / 8%); }
 .status-pills button.active .cnt { background: oklch(0 0 0 / 8%); }
 
-.statcard, .card, .formcard, .toolbar, .management-empty, .empty, .usage-panel { border: 1px solid var(--border); }
+.statcard, .card, .formcard, .management-empty, .empty, .usage-panel { border: 1px solid var(--border); }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
 .cards.multicol { grid-template-columns: repeat(2, 1fr); }
 @media (min-width: 1024px) { .cards.multicol { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); } }
@@ -401,8 +396,6 @@ html.dark tbody tr:hover, html.dark section > table tr:hover { background: oklch
   #key-table :is(th, td):last-child { padding-right: 12px; }
   #key-table td:last-child > .row { flex-wrap: nowrap; }
 }
-.quota-meta { display: block; font-size: 11px; line-height: 1.5; color: var(--muted-fg); }
-.reward-link { display: inline-block; margin-top: 8px; font-size: 12px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
 
 .avatar {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
@@ -461,7 +454,6 @@ html:not(.dark) .badge.web_only { color: #1d4ed8; }
 
 .formcard { border-radius: var(--r-card); background: var(--muted); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 .formcard > h3 { margin: 0; font-size: 14px; font-weight: 600; }
-.settings-ports { margin: 0; font-size: 12px; line-height: 1.6; }
 textarea.invalid { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--destructive); }
 .json-hint { margin: -6px 0 0; min-height: 0; font-size: 11px; line-height: 1.5; color: var(--muted-fg); }
 .json-hint:empty { display: none; }
@@ -490,7 +482,6 @@ textarea.invalid { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--destructiv
   display: block; width: 40px; height: 40px; margin: 0 auto;
 }
 .login-card h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; text-align: center; }
-.login-card .sub { margin: 0 0 4px; font-size: 12px; color: var(--muted-fg); text-align: center; line-height: 1.5; }
 .login-card input { height: 36px; background: var(--card); border-color: transparent; }
 .login-card .btn { width: 100%; height: 36px; }
 .login-card .error { font-size: 12px; min-height: 16px; margin: 0; text-align: center; }
@@ -529,7 +520,6 @@ textarea.invalid { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--destructiv
 }
 @keyframes modal-in { from { opacity: 0; transform: translateY(10px) scale(.98); } }
 .modal-header, .cache-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 20px 12px; border-bottom: 1px solid var(--border); }
-.modal-eyebrow { display: block; margin-bottom: 4px; color: var(--muted-fg); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
 .modal-header h2 { margin: 0; font-size: 17px; font-weight: 650; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .modal-close, .cache-detail-close { display: grid; place-items: center; width: 32px; height: 32px; flex: none; padding: 0; border: 0; border-radius: 9px; background: var(--muted); color: var(--muted-fg); font-family: inherit; font-size: 22px; line-height: 1; cursor: pointer; transition: background 180ms var(--ease-out), color 180ms var(--ease-out), transform 180ms var(--ease-out); }
 .modal-close:hover, .cache-detail-close:hover { color: var(--foreground); background: var(--accent); }
@@ -805,7 +795,6 @@ main[data-page="logs"] { gap: 18px; }
 .overview-strip strong { display: block; margin-top: 2px; font-size: 20px; line-height: 1.25; font-weight: 600; letter-spacing: -.025em; }
 .overview-strip strong small { font-size: 12px; font-weight: 400; color: var(--muted-fg); letter-spacing: 0; }
 .overview-strip p { margin: 2px 0 0; color: var(--muted-fg); font-size: 11.5px; line-height: 1.5; }
-.overview-strip .overview-unavailable { grid-column: 1 / -1; }
 .logs-strip { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 0; }
 .logs-strip strong { font-variant-numeric: tabular-nums; }
 .management-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -818,7 +807,6 @@ main[data-page="logs"] { gap: 18px; }
 .management-empty > svg { color: var(--muted-fg); margin-bottom: 4px; }
 .management-empty h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .management-empty p, .quiet-message { margin: 0; font-size: 12px; color: var(--muted-fg); line-height: 1.6; }
-.management-empty.compact { padding: 16px 12px; }
 .quiet-message.error { color: var(--destructive); }
 .text-action { display: inline-flex; align-items: center; justify-content: center; flex: none; border: 0; border-radius: 6px; background: transparent; padding: 6px; font: inherit; font-size: 12px; color: var(--muted-fg); cursor: pointer; }
 .text-action:hover { background: var(--accent); color: var(--foreground); }
@@ -917,7 +905,6 @@ main[data-page="logs"] { gap: 18px; }
 .eyebrow { color: var(--muted-fg); font-size: 13px; font-weight: 500; }
 .hero-number { margin: 6px 0 18px; font-size: clamp(30px, 3vw, 44px); font-weight: 600; letter-spacing: -.035em; line-height: 1.2; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .hero-number small { margin-left: 10px; font-size: 14px; font-weight: 400; color: var(--muted-fg); letter-spacing: 0; }
-.hero-quota-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted-fg); margin-bottom: 8px; }
 .quota-hero > .quiet-message { margin-top: 10px; }
 .pool-health { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .pool-health > .section-heading { width: 100%; }
@@ -1113,10 +1100,8 @@ main[data-page="logs"] { gap: 18px; }
 .import-credentials { display: flex; flex-direction: column; gap: 16px; padding-top: 16px; }
 .import-credentials > .inline-notice { margin: 0; }
 
-.dashboard-accounts { display: block; min-width: 0; }
 .compact-account-table { width: 100%; max-width: 100%; overflow: auto; border-radius: 12px; background: var(--card); }
 .compact-account-table table { width: 100%; min-width: 980px; table-layout: fixed; }
-.dashboard-account-table table { min-width: 810px; }
 .compact-account-table .account-name-col { width: 28%; }
 .compact-account-table th, .compact-account-table td { height: 52px; padding: 10px 16px; white-space: nowrap; vertical-align: middle; font-size: 13px; overflow-wrap: normal; }
 .compact-account-table th { height: 40px; font-size: 12px; }
@@ -1130,7 +1115,7 @@ main[data-page="logs"] { gap: 18px; }
 .account-identity .account-row-name { white-space: pre; }
 .account-row-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-fg); font-size: 10.5px; font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; }
 .account-row-family { margin-left: auto; color: var(--muted-fg); font-size: 11px; flex: none; }
-.account-row-number, .account-row-quota strong { font-size: 14px; font-weight: 600; }
+.account-row-quota strong { font-size: 14px; font-weight: 600; }
 .account-row-quota { display: inline-flex; justify-content: flex-end; align-items: center; gap: 6px; }
 .account-row-quota .text-action { font-size: 12px; padding: 2px; }
 .account-pending-dot { display: inline-block; flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--warn); }
@@ -1154,7 +1139,6 @@ main[data-page="logs"] { gap: 18px; }
 .account-detail-quota h3 { margin: 0; font-size: 14px; }
 .account-detail .quota-details { color: var(--foreground); }
 .management-empty h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.client-version-note { margin: 4px 0 0; color: var(--muted-fg); font-size: 12px; }
 
 @media (max-width: 1000px) {
   .account-scroll-hint { display: block; }
