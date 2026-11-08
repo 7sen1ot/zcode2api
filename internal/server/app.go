@@ -161,6 +161,7 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 		}
 	}
 	a.ensureGroups()
+	a.restoreProxyState()
 	a.background(a.runAccountQueue)
 	return a, nil
 }
