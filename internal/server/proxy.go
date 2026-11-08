@@ -147,6 +147,7 @@ type outboundProxyManager struct {
 	mu          sync.Mutex
 	generation  uint64
 	selected    string
+	claimCursor int
 	endpoints   []proxyEndpoint
 	key         string
 	current     *managedProxyRuntime
@@ -171,6 +172,17 @@ func proxyFailure(code, message string) error {
 
 // Pin scene lookup, SDK verification and inference to the same exit.
 func (a *App) pinOutboundProxy(parent context.Context, account M) (context.Context, func(), error) {
+	return a.pinOutboundProxyMode(parent, account, false)
+}
+
+// pinClaimOutboundProxy rotates to the next pool exit per claim so each card is
+// issued from a different IP while the whole claim (scene, SDK ticket, POST)
+// stays pinned to one exit for ticket binding.
+func (a *App) pinClaimOutboundProxy(parent context.Context, account M) (context.Context, func(), error) {
+	return a.pinOutboundProxyMode(parent, account, true)
+}
+
+func (a *App) pinOutboundProxyMode(parent context.Context, account M, rotatePerClaim bool) (context.Context, func(), error) {
 	if _, present := parent.Value(proxyContextKey{}).(proxyRoute); present {
 		return parent, func() {}, nil
 	}
@@ -214,7 +226,13 @@ func (a *App) pinOutboundProxy(parent context.Context, account M) (context.Conte
 			}
 		}
 	}
-	index, generation := a.proxies.selectEndpoint(options, endpoints)
+	var index int
+	var generation uint64
+	if rotatePerClaim && options["source"] == "manual" {
+		index, generation = a.proxies.selectRotatingEndpoint(options, endpoints)
+	} else {
+		index, generation = a.proxies.selectEndpoint(options, endpoints)
+	}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
@@ -287,6 +305,47 @@ func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxy
 		}
 	}
 	return -1, manager.generation
+}
+
+// selectRotatingEndpoint advances a per-claim cursor so each card uses the next
+// exit, while skipping nodes currently marked unavailable or WAF-blocked. When
+// every node is skipped it still returns the cursor position so the caller can
+// retry once instead of failing a claim just because cooldowns overlap.
+func (manager *outboundProxyManager) selectRotatingEndpoint(options M, endpoints []proxyEndpoint) (int, uint64) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	key := hash(js(options))
+	if key != manager.key {
+		manager.key, manager.selected = key, ""
+		manager.generation++
+		manager.unavailable = map[string]bool{}
+		manager.retryAt = map[string]time.Time{}
+		manager.blocked = map[string]time.Time{}
+		manager.claimCursor = 0
+		for _, endpoint := range endpoints {
+			if endpoint.selectionID() == str(options["preferred_node"]) {
+				manager.selected = endpoint.identity()
+				break
+			}
+		}
+	}
+	if len(endpoints) == 0 {
+		return -1, manager.generation
+	}
+	manager.endpoints = append([]proxyEndpoint(nil), endpoints...)
+	manager.claimCursor %= len(endpoints)
+	for offset := 0; offset < len(endpoints); offset++ {
+		index := (manager.claimCursor + offset) % len(endpoints)
+		identity := endpoints[index].identity()
+		if !manager.unavailable[identity] && manager.blocked[identity].IsZero() {
+			manager.claimCursor = (index + 1) % len(endpoints)
+			return index, manager.generation
+		}
+	}
+	// Every node is cooling down: fall back to the cursor position itself.
+	index := manager.claimCursor
+	manager.claimCursor = (index + 1) % len(endpoints)
+	return index, manager.generation
 }
 
 // Only current pooled routes may retire nodes; canceled and override routes cannot.

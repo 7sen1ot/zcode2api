@@ -15,7 +15,9 @@ func (a *App) claimVerification(ctx context.Context, id, plan string) (M, error)
 	if account == nil {
 		return nil, fmt.Errorf("账号不存在")
 	}
-	ctx, release, err := a.pinOutboundProxy(ctx, account)
+	// Rotate to the next pool exit per claim so each card is issued from a
+	// different IP; the session pins every later request of this claim to it.
+	ctx, release, err := a.pinClaimOutboundProxy(ctx, account)
 	if err != nil {
 		return nil, err
 	}
