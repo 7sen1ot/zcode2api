@@ -132,6 +132,8 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 	accountFailures := map[string]int{}
 	attempts, regular := 0, 0
 	rotations := 0
+	rotationCap := max(1, min(2, max(1, int(integer(p["max_attempts"])))))
+	tried := map[string]bool{}
 	rotated := []any{}
 	var last, lastThrottle *Failure
 	var lastAccount M
@@ -184,6 +186,26 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 				skip[id] = true
 			}
 		}
+		// At the rotation cap no untried account may be attempted: trying a
+		// fresh account discards every prior prompt-cache write. Only accounts
+		// already used by this request may re-enter once their window passes.
+		atCap := rotations >= rotationCap
+		if atCap {
+			now := time.Now()
+			for id := range tried {
+				t, wasThrottled := throttled[id]
+				if !wasThrottled || t.After(now) {
+					skip[id] = true
+					continue
+				}
+				delete(skip, id)
+			}
+			for id := range skip {
+				if !tried[id] {
+					skip[id] = true
+				}
+			}
+		}
 		start := time.Now()
 		o.Admission = 0
 		if !throttleDeadline.IsZero() {
@@ -232,6 +254,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			return fail(nil)
 		}
 		id := str(account["id"])
+		tried[id] = true
 		if lastAccount != nil && str(lastAccount["id"]) != id {
 			rotated = append(rotated, id)
 		}
@@ -312,13 +335,10 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			throttled[id] = time.Now().Add(max(50*time.Millisecond, delay))
 			round[id] = true
 			// Rotation destroys the per-account prompt cache, so cap how many
-			// accounts one request may burn. At the cap, stop rotating and let
-			// the throttled accounts back into selection so the request waits
-			// out their windows instead of failing or walking the whole pool.
+			// accounts one request may burn. At the cap the loop stops trying
+			// untried accounts (skip filter above) and only waits on windows
+			// of accounts already used by this request.
 			rotations++
-			if rotations >= 2 {
-				round = map[string]bool{}
-			}
 			continue
 		}
 		if !f.Retryable {
