@@ -245,5 +245,5 @@ func (a *App) customer(ctx context.Context, account M, token string) (apiResult,
 	if str(account["family"]) == "zai" {
 		host = "https://api.z.ai"
 	}
-	return a.api(ctx, account, "GET", host+"/api/biz/customer/getCustomerInfo", "", nil, M{"Authorization": token}, nil)
+	return a.api(ctx, account, "GET", host+"/api/biz/customer/getCustomerInfo", "", nil, M{"Authorization": "Bearer " + token}, nil)
 }
