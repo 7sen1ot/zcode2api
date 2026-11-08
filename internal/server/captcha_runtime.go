@@ -78,7 +78,7 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options M) M {
 	hideChildWindow(command)
 	command.Dir = a.root
 	command.Stdin = strings.NewReader(js(M{"module_path": modulePath}))
-	output := &limitedCaptchaOutput{}
+	output := &limitedProcessOutput{}
 	command.Stdout, command.Stderr = output, io.Discard
 	command.WaitDelay = time.Second
 	if err := command.Run(); err != nil {

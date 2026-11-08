@@ -69,7 +69,7 @@ globalThis.Z2ALogs = (() => {
     state();
     const doc = main.ownerDocument, form = main.querySelector('#log-filters');
     if (globalThis._logLive === false || (globalThis._logPage[globalThis._logTab] || 1) !== 1 || doc.hidden || !form) return false;
-    if (closeActiveDetails || form.contains(doc.activeElement) || main.querySelector('.mobile-log[open]') || doc.getSelection()?.toString()) return false;
+    if (closeActiveDetails || form.contains(doc.activeElement) || main.querySelector('.mobile-log[open], .cache-detail-dialog[open]') || doc.getSelection()?.toString()) return false;
     const f = filter(globalThis._logTab);
     return [...new FormData(form)].every(([name, value]) => String(value).trim() === String(f[name] || '')) && form.checkValidity();
   }
@@ -86,7 +86,7 @@ globalThis.Z2ALogs = (() => {
     const live = globalThis._logLive !== false && (globalThis._logPage[globalThis._logTab] || 1) === 1;
     button.classList.remove('is-reconnecting');
     button.setAttribute('aria-pressed', String(live));
-    button.title = live ? '每 3 秒刷新；编辑筛选、查看详情时暂缓' : globalThis._logLive === false ? '开启实时刷新' : '查看历史时暂停；点击返回最新记录';
+    button.title = live ? '约每 1 秒刷新；编辑筛选、查看详情时暂缓' : globalThis._logLive === false ? '开启实时刷新' : '查看历史时暂停；点击返回最新记录';
     button.lastChild.textContent = live ? '实时' : '已暂停';
   }
   function queryFor(tab, fresh = false) {
@@ -121,7 +121,7 @@ globalThis.Z2ALogs = (() => {
     const fingerprint = JSON.stringify([tab, data.items, data.total, data.pages, data.summary, data.filters]);
     if (options.live && main.dataset.logFingerprint === fingerprint) { updateLiveButton(main); return; }
     closeDetails();
-    const view = main.ownerDocument.defaultView, scroll = { x: view.scrollX, y: view.scrollY };
+    const view = main.ownerDocument.defaultView, scroll = { x: view.scrollX, y: view.scrollY, tableX: main.querySelector('.log-calls')?.scrollLeft || 0 };
     const focusedID = options.live && main.contains(view.document.activeElement) ? view.document.activeElement.id : '';
     main.dataset.logFingerprint = fingerprint;
     globalThis._logPage[tab] = data.page;
@@ -155,19 +155,29 @@ globalThis.Z2ALogs = (() => {
     let table = '', strip = '';
     if (tab === 'logs') {
       strip = `<div class="overview-strip logs-strip"><div><span>匹配调用</span><strong>${fmtInt(total)}</strong></div><div><span>成功 / 忙碌</span><strong>${fmtInt(summary.success)}<small> / ${fmtInt(summary.busy)}</small></strong></div><div><span>失败 / 已取消</span><strong>${fmtInt(summary.failed)}<small> / ${fmtInt(summary.canceled)}</small></strong></div><div><span>首 Token 时间 P50</span><strong>${summary.p50 == null ? '—' : fmtInt(summary.p50) + '<small> ms</small>'}</strong></div><div><span>Token 消耗</span><strong>${fmtInt(summary.tokens)}</strong></div></div>`;
-      const error = row => `<span class="log-error-message">${esc(errorText(row))}</span>`;
+      const error = row => `<span class="log-error-message" title="${esc(errorText(row))}">${esc(errorText(row))}</span>`;
       const clipped = value => `<span class="log-cell-clip" title="${esc(value)}">${esc(value)}</span>`;
-      table = `<div class="tablecard log-desktop"><table><colgroup><col class="log-col-time"><col class="log-col-key"><col class="log-col-account"><col class="log-col-model"><col class="log-col-status"><col class="log-col-attempts"><col class="log-col-ttft"><col class="log-col-tokens"><col class="log-col-error"></colgroup><thead><tr><th>时间</th><th>密钥</th><th>账号</th><th>模型</th><th>状态</th><th>尝试</th><th>首 Token <small>ms</small></th><th>Token 用量</th><th>报错内容</th></tr></thead><tbody>${rows.map(row => `<tr><td class="mono">${fmtTime(row.ts)}</td><td>${clipped(row.key_name || row.key_id || '—')}</td><td>${clipped(row.account_label || row.account_id || '—')}</td><td>${clipped(row.model || '—')}</td><td>${badge(row.status)}</td><td>${fmtInt(row.attempt_count)}</td><td>${fmtInt(row.ttft_ms)}</td><td>${fmtInt((row.tokens_in || 0) + (row.tokens_out || 0))}</td><td>${error(row)}</td></tr>`).join('')}</tbody></table></div>` +
-        `<div class="log-mobile">${rows.map(row => `<details class="mobile-log"><summary><span class="mobile-log-heading"><strong>${esc(row.model || '未知模型')}</strong>${badge(row.status)}</span><span class="mobile-log-time">${fmtCompactTime(row.ts)}<span>查看详情</span></span>${errorText(row) !== '—' ? `<span class="mobile-log-error">${esc(errorText(row))}</span>` : ''}</summary><dl><div><dt>账号</dt><dd>${esc(row.account_label || row.account_id || '—')}</dd></div><div><dt>密钥</dt><dd>${esc(row.key_name || row.key_id || '—')}</dd></div><div><dt>尝试次数</dt><dd>${fmtInt(row.attempt_count)}</dd></div><div><dt>首 Token 时间</dt><dd>${row.ttft_ms == null ? '—' : fmtInt(row.ttft_ms) + ' ms'}</dd></div><div><dt>Token 用量</dt><dd>${fmtInt((row.tokens_in || 0) + (row.tokens_out || 0))}</dd></div><div><dt>请求 ID</dt><dd>${esc(row.request_id)}</dd></div><div><dt>追踪 ID</dt><dd>${esc(row.trace_id || '—')}</dd></div></dl></details>`).join('')}</div>`;
+      const cacheRate = row => {
+        const rate = Z2ACacheDetails.hitRate(row);
+        return rate == null ? '—' : rate.toFixed(1) + '%';
+      };
+      const details = (row, index) => {
+        const available = row.request_id || row.trace_id || row.error_code || row.error_message || ['tokens_in', 'tokens_out', 'cache_read', 'cache_write', 'ttft_ms'].some(field => row[field] != null);
+        return `<button type="button" class="cache-open" ${available ? `data-cache-detail="${index}"` : 'disabled'} aria-label="${esc('查看 ' + (row.request_id || row.model || '请求') + ' 的详情')}">详情</button>`;
+      };
+      const cacheCell = (row, index) => `<span class="log-cache-inline"><span class="log-cache-percent">${cacheRate(row)}</span>${details(row, index)}</span>`;
+      table = `<div class="tablecard log-table log-desktop log-calls"><table><colgroup><col span="9"><col class="log-col-error"></colgroup><thead><tr><th>时间</th><th>密钥</th><th>账号</th><th>模型</th><th>状态</th><th>尝试</th><th>首 Token <small>ms</small></th><th>Token 用量</th><th>缓存命中率</th><th>报错内容</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td class="mono">${fmtTime(row.ts)}</td><td>${clipped(row.key_name || row.key_id || '—')}</td><td>${clipped(row.account_label || row.account_id || '—')}</td><td>${clipped(row.model || '—')}</td><td>${badge(row.status)}</td><td>${fmtInt(row.attempt_count)}</td><td>${fmtInt(row.ttft_ms)}</td><td>${fmtInt((row.tokens_in || 0) + (row.tokens_out || 0))}</td><td>${cacheCell(row, index)}</td><td>${error(row)}</td></tr>`).join('')}</tbody></table></div>` +
+        `<div class="log-mobile log-calls-mobile">${rows.map((row, index) => `<details class="mobile-log"><summary><span class="mobile-log-heading"><strong>${esc(row.model || '未知模型')}</strong>${badge(row.status)}</span><span class="mobile-log-time">${fmtCompactTime(row.ts)}<span>查看详情</span></span>${errorText(row) !== '—' ? `<span class="mobile-log-error">${esc(errorText(row))}</span>` : ''}</summary><dl><div><dt>账号</dt><dd>${esc(row.account_label || row.account_id || '—')}</dd></div><div><dt>密钥</dt><dd>${esc(row.key_name || row.key_id || '—')}</dd></div><div><dt>尝试次数</dt><dd>${fmtInt(row.attempt_count)}</dd></div><div><dt>首 Token 时间</dt><dd>${row.ttft_ms == null ? '—' : fmtInt(row.ttft_ms) + ' ms'}</dd></div><div><dt>Token 用量</dt><dd>${fmtInt((row.tokens_in || 0) + (row.tokens_out || 0))}</dd></div><div><dt>缓存命中率</dt><dd>${cacheCell(row, index)}</dd></div><div><dt>请求 ID</dt><dd>${esc(row.request_id)}</dd></div><div><dt>追踪 ID</dt><dd>${esc(row.trace_id || '—')}</dd></div></dl></details>`).join('')}</div>`;
     } else if (tab === 'sched') {
-      table = `<div class="tablecard"><table><thead><tr><th>时间</th><th>请求 ID</th><th>策略</th><th>调度结果</th><th>选中账号</th><th>候选信息</th></tr></thead><tbody>${rows.map((row, index) => {
+      table = `<div class="tablecard log-table"><table><thead><tr><th>时间</th><th>请求 ID</th><th>策略</th><th>调度结果</th><th>选中账号</th><th>候选信息</th></tr></thead><tbody>${rows.map((row, index) => {
         const candidates = candidatesOf(row);
         return `<tr><td class="mono">${fmtTime(row.ts)}</td><td class="mono">${esc(row.request_id)}</td><td>${esc(policyLabel(row.policy))}</td><td>${row.picked ? '已选中' : '未选中'}</td><td>${esc(row.account_label || row.picked || '—')}</td><td><button type="button" class="log-detail-trigger log-candidate-trigger" data-log-detail="${index}" aria-label="查看候选信息" aria-controls="log-detail-popover" aria-expanded="false">候选 <span>${candidates ? candidates.length : '—'}</span></button></td></tr>`;
       }).join('')}</tbody></table></div>`;
     } else {
-      table = `<div class="tablecard"><table><thead><tr><th>时间</th><th>动作</th><th>操作者</th><th>来源 IP</th><th>详情</th></tr></thead><tbody>${rows.map(row => `<tr><td class="mono">${fmtTime(row.ts)}</td><td>${esc(row.action)}</td><td>${esc(row.actor)}</td><td>${esc(row.ip || '—')}</td><td class="log-audit-detail">${esc(row.detail || '—')}</td></tr>`).join('')}</tbody></table></div>`;
+      table = `<div class="tablecard log-table"><table><thead><tr><th>时间</th><th>动作</th><th>操作者</th><th>来源 IP</th><th>详情</th></tr></thead><tbody>${rows.map(row => `<tr><td class="mono">${fmtTime(row.ts)}</td><td>${esc(row.action)}</td><td>${esc(row.actor)}</td><td>${esc(row.ip || '—')}</td><td class="log-audit-detail">${esc(row.detail || '—')}</td></tr>`).join('')}</tbody></table></div>`;
     }
     main.innerHTML = `${pagehead('请求日志', '日志持续保存 · 查询全部历史 · 每页 20 条', `<button type="button" class="btn log-live" id="log-live" aria-label="实时刷新" aria-pressed="true"><span>实时</span></button><button class="btn" id="log-refresh">${icon('refresh', 14)}刷新</button>`)}<nav class="section-tabs log-tabs" role="tablist" aria-label="日志分区">${tabs.map(([id, label, glyph]) => `<button type="button" class="tab${tab === id ? ' active' : ''}" data-ltab="${id}" id="log-tab-${id}" role="tab" aria-controls="log-panel" aria-selected="${tab === id}" tabindex="${tab === id ? 0 : -1}">${icon(glyph, 13)}${label}</button>`).join('')}</nav><div role="tabpanel" id="log-panel" aria-labelledby="log-tab-${tab}">${form}${strip}${rows.length ? table : '<div class="empty">当前筛选条件下暂无记录</div>'}${pager}</div>`;
+    if (tab === 'logs') Z2ACacheDetails.bind(main, rows, { ...helpers, badge });
     const $ = selector => main.querySelector(selector);
     const advancedDetails = $('#log-advanced');
     advancedDetails.addEventListener('toggle', () => {
@@ -252,7 +262,7 @@ globalThis.Z2ALogs = (() => {
       if (globalThis._logLive) { clearTimeout(searchTimer); delete globalThis._logSnapshots[tab]; globalThis._logPage[tab] = 1; refresh(); }
       else updateLiveButton(main);
     });
-    const changeTab = id => { clearTimeout(searchTimer); globalThis._logTab = id; Promise.resolve(refresh()).then(() => main.querySelector(`[data-ltab="${id}"]`)?.focus()); };
+    const changeTab = id => { clearTimeout(searchTimer); globalThis._logTab = id; Promise.resolve(refresh()).then(() => main.querySelector(`[data-ltab="${id}"]`)?.focus({ preventScroll: true })); };
     main.querySelectorAll('[data-ltab]').forEach(button => button.addEventListener('click', () => { if (button.dataset.ltab !== tab) changeTab(button.dataset.ltab); }));
     main.querySelector('[role=tablist]').addEventListener('keydown', event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -264,6 +274,7 @@ globalThis.Z2ALogs = (() => {
     $('#log-page-jump').addEventListener('submit', event => { event.preventDefault(); if (!event.currentTarget.reportValidity()) return; globalThis._logPage[tab] = Number(new FormData(event.currentTarget).get('page')); refresh(); });
     if (focused) { search.focus(); search.setSelectionRange(focused.start, focused.end); }
     else if (focusedID) main.ownerDocument.getElementById(focusedID)?.focus({ preventScroll: true });
+    if (tab === 'logs') main.querySelector('.log-calls')?.scrollTo({ left: scroll.tableX, behavior: 'instant' });
     if (options.live && (view.scrollX !== scroll.x || view.scrollY !== scroll.y)) view.scrollTo({ left: scroll.x, top: scroll.y, behavior: 'instant' });
   }
   return Object.freeze({ pageSize, pageNumbers, routeValues, restoreRoute, queryFor, render, closeDetails, canAutoRefresh, refreshFailed });

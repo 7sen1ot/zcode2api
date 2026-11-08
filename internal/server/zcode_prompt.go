@@ -38,6 +38,37 @@ func zcodePromptParagraphKey(text string) string {
 	return hash(strings.Join(strings.Fields(text), " "))
 }
 
+// Derive duplicate-removal rules from the template actually sent upstream so
+// restoring or updating that template cannot leave the cleaner out of sync.
+var zcodeInjectedPromptDefaults = func() struct {
+	paragraphs, lines, headings map[string]bool
+} {
+	rules := struct{ paragraphs, lines, headings map[string]bool }{
+		paragraphs: map[string]bool{}, lines: map[string]bool{}, headings: map[string]bool{},
+	}
+	for _, value := range zcodeUpstreamSystemPrefix {
+		text := str(obj(value)["text"])
+		for _, paragraph := range zcodePromptParagraphBreak.Split(text, -1) {
+			if strings.TrimSpace(paragraph) != "" {
+				rules.paragraphs[zcodePromptParagraphKey(paragraph)] = true
+			}
+		}
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			key := zcodePromptParagraphKey(line)
+			if strings.HasPrefix(line, "#") {
+				rules.headings[key] = true
+			} else {
+				rules.lines[key] = true
+			}
+		}
+	}
+	return rules
+}()
+
 type zcodePromptCleaner struct {
 	started, stopped bool
 }
@@ -83,9 +114,88 @@ func isZCodeIdentityText(text string) bool {
 	return false
 }
 
-// Remove repeated identity paragraphs even after an unknown/custom section.
-// Match complete paragraphs only and leave fenced examples intact.
-func stripZCodeIdentityParagraphs(text string) string {
+// These are client-generated branding/model declarations, not user personas.
+// Match complete known text so custom identities and quoted examples survive.
+func isClaudeClientDeclaration(text string) bool {
+	switch strings.TrimSuffix(strings.Join(strings.Fields(text), " "), ".") {
+	case "You are Claude Code, Anthropic's official CLI for Claude",
+		"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK",
+		"You are a Claude agent, built on Anthropic's Claude Agent SDK":
+		return true
+	}
+	// Complete Fable 5 default model paragraph captured from Claude Code 2.1.316.
+	// It describes a different model from the one selected by this gateway.
+	return zcodePromptParagraphKey(text) == "7e9a82786262846a47b1a011be4d5ac6cbc11d79328a6acea94ad6075c3a2eea"
+}
+
+func zcodePromptFence(fence, line string) string {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
+		return fence
+	}
+	width := 1
+	for width < len(line) && line[width] == line[0] {
+		width++
+	}
+	if width < 3 {
+		return fence
+	}
+	if fence == "" {
+		return line[:width]
+	}
+	if line[0] == fence[0] && width >= len(fence) && strings.TrimSpace(line[width:]) == "" {
+		return ""
+	}
+	return fence
+}
+
+// A client may extend a default section, for example with an additional command
+// bullet. Remove matching default lines while retaining the extension verbatim.
+func stripZCodeDefaultLines(text string, fence *string) (string, bool) {
+	var out strings.Builder
+	changed := false
+	for _, line := range strings.SplitAfter(text, "\n") {
+		nextFence := zcodePromptFence(*fence, line)
+		if *fence == "" && nextFence == "" && !strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "\t") &&
+			(zcodeInjectedPromptDefaults.lines[zcodePromptParagraphKey(line)] || isClaudeClientDeclaration(line)) {
+			changed = true
+		} else {
+			out.WriteString(line)
+		}
+		*fence = nextFence
+	}
+	return out.String(), changed
+}
+
+func normalizeZCodeHeadings(text string) string {
+	lines := strings.SplitAfter(text, "\n")
+	var out strings.Builder
+	fence := ""
+	for i, line := range lines {
+		nextFence := zcodePromptFence(fence, line)
+		if fence == "" && nextFence == "" && !strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "\t") &&
+			zcodeInjectedPromptDefaults.headings[zcodePromptParagraphKey(line)] {
+			next := i + 1
+			for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+				next++
+			}
+			if next == len(lines) || strings.HasPrefix(strings.TrimSpace(lines[next]), "#") {
+				continue
+			}
+			// Remaining content belongs to the caller, such as the interactive !
+			// command rule. Keep it distinct from the injected template's section.
+			out.WriteString(strings.Replace(line, "# ", "# Client ", 1))
+			continue
+		}
+		out.WriteString(line)
+		fence = nextFence
+	}
+	return out.String()
+}
+
+// Remove only known copies of the injected defaults, even after custom content.
+// Unknown text and fenced examples are not duplicate-removal candidates.
+func stripZCodeDefaultParagraphs(text string) string {
 	var out strings.Builder
 	fence := ""
 	remaining, changed := text, false
@@ -95,42 +205,32 @@ func stripZCodeIdentityParagraphs(text string) string {
 			end, next = boundary[0], boundary[1]
 		}
 		paragraph := remaining[:end]
-		if fence == "" && isZCodeIdentityParagraph(paragraph) {
+		if fence == "" && !strings.HasPrefix(paragraph, "    ") && !strings.HasPrefix(paragraph, "\t") &&
+			(isZCodeIdentityParagraph(paragraph) || isClaudeClientDeclaration(paragraph) ||
+				zcodeInjectedPromptDefaults.paragraphs[zcodePromptParagraphKey(paragraph)]) {
 			changed = true
 		} else {
-			out.WriteString(remaining[:next])
-			for _, line := range strings.Split(paragraph, "\n") {
-				line = strings.TrimSpace(line)
-				if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
-					continue
-				}
-				width := 1
-				for width < len(line) && line[width] == line[0] {
-					width++
-				}
-				if width < 3 {
-					continue
-				}
-				if fence == "" {
-					fence = line[:width]
-				} else if line[0] == fence[0] && width >= len(fence) && strings.TrimSpace(line[width:]) == "" {
-					fence = ""
-				}
+			cleaned, removed := stripZCodeDefaultLines(paragraph, &fence)
+			changed = changed || removed
+			if !removed || strings.TrimSpace(cleaned) != "" {
+				out.WriteString(cleaned)
+				out.WriteString(remaining[end:next])
 			}
 		}
 		remaining = remaining[next:]
 	}
-	if !changed {
+	cleaned := normalizeZCodeHeadings(out.String())
+	if !changed && cleaned == text {
 		return text
 	}
-	if strings.TrimSpace(out.String()) == "" {
+	if strings.TrimSpace(cleaned) == "" {
 		return ""
 	}
-	return out.String()
+	return cleaned
 }
 
 func (c *zcodePromptCleaner) text(text string) string {
-	return stripZCodeIdentityParagraphs(c.prefix(text))
+	return stripZCodeDefaultParagraphs(c.prefix(text))
 }
 
 func (c *zcodePromptCleaner) prefix(text string) string {
@@ -170,8 +270,8 @@ func (c *zcodePromptCleaner) prefix(text string) string {
 	}
 }
 
-// Unknown/custom content remains intact; only the three exact identity/default
-// security paragraphs may also be removed after prefix cleanup has stopped.
+// Unknown/custom content remains intact. Copies of the injected defaults are
+// removed independently of whether prefix cleanup has already stopped.
 func (c *zcodePromptCleaner) content(value any) (any, bool) {
 	if text, ok := value.(string); ok {
 		cleaned := c.text(text)

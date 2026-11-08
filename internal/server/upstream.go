@@ -285,24 +285,12 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		return nil, asProxyFailure(e)
 	}
 	defer release()
+	defer func() { a.prepareProxyFailover(ctx, failure) }()
 	ctx, finish, gateFailure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, account, a.origin, true))
 	if gateFailure != nil {
 		return nil, gateFailure
 	}
 	defer func() { finish(failure) }()
-	defer func() {
-		if failure == nil || ctx.Err() != nil {
-			return
-		}
-		classify(failure)
-		blocked := failure.Code == "upstream_waf_blocked"
-		if proxyExitFailure(failure) || blocked {
-			if _, pooled := ctx.Value(proxySelectionKey{}).(proxySelection); pooled {
-				failure.Retryable = a.markProxyRoute(ctx, blocked)
-				failure.ProxyFailover = failure.Retryable
-			}
-		}
-	}()
 	var verification captchaVerification
 	defer func() {
 		if failure != nil {

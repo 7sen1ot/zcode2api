@@ -32,13 +32,6 @@ globalThis.Z2AUI = (() => {
     }
     return { rows, offset, start, end };
   }
-  function accountAttention(accounts, now = Date.now()) {
-    return {
-      authorization: accounts.filter(a => ['needs_relogin', 'unverified'].includes(a.status)),
-      unavailable: accounts.filter(a => ['expired', 'cooldown'].includes(a.status)),
-      expiring: accounts.filter(a => a.card_expires_at > now && a.card_expires_at <= now + 86400000),
-    };
-  }
   function paginate(items, page = 1, pageSize = 25) {
     const size = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
     const pages = Math.max(1, Math.ceil(items.length / size));
@@ -46,5 +39,5 @@ globalThis.Z2AUI = (() => {
     const start = (current - 1) * size;
     return { items: items.slice(start, start + size), page: current, pageSize: size, pages, total: items.length, start: items.length ? start + 1 : 0, end: Math.min(start + size, items.length) };
   }
-  return Object.freeze({ readRoute, routeHash, usageTimeline, accountAttention, paginate });
+  return Object.freeze({ readRoute, routeHash, usageTimeline, paginate });
 })();

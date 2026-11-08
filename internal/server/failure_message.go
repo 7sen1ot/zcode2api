@@ -1,6 +1,9 @@
 package server
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Keep gateway errors and current/historical logs on the same bounded summary.
 func conciseFailureMessage(f *Failure) string {
@@ -94,7 +97,17 @@ func conciseFailureMessage(f *Failure) string {
 	case "proxy_subscription_invalid":
 		return "代理订阅无效"
 	case "proxy_subscription_unavailable":
+		if copy.Status > 0 {
+			return fmt.Sprintf("代理订阅获取失败（HTTP %d）", copy.Status)
+		}
 		return "代理订阅获取失败"
+	case "proxy_subscription_auth_failed":
+		if copy.Status > 0 {
+			return fmt.Sprintf("订阅令牌错误或已失效（HTTP %d）", copy.Status)
+		}
+		return "订阅令牌错误或已失效"
+	case "proxy_subscription_response_too_large":
+		return "代理订阅响应超过 2 MB"
 	case "proxy_subscription_empty":
 		return "代理订阅无可用节点"
 	case "proxy_subscription_too_large":

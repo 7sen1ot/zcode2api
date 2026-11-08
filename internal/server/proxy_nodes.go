@@ -25,14 +25,7 @@ func (a *App) outboundProxyNodes(ctx context.Context, options M) (M, error) {
 			protocols[endpoint.selectionID()] = strings.ToUpper(str(node.config["type"]))
 		}
 	} else {
-		seen := map[string]bool{}
-		for _, value := range arr(options["urls"]) {
-			address := str(value)
-			if !seen[address] {
-				endpoints = append(endpoints, proxyEndpoint{URL: address, Name: maskedProxy(address)})
-				seen[address] = true
-			}
-		}
+		endpoints = manualProxyEndpoints(arr(options["urls"]))
 	}
 	a.proxies.mu.Lock()
 	defer a.proxies.mu.Unlock()
