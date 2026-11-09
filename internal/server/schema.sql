@@ -145,3 +145,8 @@ CREATE TABLE IF NOT EXISTS oauth_flows (
   updated_at INTEGER, -- 状态变更时间
   noticed_at INTEGER -- 结果确认时间，NULL 待提醒
 );
+CREATE TABLE IF NOT EXISTS proxy_state (
+  identity TEXT PRIMARY KEY,
+  blocked_until INTEGER, -- WAF 拦截冷却截止（epoch ms）
+  retry_at INTEGER -- 连接失败冷却截止（epoch ms）
+);

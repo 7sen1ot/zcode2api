@@ -192,7 +192,10 @@ func (a *App) sendFailure(w http.ResponseWriter, f *Failure, protocol string) {
 	writeJSON(w, status, body)
 }
 
-var sessionPattern = regexp.MustCompile(`(?:^|_)session_([a-zA-Z0-9-]{8,128})$`)
+// Claude Code composes user_id as user_<id>_session_<sid>_account_<acct>, so
+// the session id must be extracted from the middle of the string, not its end.
+// The quantifier stays lazy so the capture cannot swallow a following segment.
+var sessionPattern = regexp.MustCompile(`(?:^|_)session_([a-zA-Z0-9-]{8,128}?)(?:_|$)`)
 
 func (a *App) affinity(r *http.Request, b, k M) (string, float64) {
 	session := r.Header.Get("X-Session-Id")

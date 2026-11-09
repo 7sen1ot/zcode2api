@@ -9,7 +9,6 @@ import (
 	"maps"
 	"net/http"
 	"os"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -118,12 +117,13 @@ func (t *requestTiming) snapshot() M {
 	return M{"queue_ms": t.queue.Milliseconds(), "retry_ms": t.retry.Milliseconds(), "ttft_ms": value(t.first), "first_reasoning_ms": value(t.reason), "first_text_ms": value(t.text), "generation_ms": generation, "total_ms": time.Since(t.start).Milliseconds()}
 }
 func (a *App) upstreamHeaders(token, session, id string) http.Header {
-	cfg := obj(a.config()["http"])
-	version := str(fallback(cfg["client_version"], defaultHTTPClientVersion))
-	osCategory := runtime.GOOS
-	if osCategory == "darwin" {
-		osCategory = "macos"
-	}
+	cfg := a.config()
+	httpCfg := obj(cfg["http"])
+	// ZCode 3.17.2 sends the desktop app version, not the inference API version.
+	version := str(fallback(cfg["app_version"], defaultHTTPClientVersion))
+	clientPlatform := str(fallback(httpCfg["client_platform"], "win32-x64"))
+	osCategory := str(fallback(httpCfg["client_os_category"], "windows"))
+	osVersion := str(fallback(httpCfg["client_os_version"], "10.0.22631"))
 	tz := os.Getenv("TZ")
 	if tz == "" {
 		tz = time.Now().Location().String()
@@ -135,10 +135,36 @@ func (a *App) upstreamHeaders(token, session, id string) http.Header {
 		}
 	}
 	h := http.Header{}
-	for k, v := range map[string]string{"authorization": "Bearer " + token, "x-api-key": token, "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "ZCode/" + version, "x-zcode-app-version": version, "x-platform": platform(), "x-client-language": "zh-CN", "x-client-timezone": tz, "x-os-category": osCategory, "x-os-version": osVersion(), "x-release-channel": "production", "http-referer": "https://zcode.z.ai", "x-title": "Z Code@electron", "x-zcode-agent": "glm", "x-session-id": session, "x-request-id": id, "x-query-id": uuidv7(), "x-zcode-trace-id": uuid(), "x-zcode-session-type": "main", "x-zcode-query-source": "main_turn"} {
+	for k, v := range map[string]string{"authorization": "Bearer " + token, "x-api-key": token, "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "ZCode/" + version, "x-zcode-app-version": version, "x-platform": clientPlatform, "x-client-language": "zh-CN", "x-client-timezone": tz, "x-os-category": osCategory, "x-os-version": osVersion, "x-release-channel": "production", "http-referer": "https://zcode.z.ai", "x-title": "Z Code@electron", "x-zcode-agent": "glm", "x-session-id": session, "x-request-id": id, "x-query-id": uuidv7(), "x-zcode-trace-id": uuid(), "x-zcode-session-type": "main", "x-zcode-query-source": "main_turn"} {
 		h.Set(k, v)
 	}
 	return h
+}
+
+func requestMetadataUserID(deviceMid, session string) string {
+	return js(M{
+		"device_id":    deviceMid,
+		"account_uuid": "",
+		"session_id":   session,
+	})
+}
+
+func applyOfficialSystemSession(body M, deviceMid, session string) {
+	visualizationID := hash(deviceMid + ":" + session)
+	system := arr(body["system"])
+	for i, value := range system {
+		block := obj(value)
+		text := str(block["text"])
+		if strings.Contains(text, "{{VISUALIZATION_ID}}") {
+			block["text"] = strings.ReplaceAll(
+				text,
+				"{{VISUALIZATION_ID}}",
+				visualizationID,
+			)
+			system[i] = block
+		}
+	}
+	body["system"] = system
 }
 func providerFailure(v M, status int, retry string) *Failure {
 	e := obj(v["error"])
@@ -243,8 +269,16 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	r.SessionID = session
 	upstreamBody := clone(o.Upstream)
 	metadata := obj(upstreamBody["metadata"])
-	metadata["user_id"] = js(M{"device_id": str(account["device_mid"]), "account_uuid": "", "session_id": session})
+	metadata["user_id"] = requestMetadataUserID(
+		str(account["device_mid"]),
+		session,
+	)
 	upstreamBody["metadata"] = metadata
+	applyOfficialSystemSession(
+		upstreamBody,
+		str(account["device_mid"]),
+		session,
+	)
 	requestID := uuid()
 	ctx, release, e := a.pinOutboundProxy(ctx, account)
 	if e != nil {
@@ -291,6 +325,12 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 			return nil, transportFailure(ctx, e)
 		}
 		resetIdle()
+		// The upstream answered: the request left the local queue, so the
+		// admission window has done its job and must not cancel an in-flight
+		// prefill. first_token_timeout owns the wait for the first token.
+		if admission != nil {
+			admission.Stop()
+		}
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
 			break
 		}

@@ -113,6 +113,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	case "POST /api/accounts/import-local":
 		v, e := a.importLocal(ctx, b)
 		return wrap(v, e)
+	case "POST /api/accounts/import-registration":
+		v, e := a.importRegistration(ctx, b)
+		return wrap(v, e)
 	case "POST /api/accounts/import-cookie":
 		v, e := a.importCookie(ctx, b, nil)
 		return wrap(v, e)
@@ -276,7 +279,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return a.updateStatus(), 202, nil
 	case "GET /api/settings":
 		out := M{}
-		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "zcode_version_auto_update", "zcode_version_check_interval_sec", "aliases", "retry", "web_port", "gateway_port"} {
+		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "conversation_affinity_minutes", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "zcode_version_auto_update", "zcode_version_check_interval_sec", "aliases", "retry", "web_port", "gateway_port"} {
 			out[k] = cfg[k]
 		}
 		over := obj(a.setting("config_overrides", M{}))
@@ -341,7 +344,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			return M{"ok": false, "error": e.Error()}, 400, nil
 		}
 		allowed := map[string]bool{}
-		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time default_reasoning_level app_version zcode_version_auto_update zcode_version_check_interval_sec aliases retry inference_driver http outbound_proxy") {
+		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time conversation_affinity_minutes default_reasoning_level app_version zcode_version_auto_update zcode_version_check_interval_sec aliases retry inference_driver http outbound_proxy") {
 			allowed[k] = true
 		}
 		a.configMu.Lock()
@@ -599,6 +602,9 @@ func validateSettings(b M) error {
 	}
 	if v, present := b["daily_claim_time"]; present && !validDailyClaimTime(str(v)) {
 		return fmt.Errorf("daily_claim_time 须为 00:00–23:59 的 HH:MM 时间")
+	}
+	if v, present := b["conversation_affinity_minutes"]; present && (num(v) < 0 || num(v) > 10080) {
+		return fmt.Errorf("conversation_affinity_minutes 须为 0 到 10080 的分钟数")
 	}
 	if v, ok := b["default_reasoning_level"]; ok && !validLevel(str(v)) {
 		return fmt.Errorf("思考档位须为 low/high/max")

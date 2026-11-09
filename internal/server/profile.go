@@ -14,6 +14,15 @@ func profileName(p M) any {
 			}
 		}
 	}
+	// Batch-registered accounts carry no official name; the masked email is
+	// the only readable identity upstream returns, so surface its local part.
+	for _, m := range []M{p, obj(p["customer"])} {
+		if s, ok := m["email"].(string); ok {
+			if local, _, found := strings.Cut(strings.TrimSpace(s), "@"); found && local != "" {
+				return local
+			}
+		}
+	}
 	return nil
 }
 func (a *App) platformName(ctx context.Context, r M) any {

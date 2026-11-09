@@ -249,6 +249,16 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		return nil, e
 	}
 	defer release()
+	// Ticketless automatic claims rotate the pool exit per card; claims that
+	// carry a browser ticket stay pinned to their verification-session exit.
+	if str(verification["captcha_verify_param"]) == "" {
+		rotated, claimRelease, e := a.pinClaimOutboundProxy(ctx, r)
+		if e != nil {
+			return nil, e
+		}
+		defer claimRelease()
+		ctx = rotated
+	}
 	ctx, finish, gateFailure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, r, a.origin, true))
 	if gateFailure != nil {
 		return nil, gateFailure
@@ -273,18 +283,14 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		headers["X-Aliyun-Captcha-Verify-Param"] = param
 		headers["X-Aliyun-Captcha-Verify-Region"] = verification["captcha_region"]
 	}
-	res, e := a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
-	if e != nil {
-		return nil, e
-	}
 	var verificationFailure *Failure
-	initialStatus := res.Status
 	sdkAttempted := false
+	// Obtain the security ticket before the first claim request. Sending an
+	// unverified claim only to discover the challenge consumes a risk slot and
+	// makes the following verified retry look like duplicate abnormal traffic.
 	automatic := (trigger == "auto" || trigger == "scheduled" || truth(verification["auto_verify"])) && str(verification["captcha_verify_param"]) == ""
-	if automatic && claimResponseRequiresVerification(res) {
+	if automatic {
 		sdkAttempted = true
-		// A challenge on an unverified request does not reject the unused
-		// prefetched ticket. Keep it unless the cached scene is disabled.
 		a.prepareCaptchaChallenge(ctx)
 		sdkVerification, verificationFailure = a.captchaHeaders(ctx, r, captchaPurposeClaim, true)
 		a.prepareProxyFailover(ctx, verificationFailure)
@@ -296,12 +302,16 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			for key := range sdkVerification.Headers {
 				headers[key] = sdkVerification.Headers.Get(key)
 			}
-			res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
-			if e != nil {
-				return nil, e
-			}
 		}
 	}
+	res := apiResult{}
+	if verificationFailure == nil {
+		res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
+		if e != nil {
+			return nil, e
+		}
+	}
+	initialStatus := res.Status
 	if str(headers["X-Aliyun-Captcha-Verify-Param"]) != "" && claimResponseRequiresVerification(res) {
 		a.rejectCaptchaVerification(sdkVerification)
 		if failure := apiResponseFailure(res); failure.Code == "F014" || failure.Code == "F020" {

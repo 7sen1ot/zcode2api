@@ -16,6 +16,7 @@ func (a *App) startWorkers() {
 	}
 	a.restoreOAuth()
 	a.startDailyClaims()
+	a.startProxyHealthProbes()
 	a.background(func() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
