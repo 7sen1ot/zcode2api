@@ -87,7 +87,7 @@ func (a *App) cancelClaimVerification(token string) {
 // The upstream verifier still validates the unmodified browser-issued ticket.
 func (a *App) claimVerificationContext(parent context.Context, account M, plan, token string, verification M) (context.Context, func(), error) {
 	if str(verification["captcha_verify_param"]) == "" {
-		return a.pinOutboundProxy(parent, account)
+		return a.pinClaimOutboundProxy(parent, account)
 	}
 	key := hash(str(verification["verification_session"]))
 	a.captcha.mu.Lock()

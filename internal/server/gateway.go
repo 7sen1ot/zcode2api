@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -318,19 +319,13 @@ func (a *App) forgetResponse(id string) {
 		a.responseBytes -= e.Bytes
 		delete(a.responses, id)
 	}
-	for i, x := range a.responseOrder {
-		if x == id {
-			a.responseOrder = append(a.responseOrder[:i], a.responseOrder[i+1:]...)
-			break
-		}
+	if i := slices.Index(a.responseOrder, id); i >= 0 {
+		a.responseOrder = slices.Delete(a.responseOrder, i, i+1)
 	}
 }
 func (a *App) touchResponse(id string) {
-	for i, x := range a.responseOrder {
-		if x == id {
-			a.responseOrder = append(a.responseOrder[:i], a.responseOrder[i+1:]...)
-			break
-		}
+	if i := slices.Index(a.responseOrder, id); i >= 0 {
+		a.responseOrder = slices.Delete(a.responseOrder, i, i+1)
 	}
 	a.responseOrder = append(a.responseOrder, id)
 }

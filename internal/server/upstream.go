@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -118,12 +119,14 @@ func (t *requestTiming) snapshot() M {
 }
 func (a *App) upstreamHeaders(token, session, id string) http.Header {
 	cfg := a.config()
-	httpCfg := obj(cfg["http"])
 	// ZCode 3.17.2 sends the desktop app version, not the inference API version.
 	version := str(fallback(cfg["app_version"], defaultHTTPClientVersion))
-	clientPlatform := str(fallback(httpCfg["client_platform"], "win32-x64"))
-	osCategory := str(fallback(httpCfg["client_os_category"], "windows"))
-	osVersion := str(fallback(httpCfg["client_os_version"], "10.0.22631"))
+	clientPlatform := platform()
+	osCategory := runtime.GOOS
+	if osCategory == "darwin" {
+		osCategory = "macos"
+	}
+	clientOSVersion := osVersion()
 	tz := os.Getenv("TZ")
 	if tz == "" {
 		tz = time.Now().Location().String()
@@ -135,7 +138,7 @@ func (a *App) upstreamHeaders(token, session, id string) http.Header {
 		}
 	}
 	h := http.Header{}
-	for k, v := range map[string]string{"authorization": "Bearer " + token, "x-api-key": token, "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "ZCode/" + version, "x-zcode-app-version": version, "x-platform": clientPlatform, "x-client-language": "zh-CN", "x-client-timezone": tz, "x-os-category": osCategory, "x-os-version": osVersion, "x-release-channel": "production", "http-referer": "https://zcode.z.ai", "x-title": "Z Code@electron", "x-zcode-agent": "glm", "x-session-id": session, "x-request-id": id, "x-query-id": uuidv7(), "x-zcode-trace-id": uuid(), "x-zcode-session-type": "main", "x-zcode-query-source": "main_turn"} {
+	for k, v := range map[string]string{"authorization": "Bearer " + token, "x-api-key": token, "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "ZCode/" + version, "x-zcode-app-version": version, "x-platform": clientPlatform, "x-client-language": "zh-CN", "x-client-timezone": tz, "x-os-category": osCategory, "x-os-version": clientOSVersion, "x-release-channel": "production", "http-referer": "https://zcode.z.ai", "x-title": "Z Code@electron", "x-zcode-agent": "glm", "x-session-id": session, "x-request-id": id, "x-query-id": uuidv7(), "x-zcode-trace-id": uuid(), "x-zcode-session-type": "main", "x-zcode-query-source": "main_turn"} {
 		h.Set(k, v)
 	}
 	return h
@@ -325,13 +328,12 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 			return nil, transportFailure(ctx, e)
 		}
 		resetIdle()
-		// The upstream answered: the request left the local queue, so the
-		// admission window has done its job and must not cancel an in-flight
-		// prefill. first_token_timeout owns the wait for the first token.
-		if admission != nil {
-			admission.Stop()
-		}
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
+			// Accepted requests use the first-token timeout. Error responses and
+			// verification retries must still fit within the admission budget.
+			if admission != nil {
+				admission.Stop()
+			}
 			break
 		}
 		b, readError := io.ReadAll(io.LimitReader(res.Body, 1<<20))

@@ -26,7 +26,7 @@ func TestSessionPatternExtractsMidStringSession(t *testing.T) {
 }
 
 func TestAffinityUsesSessionHeaderOverKeySticky(t *testing.T) {
-	app := registrationTestApp(t)
+	app := testApp(t)
 	r, _ := http.NewRequest("POST", "/v1/messages", nil)
 	r.Header.Set("X-Session-Id", "conv-12345678")
 	key := M{"id": "key_test", "sticky_minutes": 0}

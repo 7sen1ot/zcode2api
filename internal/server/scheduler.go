@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"math/rand/v2"
 	"strings"
 	"time"
 )
@@ -17,11 +18,12 @@ type accountAssignment struct {
 }
 
 type accountWaiter struct {
-	ctx      context.Context
-	o        inferOptions
-	skip     map[string]bool
-	deadline time.Time
-	result   chan accountAssignment
+	ctx        context.Context
+	o          inferOptions
+	skip       map[string]bool
+	deadline   time.Time
+	result     chan accountAssignment
+	waitedBusy bool
 }
 
 type schedulingCandidate struct {
@@ -181,6 +183,9 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (M, bool, 
 				}
 				return xs.LastUsed > ys.LastUsed
 			default:
+				if xs.Inflight != ys.Inflight {
+					return xs.Inflight < ys.Inflight
+				}
 				return xs.LastUsed < ys.LastUsed
 			}
 		}
@@ -201,6 +206,7 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (M, bool, 
 			id := str(picked.row["id"])
 			a.state(id).Inflight++
 			picked.row["_busy_generation"] = a.state(id).BusyGeneration
+			picked.row["_busy_probe"] = a.state(id).BusyUntil != 0
 			if a.state(id).BusyUntil != 0 {
 				a.state(id).BusyProbe = true
 			}
@@ -318,15 +324,19 @@ func (a *App) dispatchAccounts() {
 			continue
 		}
 		account, busy, candidates, policy := a.selectAccount(w.o, w.skip)
-		if w.o.Admission <= 0 && account == nil {
+		if account == nil {
 			for _, candidate := range candidates {
 				if obj(candidate)["skip"] == "upstream_busy" {
 					w.deadline = time.Time{}
+					w.waitedBusy = true
 					break
 				}
 			}
 		}
 		if account != nil || !busy || !w.deadline.IsZero() && !time.Now().Before(w.deadline) {
+			if account != nil && w.waitedBusy {
+				account["_waited_upstream_busy"] = true
+			}
 			w.result <- accountAssignment{account, busy, candidates, policy}
 		} else {
 			pending = append(pending, w)
@@ -353,7 +363,7 @@ func (a *App) admitAccount(account M) {
 	defer a.mu.Unlock()
 	s := a.state(str(account["id"]))
 	if s.BusyGeneration == integer(account["_busy_generation"]) {
-		s.BusyUntil, s.BusyProbe = 0, false
+		s.BusyUntil, s.BusyProbe, s.BusyBackoffStep = 0, false, 0
 		a.notifyAvailableLocked()
 	}
 }
@@ -366,18 +376,33 @@ func (a *App) finishAccountAttempt(account M, failure *Failure, completed bool, 
 	s.Inflight = max(0, s.Inflight-1)
 	s.LastUsed = nowMS()
 	if failure != nil && classify(failure).Kind == "busy" {
-		delay := failure.RetryAfter
-		if delay <= 0 {
-			delay = ms(fallback(params["rate_limit_retry_interval_ms"], 1000))
+		// Only the single current recovery probe advances the backoff. Replies
+		// from the same earlier batch may extend a deadline, never compound it.
+		if truth(account["_busy_probe"]) && s.BusyGeneration == integer(account["_busy_generation"]) {
+			s.BusyBackoffStep = min(7, s.BusyBackoffStep+1)
 		}
+		delay := accountBusyDelay(params, s.BusyBackoffStep, failure.RetryAfter)
 		s.BusyGeneration++
 		s.BusyUntil = max(s.BusyUntil, nowMS()+max(50*time.Millisecond, delay).Milliseconds())
 		s.BusyProbe = false
 	} else if s.BusyGeneration == integer(account["_busy_generation"]) {
 		s.BusyProbe = false
 		if completed && failure == nil {
-			s.BusyUntil = 0
+			s.BusyUntil, s.BusyBackoffStep = 0, 0
 		}
 	}
 	a.notifyAvailableLocked()
+}
+
+func accountBusyDelay(params M, step int, retryAfter time.Duration) time.Duration {
+	delay := max(50*time.Millisecond, ms(fallback(params["rate_limit_retry_interval_ms"], 1000)))
+	limit := max(5*time.Second, delay)
+	for i := 0; i < step && delay < limit; i++ {
+		delay = min(limit, delay*2)
+	}
+	var jitter time.Duration
+	if truth(params["jitter"]) {
+		jitter = time.Duration(rand.Float64() * float64(min(250*time.Millisecond, delay/5)))
+	}
+	return max(delay, retryAfter) + jitter
 }

@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -169,6 +167,62 @@ type outboundProxyManager struct {
 	unavailable map[string]bool
 	retryAt     map[string]time.Time
 	blocked     map[string]time.Time
+	probeCancel context.CancelFunc
+}
+
+// Call with mu held; the zero-value manager and configuration resets are valid.
+func (manager *outboundProxyManager) initStateLocked() {
+	if manager.unavailable == nil {
+		manager.unavailable = map[string]bool{}
+	}
+	if manager.retryAt == nil {
+		manager.retryAt = map[string]time.Time{}
+	}
+	if manager.blocked == nil {
+		manager.blocked = map[string]time.Time{}
+	}
+}
+
+func (manager *outboundProxyManager) configureLocked(options M, endpoints []proxyEndpoint) {
+	manager.initStateLocked()
+	key := hash(js(options))
+	if key != manager.key {
+		manager.key, manager.selected = key, ""
+		manager.generation++
+		manager.claimCursor = 0
+		for _, endpoint := range endpoints {
+			if endpoint.selectionID() == str(options["preferred_node"]) {
+				manager.selected = endpoint.identity()
+				break
+			}
+		}
+	}
+	manager.endpoints = append([]proxyEndpoint(nil), endpoints...)
+	manager.pruneStateLocked(time.Now())
+}
+
+func (manager *outboundProxyManager) pruneStateLocked(now time.Time) {
+	manager.initStateLocked()
+	present := map[string]bool{}
+	for _, endpoint := range manager.endpoints {
+		present[endpoint.identity()] = true
+	}
+	for identity, until := range manager.retryAt {
+		if !present[identity] || !now.Before(until) {
+			delete(manager.retryAt, identity)
+			delete(manager.unavailable, identity)
+		}
+	}
+	for identity := range manager.unavailable {
+		if !present[identity] || !now.Before(manager.retryAt[identity]) {
+			delete(manager.unavailable, identity)
+		}
+	}
+	for identity, until := range manager.blocked {
+		if !present[identity] || !now.Before(until) {
+			delete(manager.blocked, identity)
+		}
+	}
 }
 
 func asProxyFailure(err error) *Failure {
@@ -265,41 +319,13 @@ func (a *App) pinOutboundProxyMode(parent context.Context, account M, rotatePerC
 func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxyEndpoint) (int, uint64) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	key := hash(js(options))
-	if key != manager.key {
-		manager.key, manager.selected = key, ""
-		manager.generation++
-		manager.unavailable = map[string]bool{}
-		manager.retryAt = map[string]time.Time{}
-		manager.blocked = map[string]time.Time{}
-		for _, endpoint := range endpoints {
-			if endpoint.selectionID() == str(options["preferred_node"]) {
-				manager.selected = endpoint.identity()
-				break
-			}
-		}
-	}
-	manager.endpoints = append([]proxyEndpoint(nil), endpoints...)
+	manager.configureLocked(options, endpoints)
 	return manager.selectAvailableEndpointLocked(time.Now()), manager.generation
 }
 
 // Call with mu held. Expired cooldowns are eligible on selection and failover.
 func (manager *outboundProxyManager) selectAvailableEndpointLocked(now time.Time) int {
-	present := map[string]bool{}
-	for _, endpoint := range manager.endpoints {
-		present[endpoint.identity()] = true
-	}
-	for identity, until := range manager.retryAt {
-		if !present[identity] || !now.Before(until) {
-			delete(manager.retryAt, identity)
-			delete(manager.unavailable, identity)
-		}
-	}
-	for identity, until := range manager.blocked {
-		if !present[identity] || !now.Before(until) {
-			delete(manager.blocked, identity)
-		}
-	}
+	manager.pruneStateLocked(now)
 	start := 0
 	for index, endpoint := range manager.endpoints {
 		if endpoint.identity() == manager.selected {
@@ -334,32 +360,14 @@ func (a *App) prepareProxyFailover(ctx context.Context, failure *Failure) {
 	failure.ProxyFailover = failure.Retryable
 }
 
-// selectRotatingEndpoint advances a per-claim cursor so each card uses the next
-// exit, while skipping nodes currently marked unavailable or WAF-blocked. When
-// every node is skipped it still returns the cursor position so the caller can
-// retry once instead of failing a claim just because cooldowns overlap.
+// Claim selection advances its own cursor without moving inference's sticky exit.
 func (manager *outboundProxyManager) selectRotatingEndpoint(options M, endpoints []proxyEndpoint) (int, uint64) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	key := hash(js(options))
-	if key != manager.key {
-		manager.key, manager.selected = key, ""
-		manager.generation++
-		manager.unavailable = map[string]bool{}
-		manager.retryAt = map[string]time.Time{}
-		manager.blocked = map[string]time.Time{}
-		manager.claimCursor = 0
-		for _, endpoint := range endpoints {
-			if endpoint.selectionID() == str(options["preferred_node"]) {
-				manager.selected = endpoint.identity()
-				break
-			}
-		}
-	}
+	manager.configureLocked(options, endpoints)
 	if len(endpoints) == 0 {
 		return -1, manager.generation
 	}
-	manager.endpoints = append([]proxyEndpoint(nil), endpoints...)
 	manager.claimCursor %= len(endpoints)
 	for offset := 0; offset < len(endpoints); offset++ {
 		index := (manager.claimCursor + offset) % len(endpoints)
@@ -369,10 +377,7 @@ func (manager *outboundProxyManager) selectRotatingEndpoint(options M, endpoints
 			return index, manager.generation
 		}
 	}
-	// Every node is cooling down: fall back to the cursor position itself.
-	index := manager.claimCursor
-	manager.claimCursor = (index + 1) % len(endpoints)
-	return index, manager.generation
+	return -1, manager.generation
 }
 
 // Only current pooled routes may retire nodes; canceled and override routes cannot.
@@ -382,20 +387,20 @@ func (a *App) markProxyRoute(ctx context.Context, blocked bool, retryAfter time.
 		return false
 	}
 	a.proxies.mu.Lock()
-	if selection.generation != a.proxies.generation {
+	a.proxies.initStateLocked()
+	if a.proxies.closing || ctx.Err() != nil || selection.generation != a.proxies.generation {
 		a.proxies.mu.Unlock()
 		return false
 	}
 	now := time.Now()
 	reason := "代理连接失败"
 	if blocked {
-		// WAF blocks last hours, not minutes: escalate the cooldown with each
-		// repeat (10m -> 20m -> 40m, capped at 2h) and honor Retry-After.
+		// Escalate repeated blocks without shortening upstream Retry-After.
 		reason = "上游安全网关拦截"
 		base := max(10*time.Minute, retryAfter)
 		previous := a.proxies.blocked[selection.identity]
 		if previous.After(now) {
-			base = min(2*time.Hour, max(base, previous.Sub(now)*2))
+			base = max(retryAfter, min(2*time.Hour, max(base, previous.Sub(now)*2)))
 		}
 		a.proxies.blocked[selection.identity] = maxTime(previous, now.Add(base))
 	} else {
@@ -403,7 +408,7 @@ func (a *App) markProxyRoute(ctx context.Context, blocked bool, retryAfter time.
 		base := max(30*time.Second, retryAfter)
 		previous := a.proxies.retryAt[selection.identity]
 		if previous.After(now) {
-			base = min(5*time.Minute, max(base, previous.Sub(now)*2))
+			base = max(retryAfter, min(5*time.Minute, max(base, previous.Sub(now)*2)))
 		}
 		a.proxies.unavailable[selection.identity] = true
 		a.proxies.retryAt[selection.identity] = maxTime(previous, now.Add(base))
@@ -439,24 +444,50 @@ func proxyExitFailure(failure *Failure) bool {
 
 // persistProxyStateLocked writes cooldowns to SQLite so a restart does not
 // forget WAF blocks and re-walk dead exits. Call with proxies.mu held; the
-// write is fire-and-forget on the shared single-connection pool.
+// writes are serialized and joined by App.Close.
 func (a *App) persistProxyStateLocked() {
 	a.background(func() {
 		a.proxies.mu.Lock()
-		now := time.Now()
-		a.exec("DELETE FROM proxy_state")
-		for identity, until := range a.proxies.blocked {
-			if until.After(now) {
-				_ = a.exec("INSERT OR REPLACE INTO proxy_state(identity,blocked_until,retry_at) VALUES(?,?,0)", identity, until.UnixMilli())
-			}
+		defer a.proxies.mu.Unlock()
+		if err := a.writeProxyStateLocked(); err != nil {
+			a.log.Printf("proxy state persistence: %v", err)
 		}
-		for identity := range a.proxies.unavailable {
-			if until := a.proxies.retryAt[identity]; until.After(now) {
-				_ = a.exec("INSERT OR REPLACE INTO proxy_state(identity,blocked_until,retry_at) VALUES(?,0,?)", identity, until.UnixMilli())
-			}
-		}
-		a.proxies.mu.Unlock()
 	})
+}
+
+func (a *App) writeProxyStateLocked() error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM proxy_state"); err != nil {
+		return err
+	}
+	now := time.Now()
+	identities := map[string]bool{}
+	for identity := range a.proxies.blocked {
+		identities[identity] = true
+	}
+	for identity := range a.proxies.retryAt {
+		identities[identity] = true
+	}
+	for identity := range identities {
+		var blocked, retry int64
+		if until := a.proxies.blocked[identity]; until.After(now) {
+			blocked = until.UnixMilli()
+		}
+		if until := a.proxies.retryAt[identity]; a.proxies.unavailable[identity] && until.After(now) {
+			retry = until.UnixMilli()
+		}
+		if blocked == 0 && retry == 0 {
+			continue
+		}
+		if _, err = tx.Exec("INSERT INTO proxy_state(identity,blocked_until,retry_at) VALUES(?,?,?)", identity, blocked, retry); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // restoreProxyState reloads persisted cooldowns after startup.
@@ -464,6 +495,7 @@ func (a *App) restoreProxyState() {
 	now := time.Now()
 	a.proxies.mu.Lock()
 	defer a.proxies.mu.Unlock()
+	a.proxies.initStateLocked()
 	for _, v := range a.rows("SELECT identity,blocked_until,retry_at FROM proxy_state") {
 		row := obj(v)
 		identity := str(row["identity"])
@@ -476,100 +508,6 @@ func (a *App) restoreProxyState() {
 		if retry := time.UnixMilli(integer(row["retry_at"])); retry.After(now) {
 			a.proxies.unavailable[identity] = true
 			a.proxies.retryAt[identity] = retry
-		}
-	}
-}
-
-// startProxyHealthProbes re-probes every manual exit on startup and every five
-// minutes so dead exits are quarantined before a user request hits them, and
-// recovered exits are released without waiting out the full cooldown.
-func (a *App) startProxyHealthProbes() {
-	a.background(func() {
-		for {
-			options := obj(a.config()["outbound_proxy"])
-			enabled, source := truth(options["enabled"]), str(options["source"])
-			if !enabled || source != "manual" {
-				return
-			}
-			a.probeManualExits(merge(proxyDefaults(), options))
-			timer := time.NewTimer(5 * time.Minute)
-			select {
-			case <-a.ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		}
-	})
-}
-
-// probeManualExits walks the configured manual exits and reconciles cooldowns:
-// blocked exits stay parked, recovered ones are released, dead ones parked.
-func (a *App) probeManualExits(options M) {
-	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
-	defer cancel()
-	for _, value := range arr(options["urls"]) {
-		if ctx.Err() != nil {
-			return
-		}
-		address := str(value)
-		if !validProxy(address) {
-			continue
-		}
-		identity := proxyEndpoint{URL: address}.identity()
-		probeCtx, end := context.WithTimeout(context.WithValue(ctx, proxyContextKey{}, proxyRoute{address}), 8*time.Second)
-		verdict := ""
-		if client, e := a.client(probeCtx); e == nil {
-			request, _ := http.NewRequestWithContext(probeCtx, "POST", a.origin+"/api/v1/zcode-plan/anthropic/v1/messages", strings.NewReader("{}"))
-			request.Header.Set("Content-Type", "application/json")
-			if response, e := client.Do(request); e == nil {
-				body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-				response.Body.Close()
-				failure := classify(upstreamHTTPFailure(response, body))
-				blocked := failure.Code == "upstream_waf_blocked" || failure.Kind == "account_risk"
-				switch {
-				case blocked:
-					verdict = "blocked"
-				case response.StatusCode == 401:
-					verdict = "ok"
-				default:
-					verdict = "quarantine"
-				}
-			} else if proxyExitFailure(transportFailure(probeCtx, e)) {
-				verdict = "quarantine"
-			}
-		}
-		end()
-		a.applyExitVerdict(identity, verdict)
-	}
-}
-
-// applyExitVerdict reconciles one probe outcome with the shared cooldowns.
-func (a *App) applyExitVerdict(identity, verdict string) {
-	if identity == "" || verdict == "" {
-		return
-	}
-	now := time.Now()
-	a.proxies.mu.Lock()
-	defer a.proxies.mu.Unlock()
-	switch verdict {
-	case "ok":
-		if a.proxies.blocked[identity].After(now) || a.proxies.unavailable[identity] {
-			delete(a.proxies.blocked, identity)
-			delete(a.proxies.unavailable, identity)
-			delete(a.proxies.retryAt, identity)
-			a.persistProxyStateLocked()
-		}
-	case "blocked":
-		if !a.proxies.blocked[identity].After(now) {
-			a.proxies.blocked[identity] = now.Add(10 * time.Minute)
-			a.persistProxyStateLocked()
-		}
-	case "quarantine":
-		if !a.proxies.retryAt[identity].After(now) {
-			a.proxies.unavailable[identity] = true
-			a.proxies.retryAt[identity] = now.Add(time.Minute)
-			a.persistProxyStateLocked()
 		}
 	}
 }
@@ -657,14 +595,16 @@ func (a *App) forgetProxyClients(addresses []proxyEndpoint) {
 
 func (a *App) resetOutboundProxies() {
 	a.proxies.mu.Lock()
+	if a.proxies.probeCancel != nil {
+		a.proxies.probeCancel()
+	}
 	old := a.proxies.current
 	a.proxies.current = nil
 	a.proxies.key, a.proxies.selected = "", ""
 	a.proxies.generation++
 	a.proxies.endpoints = nil
-	a.proxies.unavailable = nil
-	a.proxies.retryAt = nil
-	a.proxies.blocked = nil
+	a.proxies.claimCursor = 0
+	a.proxies.initStateLocked()
 	stop := old != nil && old.references == 0
 	if old != nil {
 		old.retired = true
@@ -677,6 +617,10 @@ func (a *App) resetOutboundProxies() {
 		old.stop()
 	}
 	a.forgetProxyClients(nil)
+	select {
+	case a.proxyHealthReschedule <- struct{}{}:
+	default:
+	}
 }
 
 func (a *App) closeOutboundProxies() {
@@ -688,91 +632,4 @@ func (a *App) closeOutboundProxies() {
 	for runtime := range all {
 		runtime.stop()
 	}
-}
-
-func (a *App) testOutboundProxies(parent context.Context, options M) (M, error) {
-	if err := validateOutboundProxy(options); err != nil {
-		return nil, err
-	}
-	options = merge(proxyDefaults(), options)
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
-	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
-	endpoints := []proxyEndpoint{{URL: "", Name: "直连"}}
-	if truth(options["enabled"]) {
-		endpoints = nil
-		if options["source"] == "subscription" {
-			runtime, err := a.startManagedProxy(ctx, options)
-			if err != nil {
-				return nil, err
-			}
-			defer runtime.stop()
-			endpoints = runtime.endpoints
-		} else {
-			endpoints = manualProxyEndpoints(arr(options["urls"]))
-		}
-	}
-	results := make([]any, len(endpoints))
-	var workers sync.WaitGroup
-	jobs := make(chan int)
-	for i := 0; i < min(4, len(endpoints)); i++ {
-		workers.Go(func() {
-			for index := range jobs {
-				endpoint := endpoints[index]
-				started := time.Now()
-				result := M{"name": endpoint.Name, "reachable": false, "transport_reachable": false, "failure_kind": "network", "message": "连接失败或超时"}
-				probeCtx, end := context.WithTimeout(context.WithValue(ctx, proxyContextKey{}, proxyRoute{endpoint.URL}), 8*time.Second)
-				client, err := a.client(probeCtx)
-				if err == nil {
-					request, _ := http.NewRequestWithContext(probeCtx, "POST", a.origin+"/api/v1/zcode-plan/anthropic/v1/messages", strings.NewReader("{}"))
-					request.Header.Set("Content-Type", "application/json")
-					response, failure := client.Do(request)
-					if failure != nil {
-						result["code"] = transportFailure(probeCtx, failure).Code
-					}
-					if failure == nil {
-						result["transport_reachable"] = true
-						body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-						response.Body.Close()
-						result["status"] = response.StatusCode
-						failure := classify(upstreamHTTPFailure(response, body))
-						blocked := failure.Code == "upstream_waf_blocked" || failure.Kind == "account_risk"
-						reachable := response.StatusCode == 401 && !blocked
-						result["reachable"] = reachable
-						result["blocked"] = blocked
-						result["code"], result["failure_kind"] = failure.Code, failure.Kind
-						if failure.Kind == "account_risk" {
-							result["failure_kind"] = "risk"
-						}
-						if reachable {
-							result["failure_kind"], result["code"] = "", ""
-						}
-						if failure.Kind == "account_risk" {
-							// Anonymous probes cannot identify an affected account or exit.
-							result["message"] = "上游风控拒绝"
-							if failure.Code == "3012" {
-								result["message"] = "上游风控拒绝（3012）"
-							}
-						} else if blocked {
-							result["message"] = "上游安全网关拦截"
-						} else if response.StatusCode == 401 {
-							result["message"] = "出口可达；仍需用真实推理确认账号与模型可用"
-						} else {
-							result["message"] = "已连接，但上游未返回预期的鉴权响应"
-						}
-					}
-				}
-				end()
-				result["elapsed_ms"] = time.Since(started).Milliseconds()
-				results[index] = result
-			}
-		})
-	}
-	for i := range endpoints {
-		jobs <- i
-	}
-	close(jobs)
-	workers.Wait()
-	return M{"ok": true, "results": results, "note": "检测不保存设置、不发送账号令牌、不计模型用量；连通性通过不代表真实推理一定通过风控"}, nil
 }

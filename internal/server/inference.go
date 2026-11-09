@@ -38,6 +38,11 @@ func classify(f *Failure) *Failure {
 	if f.Kind != "" {
 		return f
 	}
+	switch f.Code {
+	case "3008", "3009", "3010":
+		f.Kind, f.Retryable = "busy", true
+		return f
+	}
 	if f.Status == http.StatusTooManyRequests {
 		f.Kind, f.Retryable = "rate_limit", true
 		return f
@@ -64,8 +69,6 @@ func classify(f *Failure) *Failure {
 		kind, retry = "network", true
 	case "503", "529", "1312", "engine_overloaded_error", "overloaded_error":
 		kind, retry = "overload", true
-	case "3008", "3009", "3010":
-		kind, retry = "busy", true
 	case "1005", "1006", "3103", "2056", "20097", "1316", "1317", "1318", "1319", "1320", "1321", "insufficient_quota":
 		kind = "quota"
 	case "1261":
@@ -85,8 +88,6 @@ func classify(f *Failure) *Failure {
 		switch {
 		case riskBlockMessage(f.Message):
 			kind = "account_risk"
-		case f.Status == 429:
-			kind, retry = "rate_limit", true
 		case f.Status == 401:
 			kind = "auth"
 		case f.Status == 403:
@@ -130,12 +131,17 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 	excluded, round := map[string]bool{}, map[string]bool{}
 	throttled := map[string]time.Time{}
 	accountFailures := map[string]int{}
-	attempts, regular := 0, 0
-	rotations := 0
-	rotationCap := max(1, min(2, max(1, int(integer(p["max_attempts"])))))
-	tried := map[string]bool{}
-	rotated := []any{}
 	var last, lastThrottle *Failure
+	clearThrottle := func(id string) {
+		delete(throttled, id)
+		delete(round, id)
+		throttleDeadline = time.Time{}
+		if len(throttled) == 0 {
+			lastThrottle = nil
+		}
+	}
+	attempts, regular := 0, 0
+	rotated := []any{}
 	var lastAccount M
 	fail := func(f *Failure) (*Result, *Failure) {
 		if f == nil {
@@ -186,26 +192,6 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 				skip[id] = true
 			}
 		}
-		// At the rotation cap no untried account may be attempted: trying a
-		// fresh account discards every prior prompt-cache write. Only accounts
-		// already used by this request may re-enter once their window passes.
-		atCap := rotations >= rotationCap
-		if atCap {
-			now := time.Now()
-			for id := range tried {
-				t, wasThrottled := throttled[id]
-				if !wasThrottled || t.After(now) {
-					skip[id] = true
-					continue
-				}
-				delete(skip, id)
-			}
-			for id := range skip {
-				if !tried[id] {
-					skip[id] = true
-				}
-			}
-		}
 		start := time.Now()
 		o.Admission = 0
 		if !throttleDeadline.IsZero() {
@@ -254,12 +240,15 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			return fail(nil)
 		}
 		id := str(account["id"])
-		tried[id] = true
+		if truth(account["_waited_upstream_busy"]) {
+			clearThrottle(id)
+		}
 		if lastAccount != nil && str(lastAccount["id"]) != id {
 			rotated = append(rotated, id)
 		}
 		lastAccount = account
 		attempts++
+		o.Admission = 0
 		if !throttleDeadline.IsZero() {
 			o.Admission = max(time.Millisecond, time.Until(throttleDeadline))
 		}
@@ -325,6 +314,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			continue
 		case "busy":
 			// Account concurrency does not consume the ordinary retry budget.
+			clearThrottle(id)
 			continue
 		case "rate_limit", "overload":
 			lastThrottle = f
@@ -334,11 +324,6 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			}
 			throttled[id] = time.Now().Add(max(50*time.Millisecond, delay))
 			round[id] = true
-			// Rotation destroys the per-account prompt cache, so cap how many
-			// accounts one request may burn. At the cap the loop stops trying
-			// untried accounts (skip filter above) and only waits on windows
-			// of accounts already used by this request.
-			rotations++
 			continue
 		}
 		if !f.Retryable {

@@ -16,12 +16,13 @@ import (
 )
 
 type accountState struct {
-	Inflight       int
-	LastUsed       int64
-	Cooldown       int64
-	BusyUntil      int64
-	BusyGeneration int64
-	BusyProbe      bool
+	Inflight        int
+	LastUsed        int64
+	Cooldown        int64
+	BusyUntil       int64
+	BusyGeneration  int64
+	BusyProbe       bool
+	BusyBackoffStep int
 }
 type stickyEntry struct {
 	Account string
@@ -77,6 +78,8 @@ type App struct {
 	origin                 string
 	captcha                captchaManager
 	proxies                outboundProxyManager
+	proxyHealthOnce        sync.Once
+	proxyHealthReschedule  chan struct{}
 	mihomoInstallMu        sync.Mutex
 	updates                updateManager
 	zcodeVersionMu         sync.Mutex
@@ -107,6 +110,7 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	a.root = root
 	a.version = buildVersion
 	a.zcodeVersionReschedule = make(chan struct{}, 1)
+	a.proxyHealthReschedule = make(chan struct{}, 1)
 	saved := obj(a.setting("config_overrides", M{}))
 	migrateHTTPVersion := !truth(a.setting("http_client_version_3_17_2_migrated", false))
 	clean := M{}

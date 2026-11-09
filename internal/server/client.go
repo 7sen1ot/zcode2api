@@ -117,12 +117,11 @@ func (a *App) client(ctx context.Context) (*http.Client, error) {
 }
 
 type apiResult struct {
-	Status    int
-	JSON      M
-	Header    http.Header
-	OK        bool
-	errorBody []byte
-	failure   *Failure
+	Status  int
+	JSON    M
+	Header  http.Header
+	OK      bool
+	failure *Failure
 }
 
 func validProxy(s string) bool {
@@ -218,8 +217,7 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	j := obj(parse(string(b), nil))
 	result = apiResult{Status: res.StatusCode, JSON: j, Header: res.Header, OK: res.StatusCode == 200 && (codeIs(j["code"], 0) || codeIs(j["code"], 200))}
 	if !result.OK {
-		result.errorBody = append([]byte(nil), b[:min(len(b), 64<<10)]...)
-		result.failure = classify(upstreamHTTPFailure(res, result.errorBody))
+		result.failure = classify(upstreamHTTPFailure(res, b[:min(len(b), 64<<10)]))
 	}
 	return result, nil
 }
@@ -234,16 +232,14 @@ func apiResponseFailure(r apiResult) *Failure {
 		failure := *r.failure
 		return &failure
 	}
-	failure := providerFailure(r.JSON, r.Status, r.Header.Get("Retry-After"))
-	if len(r.errorBody) > 0 {
-		failure = upstreamHTTPFailure(&http.Response{StatusCode: r.Status, Header: r.Header}, r.errorBody)
-	}
-	return classify(failure)
+	return classify(providerFailure(r.JSON, r.Status, r.Header.Get("Retry-After")))
 }
 func (a *App) customer(ctx context.Context, account M, token string) (apiResult, error) {
 	host := "https://bigmodel.cn"
+	authorization := token
 	if str(account["family"]) == "zai" {
 		host = "https://api.z.ai"
+		authorization = "Bearer " + token
 	}
-	return a.api(ctx, account, "GET", host+"/api/biz/customer/getCustomerInfo", "", nil, M{"Authorization": "Bearer " + token}, nil)
+	return a.api(ctx, account, "GET", host+"/api/biz/customer/getCustomerInfo", "", nil, M{"Authorization": authorization}, nil)
 }

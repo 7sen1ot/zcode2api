@@ -378,7 +378,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		proxyChanged := js(next["outbound_proxy"]) != js(a.cfg["outbound_proxy"])
 		captchaChanged := proxyChanged || js(next["app_version"]) != js(a.cfg["app_version"]) || js(obj(next["http"])["captcha"]) != js(obj(a.cfg["http"])["captcha"])
-		timeChanged := js(next["daily_claim_time"]) != js(a.cfg["daily_claim_time"])
+		claimScheduleChanged := js(next["daily_claim_time"]) != js(a.cfg["daily_claim_time"]) || js(next["daily_claim_enabled"]) != js(a.cfg["daily_claim_enabled"])
 		versionSyncEnabled := autoVersion && (proxyChanged || !truth(a.cfg["zcode_version_auto_update"]))
 		versionScheduleChanged := js(next["zcode_version_auto_update"]) != js(a.cfg["zcode_version_auto_update"]) || js(next["zcode_version_check_interval_sec"]) != js(a.cfg["zcode_version_check_interval_sec"])
 		e := a.setSetting("config_overrides", over)
@@ -392,7 +392,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		if proxyChanged && e == nil {
 			a.resetOutboundProxies()
 		}
-		if timeChanged && e == nil {
+		if claimScheduleChanged && e == nil {
 			a.rescheduleClaims()
 		}
 		if versionScheduleChanged && e == nil {
@@ -404,6 +404,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 					a.log.Printf("ZCode 版本同步失败，沿用当前版本：%v", err)
 				}
 			})
+		}
+		if e == nil && (b["daily_claim_enabled"] != nil || b["daily_claim_time"] != nil) {
+			return M{"ok": true, "claim_schedule": a.dailyClaimSchedule()}, 200, nil
 		}
 		return ok, 200, e
 	case "GET /api/audit":

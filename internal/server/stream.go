@@ -15,7 +15,7 @@ type streamBlock struct {
 	Index    int
 }
 type streamTool struct {
-	ID, Name, ItemID   string
+	ID, ItemID         string
 	Definition         toolDefinition
 	Args               strings.Builder
 	Index, OutputIndex int
@@ -199,7 +199,7 @@ func (s *protocolStream) toolEvent(e Event) error {
 		if s.protocol == "responses" && definition.Kind == "custom" {
 			prefix = "ctc_"
 		}
-		t := &streamTool{ID: e.ID, Name: e.Name, Definition: definition, Index: len(s.tools), OutputIndex: s.index, ItemID: prefix + uuid()}
+		t := &streamTool{ID: e.ID, Definition: definition, Index: len(s.tools), OutputIndex: s.index, ItemID: prefix + uuid()}
 		s.tools[e.Index] = t
 		if s.protocol == "chat" {
 			call := M{"index": t.Index, "id": t.ID, "type": "function", "function": M{"name": definition.Name, "arguments": ""}}

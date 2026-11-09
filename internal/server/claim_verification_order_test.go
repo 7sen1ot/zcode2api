@@ -2,22 +2,22 @@ package server
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
 
-// A verified claim must never be preceded by an unverified probe. Upstream
-// treats that probe as a second claim attempt, so a later verified retry can
-// be rejected as duplicate abnormal traffic (3012).
+// Failed pre-verification must not submit an unverified claim.
 func TestClaimVerificationRunsBeforeOnlyClaimRequest(t *testing.T) {
-	app := registrationTestApp(t)
+	app := testApp(t)
+	app.captcha.run = func(context.Context, M) (M, error) {
+		return M{"ok": false, "code": "captcha_jsdom_missing"}, nil
+	}
 
 	var claimCalls atomic.Int32
 	var captchaCalls atomic.Int32
-	transport := registrationRoundTrip(func(r *http.Request) (*http.Response, error) {
+	testInstallClient(app, "", func(r *http.Request) (*http.Response, error) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/billing/claim"):
 			claimCalls.Add(1)
@@ -25,56 +25,21 @@ func TestClaimVerificationRunsBeforeOnlyClaimRequest(t *testing.T) {
 			if r.Header.Get("X-Aliyun-Captcha-Verify-Param") == "" {
 				t.Fatal("claim reached upstream without a verification ticket")
 			}
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body: io.NopCloser(strings.NewReader(
-					`{"code":0,"data":{"plan":{"plan_id":"p","ends_at":1}}}`,
-				)),
-				Request: r,
-			}, nil
+			return testAPIResponse(r, 200, `{"code":0,"data":{"plan":{"plan_id":"p","ends_at":1}}}`), nil
 		case strings.Contains(r.URL.Path, "/client/configs"):
 			captchaCalls.Add(1)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body: io.NopCloser(strings.NewReader(
-					`{"code":0,"data":{"configs":{"captcha":{` +
-						`"enabled":true,"region":"sgp","sceneId":"scene",` +
-						`"prefix":"verify","skip_model_request":false}}}}`,
-				)),
-				Request: r,
-			}, nil
+			return testAPIResponse(r, 200, `{"code":0,"data":{"configs":{"captcha":{"enabled":true,"region":"sgp","sceneId":"scene","prefix":"verify","skip_model_request":false}}}}`), nil
 		default:
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"code":0,"data":{}}`)),
-				Request:    r,
-			}, nil
+			return testAPIResponse(r, 200, `{"code":0,"data":{}}`), nil
 		}
 	})
-	app.mu.Lock()
-	app.clients[""] = &http.Client{Transport: transport}
-	app.mu.Unlock()
 
 	// The captcha runtime is deliberately unavailable. Verification fails
 	// before any claim request, proving that no unverified probe was sent.
-	account, err := app.insertAccount(M{
-		"family": "zai", "customer_id": "claim-order",
-		"device_mid": "claim-order-device", "status": "active",
-	}, M{"zcode_jwt": registrationJWT(`{"user_id":"claim-order"}`)})
-	registrationMust(t, err)
-
-	result, err := app.claim(
-		context.Background(),
-		str(account["id"]),
-		"plan-order",
-		"auto",
-		nil,
-	)
-	registrationMust(t, err)
-	registrationEqual(t, result["ok"], false)
-	registrationEqual(t, claimCalls.Load(), int32(0))
-	_ = captchaCalls.Load()
+	account := testAccount(t, app, "claim-order")
+	result, err := app.claim(app.ctx, str(account["id"]), "plan-order", "auto", nil)
+	testMust(t, err)
+	testEqual(t, result["ok"], false)
+	testEqual(t, claimCalls.Load(), int32(0))
+	testEqual(t, captchaCalls.Load(), int32(1))
 }

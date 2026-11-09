@@ -3,12 +3,10 @@ package server
 import (
 	"context"
 	_ "embed"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 )
 
@@ -69,12 +67,7 @@ func (g *toolGrammar) check(parent context.Context, input *string) error {
 	if input != nil {
 		request["input"] = *input
 	}
-	command := exec.CommandContext(ctx, g.Python, "-I", "-c", grammarCheckScript)
-	hideChildWindow(command)
-	command.Stdin = strings.NewReader(js(request))
-	output := &limitedProcessOutput{}
-	command.Stdout, command.Stderr = output, io.Discard
-	command.WaitDelay = time.Second
+	command, output := newJSONCommand(ctx, g.Python, request, "-I", "-c", grammarCheckScript)
 	if e := command.Run(); e != nil {
 		if ctx.Err() != nil {
 			return &Failure{Kind: "timeout", Code: "grammar_validation_timeout", Message: "grammar 校验超时，已阻止返回工具调用"}

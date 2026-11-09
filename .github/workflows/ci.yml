@@ -36,6 +36,7 @@ jobs:
         run: |
           go mod verify
           go vet ./...
+          go test ./... -count=1 -timeout=120s
       - name: Check JavaScript syntax
         shell: bash
         run: |

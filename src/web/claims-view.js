@@ -31,9 +31,16 @@ async function requestClaimCaptcha(config, label) {
   return new Promise((resolve, reject) => {
     const mountID = `claim-captcha-${++claimCaptchaSequence}`;
     const form = h(`<div><p class="dialog-intro">${esc(label)} · 验证后领取</p><div id="${mountID}"></div><button type="button" class="btn primary" id="${mountID}-start" disabled>开始验证</button><p class="quiet-message" data-captcha-status role="status">正在加载验证…</p><div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button></div></div>`);
+    form.hidden = true;
+    document.body.appendChild(form);
     const status = $('[data-captcha-status]', form), mount = $(`#${mountID}`, form);
     let instance, dialog, observer, timeout, readyTimer, autoWaitTimer, epoch = 0, settled = false, initializing = false, verifying = false, autoStarted = false, autoPending = false;
     let startButton = $(`#${mountID}-start`, form);
+    const setVerifying = value => {
+      verifying = value;
+      startButton.classList.toggle('loading', value);
+      startButton.setAttribute('aria-busy', String(value));
+    };
     const finish = (ticket, error) => {
       if (settled) return;
       settled = true;
@@ -44,10 +51,15 @@ async function requestClaimCaptcha(config, label) {
       clearTimeout(autoWaitTimer);
       observer?.disconnect();
       try { instance?.destroy?.(); } catch { }
-      dialog?.close();
+      if (dialog) dialog.close();
+      else form.remove();
       error ? reject(error) : resolve(ticket);
     };
-    dialog = modal('领取验证', form, () => finish(null), { externalFocus: true });
+    const showDialog = () => {
+      if (settled || dialog) return;
+      form.hidden = false;
+      dialog = modal('领取验证', form, () => finish(null), { externalFocus: true });
+    };
     observer = new MutationObserver(() => { if (!form.isConnected) finish(null); });
     observer.observe(document.body, { childList: true });
     timeout = setTimeout(() => finish(null, new Error('验证超时，请重新领取。')), 120000);
@@ -58,18 +70,23 @@ async function requestClaimCaptcha(config, label) {
       clearTimeout(autoWaitTimer);
       const result = value?.Result || value?.result || value || {};
       const code = String(result.VerifyCode || result.verifyCode || value?.verifyCode || '');
+      if (!dialog && code !== 'F015') {
+        finish(null, new Error(`验证未通过${/^[FT][0-9]{3}$/.test(code) ? `（${code}）` : ''}，请稍后重试。`));
+        return;
+      }
+      showDialog();
       status.textContent = code === 'F015'
         ? '请按组件提示完成验证。'
         : `验证未通过${/^[FT][0-9]{3}$/.test(code) ? `（${code}）` : ''}，请点击重新验证。`;
       status.classList.add('error');
-      verifying = false;
-      startButton.classList.remove('loading');
-      startButton.setAttribute('aria-busy', 'false');
+      setVerifying(false);
       startButton.disabled = false;
       startButton.textContent = '重新验证';
+      if (code === 'F015') { try { instance?.show?.(); } catch {} }
     };
     const initializationFailed = error => {
       if (settled) return;
+      if (!dialog) { finish(null, error || new Error('验证资源加载失败，请重试。')); return; }
       epoch++;
       initializing = false;
       clearTimeout(readyTimer);
@@ -77,9 +94,7 @@ async function requestClaimCaptcha(config, label) {
       try { instance?.destroy?.(); } catch { }
       instance = null;
       autoPending = false;
-      verifying = false;
-      startButton.classList.remove('loading');
-      startButton.setAttribute('aria-busy', 'false');
+      setVerifying(false);
       status.textContent = error?.message || '验证资源加载失败，请重新加载。';
       status.classList.add('error');
       startButton.textContent = '重新加载';
@@ -94,15 +109,13 @@ async function requestClaimCaptcha(config, label) {
       try { instance?.destroy?.(); } catch { }
       instance = null;
       autoPending = false;
-      verifying = false;
       mount.replaceChildren();
       // Replacing the trigger also removes listeners belonging to an old SDK
       // instance, so retrying initialization cannot submit twice.
       const button = startButton.cloneNode(false);
       startButton.replaceWith(button);
       startButton = button;
-      startButton.classList.remove('loading');
-      startButton.setAttribute('aria-busy', 'false');
+      setVerifying(false);
       startButton.textContent = '开始验证';
       startButton.disabled = true;
       status.classList.remove('error');
@@ -114,9 +127,7 @@ async function requestClaimCaptcha(config, label) {
           return;
         }
         if (verifying) { event.stopImmediatePropagation(); return; }
-        verifying = true;
-        startButton.classList.add('loading');
-        startButton.setAttribute('aria-busy', 'true');
+        setVerifying(true);
         status.classList.remove('error');
         status.textContent = '请按官方组件提示完成验证。';
       });
@@ -124,6 +135,7 @@ async function requestClaimCaptcha(config, label) {
         window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
         await loadClaimCaptchaScript();
         if (settled || current !== epoch) return;
+        const initializedAt = performance.now();
         const initialization = window.initAliyunCaptcha({
           SceneId: config.scene_id,
           mode: 'popup', language: 'cn', element: `#${mountID}`, button: `#${mountID}-start`, delayBeforeSuccess: false,
@@ -141,9 +153,7 @@ async function requestClaimCaptcha(config, label) {
               if (!autoStarted && typeof instance.startTracelessVerification === 'function') {
                 autoStarted = true;
                 autoPending = true;
-                verifying = true;
-                startButton.classList.add('loading');
-                startButton.setAttribute('aria-busy', 'true');
+                setVerifying(true);
                 status.textContent = '正在自动验证…';
                 autoWaitTimer = setTimeout(() => {
                   if (!settled && current === epoch && autoPending) initializationFailed(new Error('自动验证超时，请重新加载后手动验证。'));
@@ -157,13 +167,14 @@ async function requestClaimCaptcha(config, label) {
                 }
                 return;
               }
+              showDialog();
               status.textContent = '请点击“开始验证”，按官方组件提示完成验证。';
               // Interactive scenes can display their official challenge now.
               // Traceless scenes still require the SDK-bound button click.
               if (typeof instance.startTracelessVerification !== 'function') {
                 try { instance.show?.(); } catch {}
               }
-            }, claimCaptchaReadyDelay);
+            }, Math.max(0, claimCaptchaReadyDelay - (performance.now() - initializedAt)));
           },
           success(param) {
             if (settled || current !== epoch) return;
@@ -183,7 +194,7 @@ async function requestClaimCaptcha(config, label) {
 }
 
 async function submitClaim(job, label) {
-  const result = await api('/api/claims/claim', { method: 'POST', body: { ...job, auto_verify: true } });
+  const result = await api('/api/claims/claim', { method: 'POST', body: job });
   if (result.ok || !result.requires_verification) return result;
   const config = await api('/api/claims/verification?account_id=' + encodeURIComponent(job.account_id) + '&plan_id=' + encodeURIComponent(job.plan_id));
   if (!config.enabled) throw new Error('上游要求验证，但当前未提供可用验证场景，请稍后重试。');
@@ -328,11 +339,14 @@ async function pageClaims(main) {
     timeField.highlight();
     const details = [`每日北京时间 ${time} 领取免费卡，需保持服务运行。需要人工验证时，请手动领取。`];
     if (scheduleError) details.push('设置读取失败：' + scheduleError);
+    if (schedule?.next_run_at) details.push('下次执行：' + new Date(schedule.next_run_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + '。');
     const last = schedule?.last_run;
     if (last?.finished_at) {
       const date = new Date(last.finished_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
       const pending = (last.results || []).filter(result => result.requires_verification).length;
       details.push(`上次执行：${date}，已领取 ${last.claimed || 0} 张${pending ? `，${pending} 项需人工验证` : ''}${last.status === 'interrupted' ? '，任务已中断' : ''}。`);
+      const reasons = [...new Set((last.results || []).filter(result => !result.ok).map(result => result.error || result.message).filter(Boolean))];
+      if (reasons.length) details.push('未领取原因：' + reasons.join('；'));
     }
     $('#claims-schedule-info', main).innerHTML = infoTip(details.join('\n'), '自动领取');
   }
@@ -380,9 +394,15 @@ async function pageClaims(main) {
   async function act(callback) {
     if (busy || loading || scheduleSaving) return;
     busy = true; syncBusy();
-    try { await callback(); if (active()) await load(); }
+    try { await callback(); }
     catch (error) { toast(error.message, 'err'); }
     finally { busy = false; syncBusy(); }
+  }
+  function removeClaimed(job) {
+    const preview = previews.find(item => item.account_id === job.account_id);
+    if (!preview) return;
+    preview.plans = (preview.plans || []).filter(plan => plan.plan_id !== job.plan_id);
+    if (active()) paint();
   }
   const resultMessage = result => {
     const code = result.code ?? result.httpStatus;
@@ -394,8 +414,8 @@ async function pageClaims(main) {
     const enabled = event.target.checked;
     scheduleSaving = true; syncBusy();
     try {
-      await api('/api/settings', { method: 'PUT', body: { daily_claim_enabled: enabled } });
-      schedule = { ...schedule, enabled };
+      const result = await api('/api/settings', { method: 'PUT', body: { daily_claim_enabled: enabled } });
+      schedule = result.claim_schedule;
       scheduleError = '';
       toast(enabled ? `已开启每日 ${schedule.time} 自动领取` : '已关闭自动领取', 'ok');
     } catch (error) { toast(error.message, 'err'); }
@@ -407,8 +427,8 @@ async function pageClaims(main) {
     save: async time => {
       scheduleSaving = true; syncBusy();
       try {
-        await api('/api/settings', { method: 'PUT', body: { daily_claim_time: time } });
-        schedule = { ...schedule, time };
+        const result = await api('/api/settings', { method: 'PUT', body: { daily_claim_time: time } });
+        schedule = result.claim_schedule;
         scheduleError = '';
         toast(`自动领取时间已改为每日 ${time}`, 'ok');
       } catch (error) { toast(error.message, 'err'); throw error; }
@@ -428,8 +448,10 @@ async function pageClaims(main) {
     if (!button || button.disabled) return;
     act(async () => {
       const account = accountFor(button.dataset.claim);
-      const result = await submitClaim({ account_id: button.dataset.claim, plan_id: button.dataset.plan }, account.platform_name || '当前账号');
+      const job = { account_id: button.dataset.claim, plan_id: button.dataset.plan };
+      const result = await submitClaim(job, account.platform_name || '当前账号');
       if (!result) return;
+      if (result.ok) removeClaimed(job);
       toast(result.ok ? '每日免费卡已领取' : resultMessage(result), result.ok ? 'ok' : 'err');
     });
   });
@@ -442,7 +464,7 @@ async function pageClaims(main) {
         const result = await submitClaim(job, accountFor(job.account_id).platform_name || '当前账号');
         if (!result) break;
         attempted++;
-        if (result.ok) claimed++;
+        if (result.ok) { claimed++; removeClaimed(job); }
         else toast(`${accountFor(job.account_id).platform_name || '账号'}：${resultMessage(result)}`, 'err');
       } catch (error) { toast(error.message, 'err'); break; }
     }

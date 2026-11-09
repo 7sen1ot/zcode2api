@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,13 +73,8 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options M) M {
 	defer cancel()
 	stop := context.AfterFunc(a.ctx, cancel)
 	defer stop()
-	command := exec.CommandContext(ctx, binary, "--input-type=commonjs", "-e", captchaRuntimeProbe)
-	hideChildWindow(command)
+	command, output := newJSONCommand(ctx, binary, M{"module_path": modulePath}, "--input-type=commonjs", "-e", captchaRuntimeProbe)
 	command.Dir = a.root
-	command.Stdin = strings.NewReader(js(M{"module_path": modulePath}))
-	output := &limitedProcessOutput{}
-	command.Stdout, command.Stderr = output, io.Discard
-	command.WaitDelay = time.Second
 	if err := command.Run(); err != nil {
 		if ctx.Err() != nil {
 			node["message"] = "Node.js 检测超时或已取消"

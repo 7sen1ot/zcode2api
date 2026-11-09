@@ -6,12 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -419,11 +417,7 @@ func (a *App) runCaptcha(ctx context.Context, options, parameters M) (M, error) 
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, node, helper)
-	hideChildWindow(command)
-	command.Stdin = strings.NewReader(js(parameters))
-	output := &limitedProcessOutput{}
-	command.Stdout, command.Stderr = output, io.Discard
+	command, output := newJSONCommand(ctx, node, parameters, helper)
 	command.WaitDelay = 2 * time.Second
 	command.Cancel = func() error {
 		if runtime.GOOS != "windows" {

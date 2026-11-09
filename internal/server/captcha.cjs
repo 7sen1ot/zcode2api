@@ -113,6 +113,7 @@ async function verifyInWindow(config, outcome) {
       window.removeEventListener('unhandledrejection', failed);
       try { instance?.destroy?.(); } catch {}
     };
+    const initializedAt = performance.now();
     const initialization = window.initAliyunCaptcha({
       SceneId: config.sceneId, mode: 'popup', element: '#z2a-captcha', button: '#z2a-captcha-button',
       delayBeforeSuccess: false,
@@ -125,14 +126,14 @@ async function verifyInWindow(config, outcome) {
         if (settled) { try { value?.destroy?.(); } catch {} return; }
         if (instance) { if (value !== instance) { try { value?.destroy?.(); } catch {} } return; }
         instance = value;
-        // Initializing immediately and waiting here satisfies both official
-        // >2s intervals (script loading and initialization) without two sleeps.
-        pause(config.delayMs).then(() => {
+        if (typeof instance?.startTracelessVerification !== 'function') {
+          finish({ ok: false, code: 'captcha_interaction_required', message: '当前验证场景需要人工交互' });
+          return;
+        }
+        // Initialization already loads resources; count that time toward the
+        // SDK's >2s interval rather than starting another full wait when ready.
+        pause(Math.max(0, config.delayMs - (performance.now() - initializedAt))).then(() => {
           if (settled) return;
-          if (typeof instance?.startTracelessVerification !== 'function') {
-            finish({ ok: false, code: 'captcha_interaction_required', message: '当前验证场景需要人工交互' });
-            return;
-          }
           verificationStartedAt = Date.now();
           return instance.startTracelessVerification();
         }).catch(failed);
