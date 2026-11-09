@@ -54,6 +54,13 @@ func blocks(v any) ([]any, error) {
 	return out, nil
 }
 
+func toolResultContent(content any) (any, error) {
+	if _, ok := content.(string); ok {
+		return content, nil
+	}
+	return blocks(content)
+}
+
 // Anthropic requires tool results before text in the user turn following tool_use.
 func conversationMessages(messages []any) []any {
 	out := []any{}
@@ -106,13 +113,9 @@ func chatMessages(items any, instructions *instructionContext, tools *toolCatalo
 		}
 		conversation = true
 		if role == "tool" {
-			content := m["content"]
-			if _, ok := content.(string); !ok {
-				b, e := blocks(content)
-				if e != nil {
-					return nil, e
-				}
-				content = b
+			content, e := toolResultContent(m["content"])
+			if e != nil {
+				return nil, e
 			}
 			out = append(out, M{"role": "user", "content": []any{M{"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": content}}})
 			continue
@@ -184,13 +187,9 @@ func responseMessages(input any, instructions *instructionContext, tools *toolCa
 			}
 			out = append(out, M{"role": "assistant", "content": []any{M{"type": "tool_use", "id": m["call_id"], "name": tools.historyName(m), "input": value}}})
 		case "function_call_output", "custom_tool_call_output":
-			content := m["output"]
-			if _, ok := content.(string); !ok {
-				b, e := blocks(content)
-				if e != nil {
-					return nil, e
-				}
-				content = b
+			content, e := toolResultContent(m["output"])
+			if e != nil {
+				return nil, e
 			}
 			out = append(out, M{"role": "user", "content": []any{M{"type": "tool_result", "tool_use_id": m["call_id"], "content": content}}})
 		case "reasoning":
@@ -237,6 +236,11 @@ func buildRequest(body M, protocol, model, level string, catalog *toolCatalog, i
 	}
 	system := []any{}
 	instructions.System = &system
+	if protocol != "anthropic" && instructions.Mode == "history" {
+		// Preinstall the bridge so the first later update cannot change system.
+		instructions.tag = historyInstructionTag
+		system = append(system, M{"type": "text", "text": historyInstructionBridge})
+	}
 	tools := catalog.Tools
 	var request M
 	if protocol == "anthropic" {

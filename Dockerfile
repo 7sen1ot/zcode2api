@@ -23,7 +23,8 @@ RUN apt-get update \
          0) ;; \
          1) apt-get install -y --no-install-recommends nodejs npm \
            && npm --prefix /app/captcha_node ci --omit=dev --ignore-scripts --no-audit --no-fund \
-           && npm cache clean --force ;; \
+           && npm cache clean --force \
+           && apt-get purge -y --auto-remove npm ;; \
          *) echo 'CAPTCHA_RUNTIME must be 0 or 1' >&2; exit 1 ;; \
        esac \
     && case "$GRAMMAR_RUNTIME" in \

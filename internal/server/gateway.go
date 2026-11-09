@@ -223,6 +223,7 @@ func inputItems(v any) []any {
 }
 func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M, protocol, model string) {
 	payload := clone(body)
+	var inheritedAffinity string
 	if protocol == "responses" && truth(body["previous_response_id"]) {
 		a.mu.Lock()
 		entry, ok := a.responses[str(body["previous_response_id"])]
@@ -231,6 +232,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 			writeJSON(w, 404, M{"error": M{"type": "invalid_request_error", "code": "response_not_found", "message": "previous_response_id 不存在或不属于当前密钥"}})
 			return
 		}
+		inheritedAffinity = entry.Affinity
 		items := append([]any{}, entry.Input...)
 		items = append(items, arr(entry.Response["output"])...)
 		payload["input"] = append(items, inputItems(body["input"])...)
@@ -252,8 +254,12 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 		a.sendFailure(w, e.(*Failure), protocol)
 		return
 	}
-	if instructions.Used {
+	if protocol != "anthropic" && instructions.Mode == "history" {
+		w.Header().Set("X-Zcode-Instruction-Mode", "history")
+	} else if instructions.Used {
 		w.Header().Set("X-Zcode-Instruction-Mode", "scoped-system")
+	}
+	if instructions.Used {
 		w.Header().Set("X-Zcode-Compatibility", "instruction-roles-and-scope-approximated")
 	}
 	for _, definition := range tools.byName {
@@ -271,6 +277,14 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 	}
 	id := prefix + uuid()
 	affinity, sticky := a.affinity(r, body, k)
+	if protocol == "responses" && affinity == str(k["id"]) {
+		// The bare key means no explicit session was recognized by affinity().
+		affinity = inheritedAffinity
+		if affinity == "" {
+			affinity = str(k["id"]) + ":responses:" + hash(id)[:24]
+		}
+		sticky = math.Max(0, num(a.config()["conversation_affinity_minutes"]))
+	}
 	o := inferOptions{Key: k, Body: payload, Upstream: upstream, Tools: tools, Protocol: protocol, Model: model, Level: level, ID: id, IP: a.ip(r), Affinity: affinity, Sticky: sticky, Stream: truth(body["stream"]), Timing: newTiming()}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -307,7 +321,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 		response = stream.complete(result, response)
 	}
 	if protocol == "responses" && body["store"] != false {
-		a.rememberResponse(str(k["id"]), inputItems(payload["input"]), response)
+		a.rememberResponse(str(k["id"]), affinity, inputItems(payload["input"]), response)
 	}
 	if stream == nil {
 		w.Header().Set("X-Retry-Attempts", fmt.Sprint(result.Attempts))
@@ -329,8 +343,8 @@ func (a *App) touchResponse(id string) {
 	}
 	a.responseOrder = append(a.responseOrder, id)
 }
-func (a *App) rememberResponse(key string, input []any, response M) {
-	size := len(js(input)) + len(js(response))
+func (a *App) rememberResponse(key, affinity string, input []any, response M) {
+	size := len(js(input)) + len(js(response)) + len(affinity)
 	if size > 64<<20 {
 		return
 	}
@@ -338,7 +352,7 @@ func (a *App) rememberResponse(key string, input []any, response M) {
 	defer a.mu.Unlock()
 	id := str(response["id"])
 	a.forgetResponse(id)
-	a.responses[id] = responseEntry{key, input, response, size}
+	a.responses[id] = responseEntry{Key: key, Affinity: affinity, Input: input, Response: response, Bytes: size}
 	a.responseOrder = append(a.responseOrder, id)
 	a.responseBytes += size
 	for len(a.responses) > 100 || a.responseBytes > 64<<20 {

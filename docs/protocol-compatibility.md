@@ -49,7 +49,7 @@ grammar 定义最多 64 KiB，输入最多 1 MiB；单次编译或校验限时 5
 
 ### 模板与去重
 
-网关注入 ZCode 3.17.2 所需的三段模板，将调用方文本指令合并到第三段，保持恰好三个系统块；缺少模板或改变结构可能导致上游返回 3012。合并保留一致的 `cache_control`，拒绝非文本块、额外字段或冲突的缓存策略。
+网关注入 ZCode 3.17.2 所需的三段模板，将顶层调用方文本指令合并到第三段，保持恰好三个系统块；缺少模板或改变结构可能导致上游返回 3012。合并保留一致的 `cache_control`，拒绝非文本块、额外字段或冲突的缓存策略。
 
 去重按已知完整内容匹配，兼容默认段落内的空白差异和身份末尾句号：
 
@@ -60,7 +60,7 @@ grammar 定义最多 64 KiB，输入最多 1 MiB；单次编译或校验限时 5
 | 位置 | 处理范围 |
 | --- | --- |
 | Anthropic 顶层 `system`、开头的 `system/developer`、Responses `instructions` | 清理已知默认内容，保留调用方指令 |
-| Chat/Responses 中途 `system/developer` | scoped 模式清理重复默认内容，保留自定义指令和生效边界；空更新不再注入指令块。strict 模式先拒绝中途指令 |
+| Chat/Responses 中途 `system/developer` | scoped/history 模式清理重复默认内容，保留自定义指令和生效边界；空更新不再注入指令块。strict 模式先拒绝中途指令 |
 | 用户消息、工具结果和 `tools` 定义 | 不扫描、不清理 |
 
 ### 角色与作用域
@@ -72,13 +72,28 @@ Anthropic 上游只有顶层 `system`，无法原生表达独立的 developer �
 | 模式 | 行为 |
 | --- | --- |
 | `scoped`（默认） | developer 和中途 system 指令保留在顶层 system，标注来源角色和生效边界，对话中仅放位置标记。标记按首条转换指令的角色与内容稳定生成，避免相同请求因随机标记破坏缓存前缀。Responses `instructions` 按 developer 处理 |
+| `history`（可选） | 开头的 system/developer 和 Responses 顶层 `instructions` 仍放入 system；中途 system/developer 在原位置转换为带来源角色和生效边界的 user 内容块。每次请求预置相同的系统桥接说明，使用固定标记和按源消息顺序生成的编号，避免首次或后续中途更新改写系统前缀 |
 | `strict` | 拒绝需要角色或作用域近似转换的指令，返回 `400 unsupported_instruction_semantics`，不发送上游；开头的普通 system 可直接转换 |
 
-scoped 依赖模型理解角色和位置标记，可能误解或扩大指令范围；发生近似转换时，响应附带：
+scoped/history 均依赖模型理解角色和位置标记，可能误解或扩大指令范围，不能保证与原生角色优先级等价。scoped 发生近似转换时，响应附带：
 
 ```http
 X-Zcode-Instruction-Mode: scoped-system
 X-Zcode-Compatibility: instruction-roles-and-scope-approximated
 ```
 
+history 模式始终返回 `X-Zcode-Instruction-Mode: history`；发生角色转换时，同样返回上述 `X-Zcode-Compatibility` 提示头。请求体设置 `"instruction_mode": "history"` 或发送请求头 `X-Zcode-Instruction-Mode: history` 即可启用；它是请求级选择，续聊时也需指定。
+
+初始指令、工具定义和已有历史保持稳定时，history 模式追加中途指令不会改写顶层 system；初始指令或工具定义真实变化、切换指令模式仍可能影响缓存复用。该模式不保证具体缓存命中率。
+
 原生 Anthropic Messages 不走角色桥接。Claude Code 不需要 OpenAI 协议特性时，可优先使用原生 Anthropic 模式。
+
+## Responses 续聊与会话亲和
+
+Responses 按以下优先级确定会话亲和标识：按既有规则识别的有效显式会话标识（`X-Session-Id` 优先，其次 `metadata.user_id`）→ `previous_response_id` 对应响应保存的标识 → 为首次请求生成的独立标识。首次标识结合当前密钥与网关生成的响应 ID，避免同一密钥的独立对话混用会话。
+
+续聊及从同一父响应分出的分支默认继承父会话。显式会话标识可覆盖继承值，覆盖后的标识保存在子响应中，不修改父响应。`previous_response_id` 恢复历史和会话身份，不自动沿用父请求的 `instruction_mode`、顶层 `instructions` 或工具定义。
+
+Responses 会话的账号粘性使用当前 `conversation_affinity_minutes`，设为 0 时关闭账号粘性。绑定过期、账号不可用或并发满额时，仍按原有调度规则选择可用账号；成功后更新会话绑定。
+
+响应记录及其亲和标识仅保存在内存中，继续受最近 100 条、总计 64 MiB 的容量限制；删除、淘汰或重启后不能再使用对应响应续聊。`store:false` 不保存本次响应；无效或属于其他密钥的 `previous_response_id` 仍返回 `404 response_not_found`。Chat Completions 与原生 Messages 的亲和规则不变。

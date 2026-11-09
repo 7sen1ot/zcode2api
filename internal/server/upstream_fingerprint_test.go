@@ -76,9 +76,8 @@ func TestOfficialSystemBlocksRemainThreeWithClientPrompt(t *testing.T) {
 	if !strings.Contains(str(obj(system[2])["text"]), "client system") {
 		t.Fatal("client system prompt was not merged into the official third block")
 	}
-	applyOfficialSystemSession(request, "device-123", "session-123")
 	if strings.Contains(js(request["system"]), "{{VISUALIZATION_ID}}") {
-		t.Fatal("visualization placeholder was not replaced")
+		t.Fatal("upstream system template must not contain a session-specific visualization directory")
 	}
 }
 

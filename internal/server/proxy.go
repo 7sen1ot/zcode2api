@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+var proxyNodeIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
 func proxyDefaults() M {
 	return M{"enabled": false, "rotation_enabled": false, "rotation_interval_sec": 0, "source": "manual", "urls": []any{}, "subscription_url": "", "subscription_filter": "", "preferred_node": "", "mihomo_path": "mihomo", "refresh_interval_sec": 3600}
 }
@@ -65,7 +67,7 @@ func validateOutboundProxyFields(value any) error {
 			}
 		case "preferred_node":
 			identity, ok := value.(string)
-			if !ok || identity != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(identity) {
+			if !ok || identity != "" && !proxyNodeIDPattern.MatchString(identity) {
 				return fmt.Errorf("指定代理节点标识无效，请重新选择")
 			}
 		case "mihomo_path":

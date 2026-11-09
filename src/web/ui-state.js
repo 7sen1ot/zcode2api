@@ -1,7 +1,13 @@
 'use strict';
 
+const PAGES = [
+  ['dashboard', '仪表盘', 'dashboard'], '|',
+  ['accounts', '账号', 'users'], ['claims', '领卡', 'gift'], ['keys', '密钥', 'key'], '|',
+  ['usage', '用量', 'trending'], ['logs', '日志', 'scroll'], ['groups', '分组', 'folder'], ['settings', '设置', 'settings'],
+];
+
 globalThis.Z2AUI = (() => {
-  const pages = ['dashboard', 'accounts', 'claims', 'keys', 'usage', 'logs', 'groups', 'settings'];
+  const pages = PAGES.filter(Array.isArray).map(([page]) => page);
   function readRoute(hash) {
     const [path, search = ''] = String(hash || '').replace(/^#\/?/, '').split('?');
     return { page: pages.includes(path) ? path : 'dashboard', query: Object.fromEntries(new URLSearchParams(search)) };

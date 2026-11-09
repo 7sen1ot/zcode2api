@@ -18,12 +18,11 @@ type accountAssignment struct {
 }
 
 type accountWaiter struct {
-	ctx        context.Context
-	o          inferOptions
-	skip       map[string]bool
-	deadline   time.Time
-	result     chan accountAssignment
-	waitedBusy bool
+	ctx      context.Context
+	o        inferOptions
+	skip     map[string]bool
+	deadline time.Time
+	result   chan accountAssignment
 }
 
 type schedulingCandidate struct {
@@ -295,6 +294,9 @@ func (a *App) runAccountQueue() {
 			if !w.deadline.IsZero() {
 				delay = min(delay, max(0, time.Until(w.deadline)))
 			}
+			if !w.o.RecheckAt.IsZero() {
+				delay = min(delay, max(0, time.Until(w.o.RecheckAt)))
+			}
 		}
 		a.scheduleMu.Unlock()
 		var timer *time.Timer
@@ -328,15 +330,15 @@ func (a *App) dispatchAccounts() {
 			for _, candidate := range candidates {
 				if obj(candidate)["skip"] == "upstream_busy" {
 					w.deadline = time.Time{}
-					w.waitedBusy = true
 					break
 				}
 			}
 		}
-		if account != nil || !busy || !w.deadline.IsZero() && !time.Now().Before(w.deadline) {
-			if account != nil && w.waitedBusy {
-				account["_waited_upstream_busy"] = true
-			}
+		// Unlike the ordinary busy wait, a throttle recheck cannot be waived
+		// by upstream concurrency. Return to infer so it can rebuild the skips.
+		now := time.Now()
+		recheck := !w.o.RecheckAt.IsZero() && !now.Before(w.o.RecheckAt)
+		if account != nil || !busy || recheck || !w.deadline.IsZero() && !now.Before(w.deadline) {
 			w.result <- accountAssignment{account, busy, candidates, policy}
 		} else {
 			pending = append(pending, w)

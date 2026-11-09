@@ -80,6 +80,7 @@ type inferOptions struct {
 	OnAdmitted                               func()
 	Timing                                   *requestTiming
 	Admission                                time.Duration
+	RecheckAt                                time.Time
 }
 type requestTiming struct {
 	start                     time.Time
@@ -152,23 +153,6 @@ func requestMetadataUserID(deviceMid, session string) string {
 	})
 }
 
-func applyOfficialSystemSession(body M, deviceMid, session string) {
-	visualizationID := hash(deviceMid + ":" + session)
-	system := arr(body["system"])
-	for i, value := range system {
-		block := obj(value)
-		text := str(block["text"])
-		if strings.Contains(text, "{{VISUALIZATION_ID}}") {
-			block["text"] = strings.ReplaceAll(
-				text,
-				"{{VISUALIZATION_ID}}",
-				visualizationID,
-			)
-			system[i] = block
-		}
-	}
-	body["system"] = system
-}
 func providerFailure(v M, status int, retry string) *Failure {
 	e := obj(v["error"])
 	return &Failure{Status: status, Code: str(first(e["code"], v["code"], e["type"], "upstream_http_error")), Message: str(first(e["message"], v["msg"], v["message"], fmt.Sprintf("上游 HTTP %d", status))), RetryAfter: retryAfter(retry, time.Now())}
@@ -277,11 +261,6 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		session,
 	)
 	upstreamBody["metadata"] = metadata
-	applyOfficialSystemSession(
-		upstreamBody,
-		str(account["device_mid"]),
-		session,
-	)
 	requestID := uuid()
 	ctx, release, e := a.pinOutboundProxy(ctx, account)
 	if e != nil {

@@ -30,6 +30,7 @@ type stickyEntry struct {
 }
 type responseEntry struct {
 	Key      string
+	Affinity string
 	Input    []any
 	Response M
 	Bytes    int

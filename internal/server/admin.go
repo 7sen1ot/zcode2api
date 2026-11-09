@@ -113,9 +113,6 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	case "POST /api/accounts/import-local":
 		v, e := a.importLocal(ctx, b)
 		return wrap(v, e)
-	case "POST /api/accounts/import-registration":
-		v, e := a.importRegistration(ctx, b)
-		return wrap(v, e)
 	case "POST /api/accounts/import-cookie":
 		v, e := a.importCookie(ctx, b, nil)
 		return wrap(v, e)

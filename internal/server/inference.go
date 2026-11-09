@@ -135,8 +135,8 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 	clearThrottle := func(id string) {
 		delete(throttled, id)
 		delete(round, id)
-		throttleDeadline = time.Time{}
 		if len(throttled) == 0 {
+			throttleDeadline = time.Time{}
 			lastThrottle = nil
 		}
 	}
@@ -187,9 +187,16 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		for id := range excluded {
 			skip[id] = true
 		}
+		// A queued busy account must not hide another account's recovery or
+		// extend an already active throttle window.
+		o.RecheckAt = throttleDeadline
+		now := time.Now()
 		for id, t := range throttled {
-			if throttleDeadline.IsZero() || t.After(time.Now()) || round[id] {
+			if throttleDeadline.IsZero() || t.After(now) || round[id] {
 				skip[id] = true
+				if o.RecheckAt.IsZero() || t.Before(o.RecheckAt) {
+					o.RecheckAt = t
+				}
 			}
 		}
 		start := time.Now()
@@ -210,6 +217,12 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			picked = account["id"]
 		}
 		_ = a.exec("INSERT INTO schedule_log(ts,request_id,chain,candidates,policy,picked) VALUES(?,?,?,?,?,?)", nowMS(), o.ID, js(a.keyChain(o.Key)), js(candidates), policy, picked)
+		if !throttleDeadline.IsZero() && !time.Now().Before(throttleDeadline) {
+			if account != nil {
+				a.finishAccountAttempt(account, nil, false, nil)
+			}
+			return fail(lastThrottle)
+		}
 		if account == nil {
 			if len(throttled) > 0 {
 				if throttleDeadline.IsZero() {
@@ -240,9 +253,6 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			return fail(nil)
 		}
 		id := str(account["id"])
-		if truth(account["_waited_upstream_busy"]) {
-			clearThrottle(id)
-		}
 		if lastAccount != nil && str(lastAccount["id"]) != id {
 			rotated = append(rotated, id)
 		}
@@ -287,7 +297,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			// Shared admission already cooled this account. It remains enabled;
 			// this request may use another account within its existing budget.
 			excluded[id] = true
-			delete(throttled, id)
+			clearThrottle(id)
 			remainingBudget -= time.Since(attemptStart)
 			continue
 		case "auth":
@@ -296,12 +306,12 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			a.state(id).Cooldown = nowMS() + 86400000
 			a.mu.Unlock()
 			excluded[id] = true
-			delete(throttled, id)
+			clearThrottle(id)
 			a.background(func() { _, _ = a.startOAuth(a.ctx, str(account["family"]), id, false) })
 			continue
 		case "quota":
 			excluded[id] = true
-			delete(throttled, id)
+			clearThrottle(id)
 			a.background(func() {
 				if b, e := a.fetchBalance(a.ctx, account); e == nil {
 					if truth(b["ok"]) {
@@ -343,7 +353,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		accountFailures[id]++
 		if accountFailures[id] >= 3 {
 			excluded[id] = true
-			delete(throttled, id)
+			clearThrottle(id)
 			continue
 		}
 		delay := math.Min(num(p["max_delay_ms"]), num(p["base_delay_ms"])*math.Pow(num(p["backoff_factor"]), float64(regular-1)))

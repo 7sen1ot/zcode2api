@@ -1,14 +1,12 @@
 package server
 
 import (
-	"context"
 	"encoding/base64"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -106,78 +104,5 @@ func testWait(t *testing.T, ready func() bool) {
 			t.Fatal("condition did not become ready")
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func TestImportRegistrationStoresCredentialsAndDeviceMid(t *testing.T) {
-	a := testApp(t)
-	var calls atomic.Int32
-	testInstallClient(a, "", func(r *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer x.") {
-			t.Fatalf("unexpected authorization: %s", r.Header.Get("Authorization"))
-		}
-		if r.Header.Get("X-Device-Mid") != "pro-zai-device" {
-			t.Fatalf("unexpected device mid: %s", r.Header.Get("X-Device-Mid"))
-		}
-		return testAPIResponse(r, 200, ""), nil
-	})
-
-	zcode := testJWT(`{"user_id":"registration-user","sub":"registration-user"}`)
-	web := testJWT(`{"email":"user@example.com","cli":"web"}`)
-	result, err := a.importRegistration(context.Background(), M{
-		"label":         "pro-zai-user@example.com",
-		"provider":      "zai",
-		"zcodeJwt":      zcode,
-		"webJwt":        web,
-		"businessToken": "business-registration",
-		"deviceMid":     "pro-zai-device",
-	})
-	testMust(t, err)
-	testEqual(t, result["updated"], false)
-	id := str(result["id"])
-	account := a.account(id)
-	testEqual(t, account["customer_id"], "registration-user")
-	testEqual(t, account["device_mid"], "pro-zai-device")
-	testEqual(t, account["source"], "pro-zai")
-	tokens := a.tokens(id)
-	testEqual(t, tokens["zcode_jwt"], zcode)
-	testEqual(t, tokens["web_jwt"], web)
-	testEqual(t, tokens["business_token"], "business-registration")
-	if calls.Load() == 0 {
-		t.Fatal("import did not run account verification")
-	}
-}
-
-func TestImportRegistrationUpdatesExistingAccount(t *testing.T) {
-	a := testApp(t)
-	testInstallClient(a, "", func(r *http.Request) (*http.Response, error) {
-		return testAPIResponse(r, 200, ""), nil
-	})
-	zcode := testJWT(`{"user_id":"same-user"}`)
-	first, err := a.importRegistration(context.Background(), M{
-		"zcodeJwt": zcode,
-		"provider": "zai",
-	})
-	testMust(t, err)
-	second, err := a.importRegistration(context.Background(), M{
-		"zcodeJwt": zcode,
-		"provider": "zai",
-		"webJwt":   testJWT(`{"email":"same@example.com","cli":"web"}`),
-	})
-	testMust(t, err)
-	testEqual(t, second["id"], first["id"])
-	testEqual(t, second["updated"], true)
-}
-
-func TestImportRegistrationRejectsMissingSubject(t *testing.T) {
-	a := testApp(t)
-	result, err := a.importRegistration(context.Background(), M{
-		"zcodeJwt": testJWT(`{"token_version":0}`),
-	})
-	testMust(t, err)
-	testEqual(t, result["ok"], false)
-	if !strings.Contains(str(result["error"]), "user_id") {
-		t.Fatalf("unexpected error: %v", result["error"])
 	}
 }

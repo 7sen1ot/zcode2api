@@ -186,11 +186,6 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
 });
 applyThemeBtn();
 
-const PAGES = [
-  ['dashboard', '仪表盘', 'dashboard'], '|',
-  ['accounts', '账号', 'users'], ['claims', '领卡', 'gift'], ['keys', '密钥', 'key'], '|',
-  ['usage', '用量', 'trending'], ['logs', '日志', 'scroll'], ['groups', '分组', 'folder'], ['settings', '设置', 'settings'],
-];
 function routeValues() {
   if (currentPage === 'dashboard') return { hours: window._dashboardHours && window._dashboardHours !== 'all' ? window._dashboardHours : '', days: window._dashboardDays === 30 ? 30 : '' };
   if (currentPage === 'accounts') { const f = window._accFilter || {}; return { q: f.q, status: f.status === 'all' ? '' : f.status, sort: f.sort === 'default' ? '' : f.sort, page: f.page > 1 ? f.page : '', size: f.size && f.size !== 25 ? f.size : '' }; }

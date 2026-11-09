@@ -51,11 +51,7 @@ func openDB(data string) (*sql.DB, error) {
 	return d, nil
 }
 
-type querier interface {
-	Query(string, ...any) (*sql.Rows, error)
-}
-
-func query(d querier, q string, args ...any) ([]any, error) {
+func query(d *sql.DB, q string, args ...any) ([]any, error) {
 	rows, e := d.Query(q, args...)
 	if e != nil {
 		return nil, e

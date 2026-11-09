@@ -83,14 +83,13 @@ code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-siz
 
 #app-view { min-height: 100vh; display: flex; }
 .shell {
-  --page-inset: 16px;
   display: flex; flex-direction: column; gap: 20px;
   padding: 20px 16px 24px;
   flex: 1; min-width: 0;
 }
-@media (min-width: 640px) { .shell { --page-inset: 20px; padding: 20px 20px 24px; } }
-@media (min-width: 768px) { .shell { --page-inset: 28px; padding: 24px 28px 24px; gap: 16px; } }
-@media (min-width: 1024px) { .shell { --page-inset: 40px; padding: 24px 40px 24px; } }
+@media (min-width: 640px) { .shell { padding: 20px 20px 24px; } }
+@media (min-width: 768px) { .shell { padding: 24px 28px 24px; gap: 16px; } }
+@media (min-width: 1024px) { .shell { padding: 24px 40px 24px; } }
 .container-7xl {
   width: 100%; max-width: 1200px; margin: 0 auto;
   display: flex; flex-direction: column; gap: 20px;
@@ -632,7 +631,6 @@ p, .desc, .dialog-intro { text-wrap: pretty; }
 html.dark :is(.pagehead .tt, .modal-header h2) { font-weight: 550; }
 html.dark :is(.statcard .stat, .formcard > h3, .dialog-field, .pager button.cur) { font-weight: 500; }
 html.dark :is(.statcard .t, .btn, .section-tabs .tab, .cell-name .nm b, :is(label, .field-group).f, .kv b, .badge, .toast) { font-weight: 400; }
-html.dark .modal-eyebrow { font-weight: 600; }
 
 .select-control { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
 .select-control:not(.select-control-round) { width: 100%; }
