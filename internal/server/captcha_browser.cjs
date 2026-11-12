@@ -86,11 +86,25 @@ function probe(config) {
   };
 }
 
-async function verify(browser, config) {
-  let context, page, timer, resourceStatus = 0, retryAfter = '', networkFailed = false;
+const maxBrowserSessions = 16;
+const browserSessionTTL = 15 * 60 * 1000;
+
+async function closeSession(sessions, key) {
+  const session = sessions.get(key);
+  sessions.delete(key);
+  await session?.context.close().catch(() => {});
+}
+
+async function verify(browser, sessions, config) {
+  let session, timer, keepPrepared = false;
   const timeout = Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
+  const deadline = Date.now() + timeout;
   const origin = new URL(config.origin).origin;
   if (!origin.startsWith('https://')) return { ok: false, code: 'captcha_origin_invalid' };
+  // This key is supplied by Go and binds credentials, purpose, scene and exit.
+  // Never share a page or SDK instance between different accounts or routes.
+  const key = /^[a-f0-9]{64}$/.test(config.session_key || '') ? config.session_key : '';
+  const identity = JSON.stringify([origin, config.proxy_url || '', config.scene_id, config.region, config.prefix]);
   const options = { serviceWorkers: 'block', storageState: config.state?.browserStorage };
   if (config.proxy_url) {
     const proxy = new URL(config.proxy_url);
@@ -98,47 +112,92 @@ async function verify(browser, config) {
     options.proxy = { server: proxy.origin, username: decodeURIComponent(proxy.username), password: decodeURIComponent(proxy.password) };
   }
   try {
-    context = await browser.newContext(options);
+    for (const [candidate, saved] of sessions) {
+      if (saved.page.isClosed() || Date.now() - saved.lastUsed >= browserSessionTTL || (candidate === key && saved.identity !== identity)) await closeSession(sessions, candidate);
+    }
+    session = key ? sessions.get(key) : null;
+    const reused = !!session;
+    if (!session) {
+      while (sessions.size >= maxBrowserSessions) await closeSession(sessions, sessions.keys().next().value);
+      const context = await browser.newContext(options);
+      session = { context, identity, lastUsed: Date.now(), resourceStatus: 0, retryAfter: '', networkFailed: false };
+      if (key) sessions.set(key, session);
+      // Browser pages only prepare verification. The Go claim path remains the
+      // sole owner of the billing mutation and its one-use ticket handling.
+      await context.route(/\/api\/v1\/zcode-plan\/billing\/claim(?:[?#]|$)/, route => route.abort('blockedbyclient'));
+      session.page = await context.newPage();
+      session.page.on('response', response => {
+        const host = new URL(response.url()).hostname;
+        if (!/(^|\.)(alicdn\.com|aliyuncs\.com|aliyun\.com)$/.test(host)) return;
+        if (response.status() >= 400) { session.resourceStatus = response.status(); session.retryAfter = response.headers()['retry-after'] || ''; }
+      });
+      session.page.on('requestfailed', request => {
+        const host = new URL(request.url()).hostname;
+        if (/(^|\.)(alicdn\.com|aliyuncs\.com|aliyun\.com)$/.test(host)) session.networkFailed = true;
+      });
+    }
+    const { context, page } = session;
+    session.resourceStatus = 0; session.retryAfter = ''; session.networkFailed = false;
+    session.lastUsed = Date.now();
+    if (key) { sessions.delete(key); sessions.set(key, session); }
     context.setDefaultTimeout(timeout);
     const cookies = String(config.cookies || '').split(';').map(value => {
       const split = value.indexOf('=');
       return split > 0 ? { name: value.slice(0, split).trim(), value: value.slice(split + 1).trim(), url: origin + '/', secure: true } : null;
     }).filter(Boolean);
-    if (cookies.length) await context.addCookies(cookies);
-    page = await context.newPage();
-    // Give the SDK the same upstream origin as jsdom without loading the app.
-    await page.route(origin + '/', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><html><head></head><body></body></html>' }));
-    page.on('response', response => {
-      if (response.status() >= 400) { resourceStatus = response.status(); retryAfter = response.headers()['retry-after'] || ''; }
-    });
-    page.on('requestfailed', () => { networkFailed = true; });
-    await page.goto(origin + '/', { waitUntil: 'domcontentloaded' });
+    if (cookies.length && session.cookies !== config.cookies) await context.addCookies(cookies);
+    session.cookies = config.cookies;
+    if (!reused) {
+      const response = await page.goto(origin + '/', { waitUntil: 'domcontentloaded', timeout: Math.max(1, deadline - Date.now()) });
+      if (!response?.ok()) {
+        const status = response?.status() || 0;
+        const retryAfter = response?.headers()['retry-after'] || '';
+        await closeSession(sessions, key);
+        return { ok: false, code: 'captcha_resource_http_error', stage: 'browser_page', status, retry_after: retryAfter };
+      }
+    }
+    if (new URL(page.url()).origin !== origin) {
+      await closeSession(sessions, key);
+      return { ok: false, code: 'captcha_origin_invalid', stage: 'browser_page' };
+    }
     const { captchaExpression } = require('./captcha.cjs');
     const result = await Promise.race([
       page.evaluate(captchaExpression(config)),
-      new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: 'captcha_timeout' }), timeout); }),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: 'captcha_timeout' }), Math.max(1, deadline - Date.now())); }),
     ]);
-    const progress = await page.evaluate(() => window.__captchaProgress || {}).catch(() => ({}));
+    keepPrepared = config.action === 'prepare' && result.ok;
+    const progress = { ...await page.evaluate(() => window.__captchaProgress || {}).catch(() => ({})), runtime: 'browser', browser_version: browser.version(), session_reused: reused };
     const storage = await context.storageState();
     const state = Buffer.byteLength(JSON.stringify(storage)) <= (16 << 10) ? { browserStorage: storage } : undefined;
+    const { resourceStatus, retryAfter, networkFailed } = session;
+    // Abort a timed-out initialization as well as its late callbacks before
+    // another request can initialize a second SDK instance on the same page.
+    if (result.code === 'captcha_timeout') await closeSession(sessions, key);
     if (!result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
       if (resourceStatus) return { ...progress, ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: retryAfter, state };
       if (networkFailed) return { ...progress, ok: false, code: 'captcha_network_error', state };
     }
     return { ...progress, ...result, state };
-  } catch {
-    return { ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : networkFailed ? 'captcha_network_error' : 'captcha_runtime_error', stage: 'browser_context' };
+  } catch (error) {
+    await closeSession(sessions, key);
+    return { ok: false, code: session?.resourceStatus === 407 ? 'proxy_auth_failed' : session?.networkFailed ? 'captcha_network_error' : error?.name === 'TimeoutError' ? 'captcha_timeout' : 'captcha_runtime_error', stage: 'browser_context', runtime: 'browser' };
   } finally {
     clearTimeout(timer);
-    await context?.close().catch(() => {});
+    // Prepared instances stay alive. Finished instances are disposed so a
+    // second card always gets a fresh ticket while retaining the same page.
+    if (!keepPrepared) await session?.page?.evaluate(() => window.__disposeCaptcha?.()).catch(() => {});
+    if (!key) await session?.context.close().catch(() => {});
   }
 }
 
 async function worker() {
-  let browser, stopping = false, chain = Promise.resolve();
+  let browser, native, stopping = false, chain = Promise.resolve();
+  const sessions = new Map();
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
+    sessions.clear();
+    await native?.close();
     await browser?.close().catch(() => {});
   };
   process.once('SIGINT', shutdown);
@@ -151,7 +210,19 @@ async function worker() {
       let result;
       try {
         const config = JSON.parse(line);
+        const proxy = config.proxy_url ? new URL(config.proxy_url) : null;
+        if (process.platform === 'win32' && !proxy?.username && !proxy?.password) {
+          if (!native) {
+            const file = browserPath(config, playwright(config));
+            if (!file) result = { ok: false, code: 'captcha_browser_missing' };
+            else native = new (require('./captcha_native.cjs').NativeClaimBrowser)(file);
+          }
+          result ||= await native.run(config);
+          if (!stopping) process.stdout.write(JSON.stringify(result) + '\n');
+          return;
+        }
         if (!browser?.isConnected()) {
+          sessions.clear();
           const driver = playwright(config);
           const file = browserPath(config, driver);
           if (!driver) result = { ok: false, code: 'captcha_playwright_missing' };
@@ -161,7 +232,7 @@ async function worker() {
             if (stopping) { await browser.close(); return; }
           }
         }
-        result ||= config.action === 'warm' ? { ok: true } : await verify(browser, config);
+        result ||= config.action === 'warm' ? { ok: true } : await verify(browser, sessions, config);
       } catch { result = { ok: false, code: 'captcha_browser_launch_failed', stage: 'browser_launch' }; }
       process.stdout.write(JSON.stringify(result) + '\n');
     }).catch(shutdown);

@@ -332,9 +332,10 @@ func (a *App) captchaPrefetchBlocked(scope captchaTicketScope) bool {
 
 func (a *App) scheduleTicketRenewal(pool *captchaTicketPool, proxyURL string) {
 	options := obj(a.configValue("http", "captcha"))
-	// Claim tickets are minted on demand; prefetch must not restart Chromium
-	// after its scheduled window or after the user's last manual claim.
-	if captchaUsesBrowser(pool.scope.purpose, options) {
+	// Claim workers mint tickets on demand. Background renewal would bypass
+	// their concurrency bound and race a new manual claim for the same account.
+	// Inference keeps its existing prefetch and foreground-priority queue.
+	if pool.scope.purpose != captchaPurposeInference {
 		return
 	}
 	if captchaTicketTTL(options) <= 0 || a.ctx.Err() != nil || a.captchaPrefetchBlocked(pool.scope) {

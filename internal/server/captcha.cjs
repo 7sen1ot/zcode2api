@@ -77,14 +77,23 @@ function installCanvasWebGL(window) {
   });
 }
 
-// This function is evaluated inside the jsdom realm.
+// Shared by jsdom and Chromium. Preparing an instance must never mint a ticket;
+// scheduled claims keep the prepared page alive until the actual claim is due.
 async function verifyInWindow(config, outcome) {
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const key = JSON.stringify([config.sceneId, config.region, config.prefix, config.sessionKey]);
+  const previous = window.__preparedCaptcha;
+  if (config.reuse && previous?.key === key && !previous.completed && Date.now() - previous.createdAt < 15 * 60 * 1000) {
+    return config.prepareOnly ? previous.ready : previous.verify();
+  }
+  window.__disposeCaptcha?.();
   const progress = window.__captchaProgress = { stage: 'sdk_load', sdk_initialized: false, sdk_executed: false };
   const loadingAt = performance.now();
-  document.body.replaceChildren();
-  const container = document.createElement('div'); container.id = 'z2a-captcha'; document.body.appendChild(container);
-  const button = document.createElement('button'); button.id = 'z2a-captcha-button'; document.body.appendChild(button);
+  // Keep the real page and its lifecycle intact in Chromium.
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  const container = document.createElement('div'); container.id = 'z2a-captcha'; mount.appendChild(container);
+  const button = document.createElement('button'); button.id = 'z2a-captcha-button'; button.type = 'button'; button.textContent = '开始验证'; mount.appendChild(button);
+  window.__disposeCaptcha = () => { mount.remove(); };
   window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
   if (typeof window.initAliyunCaptcha !== 'function') {
     await new Promise((resolve, reject) => {
@@ -96,30 +105,59 @@ async function verifyInWindow(config, outcome) {
     });
   }
   progress.sdk_load_ms = Math.round(performance.now() - loadingAt);
-  return new Promise(resolve => {
-    let settled = false;
-    let instance, verificationStartedAt;
-    const finish = value => {
-      if (!settled) {
-        settled = true;
-        if (verificationStartedAt) progress.sdk_verify_ms = Date.now() - verificationStartedAt;
-        resolve(value.ok ? { ...value, issued_at_ms: verificationStartedAt || Date.now() } : value);
-      }
-    };
-    const failed = error => {
-      const code = String(error?.code || '');
-      finish({ ok: false, code: 'captcha_sdk_error', sdk_error_code: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) ? code : '', message: '验证码 SDK 初始化失败' });
-    };
+  let resolveReady, resolveResult;
+  const ready = new Promise(resolve => { resolveReady = resolve; });
+  const result = new Promise(resolve => { resolveResult = resolve; });
+  const prepared = window.__preparedCaptcha = { key, createdAt: Date.now(), completed: false, ready };
+  let settled = false;
+  let instance, verificationStartedAt, readyAt;
+  const finish = value => {
+    if (!settled) {
+      settled = true;
+      prepared.completed = true;
+      if (verificationStartedAt) progress.sdk_verify_ms = Date.now() - verificationStartedAt;
+      resolveReady(value.ok ? { ok: false, code: 'captcha_invalid_result' } : value);
+      resolveResult(value.ok ? { ...value, issued_at_ms: verificationStartedAt || Date.now() } : value);
+    }
+  };
+  const failed = error => {
+    const code = String(error?.code || '');
+    finish({ ok: false, code: 'captcha_sdk_error', sdk_error_code: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) ? code : '', message: '验证码 SDK 初始化失败' });
+  };
+  // Real pages may have unrelated analytics/application errors. Their SDK
+  // reports initialization errors through onError; do not fail on page noise.
+  if (!config.reuse) {
     window.addEventListener('error', failed);
     window.addEventListener('unhandledrejection', failed);
-    window.__disposeCaptcha = () => {
-      settled = true;
-      window.removeEventListener('error', failed);
-      window.removeEventListener('unhandledrejection', failed);
-      try { instance?.destroy?.(); } catch {}
-    };
-    progress.stage = 'sdk_init';
-    const initializedAt = performance.now();
+  }
+  window.__disposeCaptcha = () => {
+    finish({ ok: false, code: 'captcha_canceled' });
+    window.removeEventListener('error', failed);
+    window.removeEventListener('unhandledrejection', failed);
+    try { instance?.destroy?.(); } catch {}
+    mount.remove();
+    if (window.__preparedCaptcha === prepared) delete window.__preparedCaptcha;
+  };
+  prepared.verify = async () => {
+    const status = await ready;
+    if (!status.ok) return status;
+    if (settled || verificationStartedAt) return { ok: false, code: 'captcha_duplicate_result' };
+    progress.sdk_prepared_age_ms = Math.round(performance.now() - readyAt);
+    verificationStartedAt = Date.now();
+    progress.stage = 'sdk_verify';
+    progress.sdk_executed = true;
+    try {
+      Promise.resolve(instance.startTracelessVerification()).then(value => {
+        if (settled || !value || typeof value !== 'object') return;
+        const response = outcome(value, config.region);
+        if (response.ok) finish(response);
+      }).catch(failed);
+    } catch (error) { failed(error); }
+    return result;
+  };
+  progress.stage = 'sdk_init';
+  const initializedAt = performance.now();
+  try {
     const initialization = window.initAliyunCaptcha({
       SceneId: config.sceneId, mode: 'popup', element: '#z2a-captcha', button: '#z2a-captcha-button',
       language: 'cn', delayBeforeSuccess: false,
@@ -143,29 +181,21 @@ async function verifyInWindow(config, outcome) {
         // resources can still be settling. Slow initialization must not erase
         // the SDK's preparation interval before verification.
         progress.stage = 'sdk_ready';
-        const readyAt = performance.now();
+        readyAt = performance.now();
         pause(config.delayMs).then(() => {
           if (settled) return;
           progress.sdk_ready_wait_ms = Math.round(performance.now() - readyAt);
-          verificationStartedAt = Date.now();
-          progress.stage = 'sdk_verify';
-          progress.sdk_executed = true;
-          return instance.startTracelessVerification();
-        }).then(value => {
-          if (settled || !value || typeof value !== 'object') return;
-          // Accept an explicitly successful returned ticket too. Intermediate
-          // return values must not preempt the official success/fail callbacks.
-          const result = outcome(value, config.region);
-          if (result.ok) finish(result);
+          resolveReady({ ok: true, prepared: true });
         }).catch(failed);
       },
     });
     Promise.resolve(initialization).catch(failed);
-  });
+  } catch (error) { failed(error); }
+  return config.prepareOnly ? ready : prepared.verify();
 }
 
 function captchaExpression(config, delayMs = 2100) {
-  const parameters = JSON.stringify({ sceneId: config.scene_id, region: config.region, prefix: config.prefix, sdkURL: SDK_URL, delayMs });
+  const parameters = JSON.stringify({ sceneId: config.scene_id, region: config.region, prefix: config.prefix, sdkURL: SDK_URL, delayMs, prepareOnly: config.action === 'prepare', reuse: !!config.session_key, sessionKey: config.session_key });
   return `(${verifyInWindow.toString()})(${parameters}, ${captchaOutcome.toString()})`;
 }
 
@@ -309,7 +339,8 @@ function captchaOutcome(value, region) {
   const param = value?.captchaVerifyParam || value?.CaptchaVerifyParam || result.captchaVerifyParam || result.CaptchaVerifyParam;
   const accepted = (value?.success === true || result.success === true) && (result.VerifyResult === true || result.verifyResult === true);
   if ((accepted || code === 'T006') && typeof param === 'string' && param.trim()) return { ok: true, param, region };
-  return { ok: false, code: code === 'F015' ? 'captcha_interaction_required' : 'captcha_verification_failed', verify_code: code, message: '阿里云验证未通过，需要按官方验证流程重新验证' };
+  const requestID = String(value?.RequestId || value?.requestId || result.RequestId || result.requestId || '');
+  return { ok: false, code: code === 'F015' ? 'captcha_interaction_required' : 'captcha_verification_failed', verify_code: code, request_id: /^[A-Za-z0-9_-]{1,128}$/.test(requestID) ? requestID : '', message: '阿里云验证未通过，需要按官方验证流程重新验证' };
 }
 
 

@@ -104,10 +104,11 @@ func (a *App) captchaHeaders(parent context.Context, account M, purpose string, 
 		ticket, ready := a.takeCaptchaTicket(pool)
 		// Ready tickets bypass the SDK queue to preserve their short lifetime.
 		if !ready && !holdingSlot {
-			if !a.acquireCaptchaSlot(ctx, false) {
+			releaseSlot, acquired := a.acquireClaimCaptchaSlot(ctx, false)
+			if !acquired {
 				return verification, &Failure{Kind: "server", Code: "captcha_timeout", Message: "等待上游安全验证超时"}
 			}
-			defer a.releaseCaptchaSlot()
+			defer releaseSlot()
 			continue
 		}
 		if !ready {
@@ -145,6 +146,20 @@ func (a *App) attachCaptchaTicket(ctx context.Context, verification *captchaVeri
 	return nil
 }
 
+func (a *App) captchaRuntimeParameters(ctx context.Context, options, scene M, scope captchaTicketScope) (M, *captchaTicketPool) {
+	modulePath := a.captchaModulePath(str(options["jsdom_path"]))
+	parameters := M{"origin": a.origin, "scene_id": scene["sceneId"], "region": scene["region"], "prefix": scene["prefix"], "simulate_canvas_webgl": first(options["simulate_canvas_webgl"], true), "module_path": modulePath, "timeout_ms": options["timeout_ms"], "proxy_url": selectedProxy(ctx)}
+	if captchaUsesBrowser(scope.purpose, options) {
+		parameters["session_key"] = scope.key()
+	}
+	pool := a.captchaPool(scope)
+	a.captcha.mu.Lock()
+	parameters["state"] = clone(pool.runtimeState)
+	a.captcha.mu.Unlock()
+	parameters["cookies"] = a.jar(scope.accountID).header()
+	return parameters, pool
+}
+
 // mintCaptchaTicket runs the verification SDK once on the pinned exit. The
 // caller holds the captcha slot.
 func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M, scope captchaTicketScope) (ticket captchaTicket, failure *Failure) {
@@ -157,13 +172,7 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M
 		return captchaTicket{}, gateFailure
 	}
 	defer func() { finish(failure) }()
-	modulePath := a.captchaModulePath(str(options["jsdom_path"]))
-	parameters := M{"origin": a.origin, "scene_id": scene["sceneId"], "region": scene["region"], "prefix": scene["prefix"], "simulate_canvas_webgl": first(options["simulate_canvas_webgl"], true), "module_path": modulePath, "timeout_ms": options["timeout_ms"], "proxy_url": selectedProxy(ctx)}
-	pool := a.captchaPool(scope)
-	a.captcha.mu.Lock()
-	parameters["state"] = clone(pool.runtimeState)
-	a.captcha.mu.Unlock()
-	parameters["cookies"] = a.jar(scope.accountID).header()
+	parameters, pool := a.captchaRuntimeParameters(ctx, options, scene, scope)
 	run := a.captcha.run
 	if run == nil {
 		run = func(ctx context.Context, parameters M) (M, error) { return a.runCaptcha(ctx, options, parameters) }
@@ -177,6 +186,10 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M
 	if diagnostic != nil {
 		diagnostic["sdk_stage"] = "runtime"
 		diagnostic["sdk_executed"], diagnostic["sdk_initialized"] = nil, nil
+		diagnostic["runtime"] = "jsdom"
+		if captchaUsesBrowser(scope.purpose, options) {
+			diagnostic["runtime"] = "browser"
+		}
 	}
 	result, err := run(ctx, parameters)
 	// Preserve bounded SDK-managed session data, not result.param. The
@@ -198,7 +211,10 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M
 		if code := str(result["verify_code"]); code != "" {
 			diagnostic["verify_code"] = code
 		}
-		for _, key := range []string{"sdk_error_code", "sdk_load_ms", "sdk_init_ms", "sdk_ready_wait_ms", "sdk_verify_ms"} {
+		if result["runtime"] == "native_browser" {
+			diagnostic["runtime"] = "native_browser"
+		}
+		for _, key := range []string{"sdk_error_code", "sdk_load_ms", "sdk_init_ms", "sdk_ready_wait_ms", "sdk_prepared_age_ms", "sdk_verify_ms", "request_id", "browser_version", "browser_visibility", "session_reused"} {
 			if value, present := result[key]; present {
 				diagnostic[key] = value
 			}

@@ -67,6 +67,7 @@ type App struct {
 	jars                   map[string]*diskJar
 	claimLocks             map[string]bool
 	claimBatchMu           sync.Mutex
+	manualClaimSlots       chan int
 	claimReschedule        chan struct{}
 	claimScheduleCancel    context.CancelFunc
 	flowLocks              map[string]bool
@@ -83,6 +84,8 @@ type App struct {
 	origin                 string
 	captcha                captchaManager
 	claimBrowser           claimBrowserManager
+	manualClaimBrowsers    [manualClaimConcurrency]claimBrowserManager
+	scheduledClaimBrowsers [dailyClaimConcurrency]claimBrowserManager
 	proxies                outboundProxyManager
 	proxyHealthOnce        sync.Once
 	proxyHealthReschedule  chan struct{}

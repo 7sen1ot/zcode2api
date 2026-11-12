@@ -50,8 +50,8 @@ const ICONS = {
   pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
   trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
-  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 8 5-5 5 5"/><path d="M12 3v12"/>',
-  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 3v12"/>',
+  import: '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/>',
+  export: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
@@ -700,7 +700,7 @@ function renderAccPage(accounts, groups) {
   const pending = accounts.reduce((sum, a) => sum + (Number(a.pending_total) || 0), 0);
   const pill = (v, label) => `<button type="button" data-st="${v}" aria-pressed="${f.status === v}" class="${f.status === v ? 'active' : ''}">${label}<span class="cnt">${v === 'all' ? accounts.length : v === 'needs_relogin' ? attention : statusCounts[v] || 0}</span></button>`;
   main.innerHTML = `
-  ${pagehead('账号管理', '', `<button class="btn" id="accounts-refresh">${icon('refresh', 14)}刷新</button><button class="btn" id="accounts-import">${icon('upload', 14)}导入</button><button class="btn" id="accounts-export" ${accounts.length ? '' : 'disabled'}>${icon('download', 14)}导出</button><button class="btn primary" id="add-btn">${icon('plus', 14)}添加账号</button>`)}
+  ${pagehead('账号管理', '', `<button class="btn" id="accounts-refresh">${icon('refresh', 14)}刷新</button><button class="btn" id="accounts-import">${icon('import', 14)}导入</button><button class="btn" id="accounts-export" ${accounts.length ? '' : 'disabled'}>${icon('export', 14)}导出</button><button class="btn primary" id="add-btn">${icon('plus', 14)}添加账号</button>`)}
   <section class="overview-strip account-overview" aria-label="账号概览">
     <div><span>当前可用额度</span><strong title="${esc(fmtInt(remaining))} token">${fmtQuota(remaining)}<small> token</small></strong></div>
     <div><span>已领取 · 待生效</span><strong title="${esc(fmtInt(pending))} token">${fmtQuota(pending)}<small> token</small></strong></div>
@@ -798,7 +798,7 @@ function exportAccountsModal(accounts, filtered) {
     <label class="dialog-field">导出范围<select name="scope"><option value="all">全部账号（${accounts.length}）</option>${hasFilter ? `<option value="filtered" ${filtered.length ? '' : 'disabled'}>当前筛选（${filtered.length}）</option>` : ''}</select></label>
     <p class="inline-notice transfer-notice">文件包含明文登录凭据，持有文件的人可使用这些账号。请妥善保管，勿公开分享。</p>
     <p class="dialog-error error" role="alert"></p>
-    <div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button><button type="submit" class="btn primary">${icon('download', 14)}导出 JSON</button></div>
+    <div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button><button type="submit" class="btn primary">${icon('export', 14)}导出 JSON</button></div>
   </form>`);
   const dialog = modal('导出账号', form);
   bindDialogForm(form, dialog, () => {
@@ -822,7 +822,7 @@ function importAccountsModal(groups) {
     <label class="dialog-field">账号文件<input class="account-transfer-file" type="file" name="file" accept=".json,application/json" required></label>
     <div class="dialog-field"><div class="field-label"><label for="transfer-group">导入到分组</label>${infoTip('重复账号自动跳过。导入后使用本机代理设置，并重新检查凭据；已停用账号保持停用。', '账号导入')}</div><select id="transfer-group" name="group"><option value="">自动分配主力分组</option>${groups.map(group => `<option value="${esc(group.id)}">${esc(group.name)}</option>`).join('')}</select></div>
     <p class="dialog-error error" role="alert"></p>
-    <div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button><button type="submit" class="btn primary" disabled>${icon('upload', 14)}导入账号</button></div>
+    <div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button><button type="submit" class="btn primary" disabled>${icon('import', 14)}导入账号</button></div>
   </form>`);
   const dialog = modal('导入账号', form);
   const input = form.elements.file, button = $('button[type=submit]', form), error = $('.dialog-error', form);

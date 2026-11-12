@@ -7,6 +7,8 @@ function claimablePlans(preview) {
 }
 
 let claimCaptchaScript, claimCaptchaSequence = 0;
+const manualClaimConcurrency = 5;
+let claimBrowserVerificationQueue = Promise.resolve();
 // The SDK requires more than two seconds before verification.
 const claimCaptchaReadyDelay = 2100;
 const claimCaptchaAutoTimeout = 15000;
@@ -214,6 +216,17 @@ async function submitClaim(job, label, isActive = () => true) {
   const result = await api('/api/claims/claim', { method: 'POST', body: job });
   if (!isActive()) return null;
   if (result.ok || !result.requires_verification) return result;
+  // The page SDK has shared configuration and a shared modal surface. Queue
+  // only this fallback; server verification and claims remain concurrent.
+  // Create the short-lived verification session after obtaining this turn.
+  const verify = () => submitClaimWithBrowser(job, label, isActive, result);
+  const pending = claimBrowserVerificationQueue.then(verify, verify);
+  claimBrowserVerificationQueue = pending.catch(() => {});
+  return pending;
+}
+
+async function submitClaimWithBrowser(job, label, isActive, result) {
+  if (!isActive()) return null;
   let config, closed = false;
   const releaseConfig = value => {
     if (value?.verification_session) void api('/api/claims/verification/cancel', { method: 'POST', body: { verification_session: value.verification_session } }).catch(() => {});
@@ -346,8 +359,10 @@ function setupTimeField(main, hooks) {
 }
 
 async function pageClaims(main) {
-  let previews = [], accounts = [], accountsError = '', busy = false, loading = false, page = 1;
+  let previews = [], accounts = [], accountsError = '', batchRunning = false, loading = false, page = 1;
   let schedule = null, scheduleSaving = false, scheduleError = '';
+  const pendingClaims = new Map(), claimQueue = [], runningAccounts = new Set();
+  const claimKey = job => JSON.stringify([job.account_id, job.plan_id]);
   const pageSize = 8;
   main.innerHTML = `${pagehead('领卡中心', '', '<button type="button" class="btn" id="claims-refresh">' + icon('refresh', 14) + '刷新</button>')}
     <section class="daily-claim-card fade-up" aria-labelledby="daily-claim-title">
@@ -361,6 +376,8 @@ async function pageClaims(main) {
   const accountFor = id => accounts.find(account => account.id === id) || {};
   const syncBusy = () => {
     if (!active()) return;
+    const busy = batchRunning || pendingClaims.size > 0;
+    const pendingAccounts = new Set([...pendingClaims.values()].map(entry => entry.job.account_id));
     const total = jobs().length;
     $('#claims-refresh', main).disabled = busy || loading || scheduleSaving;
     $('#claims-schedule', main).disabled = busy || loading || scheduleSaving || !schedule;
@@ -368,8 +385,13 @@ async function pageClaims(main) {
     $('#claims-time-trigger', main).disabled = busy || loading || scheduleSaving || !schedule;
     const allButton = $('#claims-all', main);
     allButton.disabled = busy || loading || scheduleSaving || !total;
-    allButton.textContent = busy ? '正在领取…' : total ? `全部立即领取（${total}）` : '全部立即领取';
-    $$('button[data-claim]', content).forEach(button => { button.disabled = busy || loading; });
+    allButton.textContent = busy ? `正在领取（剩余 ${pendingClaims.size}）` : total ? `全部立即领取（${total}）` : '全部立即领取';
+    $$('button[data-claim]', content).forEach(button => {
+      const entry = pendingClaims.get(claimKey({ account_id: button.dataset.claim, plan_id: button.dataset.plan }));
+      button.disabled = loading || scheduleSaving || batchRunning || pendingAccounts.has(button.dataset.claim);
+      button.textContent = entry ? entry.running ? '正在领取…' : '等待领取…' : '立即领取';
+      button.setAttribute('aria-busy', String(!!entry?.running));
+    });
   };
   function paintSchedule() {
     if (!active()) return;
@@ -413,7 +435,7 @@ async function pageClaims(main) {
     syncBusy();
   }
   async function load() {
-    if (loading) return;
+    if (loading || batchRunning || pendingClaims.size) return;
     loading = true; syncBusy(); content.setAttribute('aria-busy', 'true');
     $('#claims-update', main).textContent = '正在查询…';
     try {
@@ -438,12 +460,60 @@ async function pageClaims(main) {
       }
     } finally { loading = false; if (active()) { content.setAttribute('aria-busy', 'false'); syncBusy(); } }
   }
-  async function act(callback) {
-    if (busy || loading || scheduleSaving) return;
-    busy = true; syncBusy();
-    try { await callback(); }
-    catch (error) { toast(error.message, 'err'); }
-    finally { busy = false; syncBusy(); }
+  function enqueueClaim(job) {
+    if (!active() || loading || scheduleSaving) return Promise.resolve(null);
+    const key = claimKey(job);
+    if (pendingClaims.has(key)) return pendingClaims.get(key).promise;
+    const entry = { job, key, running: false };
+    entry.promise = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
+    pendingClaims.set(key, entry);
+    claimQueue.push(entry);
+    pumpClaims();
+    return entry.promise;
+  }
+  function pumpClaims() {
+    if (!active()) {
+      for (const entry of claimQueue.splice(0)) {
+        pendingClaims.delete(entry.key);
+        entry.resolve(null);
+      }
+      return;
+    }
+    while (runningAccounts.size < manualClaimConcurrency) {
+      const index = claimQueue.findIndex(entry => !runningAccounts.has(entry.job.account_id));
+      if (index < 0) break;
+      const [entry] = claimQueue.splice(index, 1);
+      entry.running = true;
+      runningAccounts.add(entry.job.account_id);
+      void runClaim(entry);
+    }
+    syncBusy();
+  }
+  async function runClaim(entry) {
+    try {
+      const result = await submitClaim(entry.job, accountFor(entry.job.account_id).platform_name || '当前账号', active);
+      if (result?.ok) removeClaimed(entry.job);
+      if (!result || (!result.ok && (result.requires_verification || result.retry_after_ms > 0 || ['auth', 'account_risk', 'network', 'rate_limit'].includes(result.failure_kind)))) {
+        cancelAccountQueue(entry.job.account_id);
+      }
+      entry.resolve(result);
+    } catch (error) {
+      cancelAccountQueue(entry.job.account_id);
+      entry.reject(error);
+    }
+    finally {
+      runningAccounts.delete(entry.job.account_id);
+      pendingClaims.delete(entry.key);
+      pumpClaims();
+    }
+  }
+  function cancelAccountQueue(accountID) {
+    for (let index = claimQueue.length - 1; index >= 0; index--) {
+      if (claimQueue[index].job.account_id !== accountID) continue;
+      const [entry] = claimQueue.splice(index, 1);
+      pendingClaims.delete(entry.key);
+      entry.resolve(null);
+    }
   }
   function removeClaimed(job) {
     const preview = previews.find(item => item.account_id === job.account_id);
@@ -457,7 +527,7 @@ async function pageClaims(main) {
   };
   $('#claims-refresh', main).addEventListener('click', load);
   $('#claims-schedule', main).addEventListener('change', async event => {
-    if (!schedule || scheduleSaving) return;
+    if (!schedule || scheduleSaving || batchRunning || pendingClaims.size) return;
     const enabled = event.target.checked;
     scheduleSaving = true; syncBusy();
     try {
@@ -470,7 +540,7 @@ async function pageClaims(main) {
   });
   const timeField = setupTimeField(main, {
     fallback: () => schedule?.time || '19:02',
-    busy: () => scheduleSaving,
+    busy: () => scheduleSaving || batchRunning || pendingClaims.size > 0,
     save: async time => {
       scheduleSaving = true; syncBusy();
       try {
@@ -493,30 +563,31 @@ async function pageClaims(main) {
     if (accountLink) { viewAccount(accountLink.dataset.id); return; }
     const button = event.target.closest('[data-claim]');
     if (!button || button.disabled) return;
-    act(async () => {
-      const account = accountFor(button.dataset.claim);
-      const job = { account_id: button.dataset.claim, plan_id: button.dataset.plan };
-      const result = await submitClaim(job, account.platform_name || '当前账号', active);
-      if (!result) return;
-      if (result.ok) removeClaimed(job);
+    const job = { account_id: button.dataset.claim, plan_id: button.dataset.plan };
+    void enqueueClaim(job).then(result => {
+      if (!active() || !result) return;
       toast(result.ok ? '每日免费卡已领取' : resultMessage(result), result.ok ? 'ok' : 'err');
-    });
+    }).catch(error => { if (active()) toast(error.message, 'err'); });
   });
-  $('#claims-all', main).addEventListener('click', () => act(async () => {
+  $('#claims-all', main).addEventListener('click', async () => {
+    if (batchRunning || pendingClaims.size || loading || scheduleSaving) return;
     const pending = jobs();
-    let claimed = 0, attempted = 0;
-    for (const job of pending) {
-      if (!active()) break;
-      try {
-        const result = await submitClaim(job, accountFor(job.account_id).platform_name || '当前账号', active);
-        if (!result) break;
-        attempted++;
-        if (result.ok) { claimed++; removeClaimed(job); }
-        else toast(`${accountFor(job.account_id).platform_name || '账号'}：${resultMessage(result)}`, 'err');
-      } catch (error) { toast(error.message, 'err'); break; }
+    batchRunning = true; syncBusy();
+    try {
+      const outcomes = await Promise.allSettled(pending.map(enqueueClaim));
+      if (!active()) return;
+      let claimed = 0, failed = 0, canceled = 0;
+      for (const [index, outcome] of outcomes.entries()) {
+        if (outcome.status === 'fulfilled' && !outcome.value) { canceled++; continue; }
+        if (outcome.status === 'fulfilled' && outcome.value.ok) { claimed++; continue; }
+        failed++;
+        const message = outcome.status === 'rejected' ? outcome.reason.message : resultMessage(outcome.value);
+        toast(`${accountFor(pending[index].account_id).platform_name || '账号'}：${message}`, 'err');
+      }
+      toast(`已领取 ${claimed} 张${failed ? `，${failed} 张失败` : ''}${canceled ? `，${canceled} 张未继续` : ''}`, failed ? 'err' : 'ok');
+    } finally {
+      batchRunning = false; syncBusy();
     }
-    const failed = attempted - claimed, canceled = pending.length - attempted;
-    toast(`已领取 ${claimed} 张${failed ? `，${failed} 张失败` : ''}${canceled ? `，${canceled} 张未继续` : ''}`, failed ? 'err' : 'ok');
-  }));
+  });
   await load();
 }

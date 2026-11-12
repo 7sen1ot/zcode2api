@@ -15,7 +15,7 @@ func (a *App) preview(ctx context.Context, r M, dailyOnly bool) (M, error) {
 	if dailyOnly {
 		preview, err := a.marketingPreview(ctx, r)
 		if err == nil {
-			preview["plans"] = dailyFreePlans(arr(preview["plans"]))
+			preview["plans"], err = a.pendingDailyClaimPlans(r, dailyFreePlans(arr(preview["plans"])))
 		}
 		return preview, err
 	}
@@ -230,6 +230,14 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		if recorded, e := a.recordedClaim(id, plan, due); e != nil || recorded != nil {
 			return recorded, e
 		}
+	}
+	if trigger != "scheduled" {
+		workerCtx, releaseWorker, workerErr := a.acquireManualClaimWorker(ctx)
+		if workerErr != nil {
+			return nil, workerErr
+		}
+		defer releaseWorker()
+		ctx = workerCtx
 	}
 	diagnostic := M{"stage": "route", "sdk_attempted": false, "sdk_executed": false, "sdk_initialized": false, "ticket_attached": false, "browser_ticket": str(verification["captcha_verify_param"]) != "", "claim_request_started": false, "http_status": 0, "initial_http_status": 0}
 	ctx = context.WithValue(ctx, claimCaptchaDiagnosticKey{}, diagnostic)
