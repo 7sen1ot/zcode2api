@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"strings"
-	"sync"
 )
 
 func profileName(p M) any {
@@ -27,17 +26,7 @@ func profileName(p M) any {
 }
 func (a *App) platformName(ctx context.Context, r M) any {
 	id := str(r["id"])
-	tokens := a.tokens(id)
-	for _, k := range []string{"business_token", "web_jwt", "zcode_jwt"} {
-		if name := profileName(jwtPayload(str(tokens[k]))); name != nil {
-			return name
-		}
-	}
-	token := str(first(nullable(tokens["web_jwt"]), nullable(tokens["business_token"])))
-	if token == "" {
-		return nil
-	}
-	key := hash(token)
+	key := hash(str(r["enc_tokens"]) + "\x00" + str(r["family"]) + "\x00" + str(r["proxy_url"]))
 	a.mu.Lock()
 	if a.profiles == nil {
 		a.profiles = map[string]*profileEntry{}
@@ -55,26 +44,25 @@ func (a *App) platformName(ctx context.Context, r M) any {
 	entry := &profileEntry{Key: key, Until: nowMS() + 300000, Done: make(chan struct{})}
 	a.profiles[id] = entry
 	a.mu.Unlock()
-	if res, e := a.customer(ctx, r, token); e == nil && res.OK {
-		entry.Name = profileName(obj(res.JSON["data"]))
+	defer close(entry.Done)
+	tokens := a.accountTokens(r)
+	for _, k := range []string{"business_token", "web_jwt", "zcode_jwt"} {
+		if entry.Name = profileName(jwtPayload(tokens[k])); entry.Name != nil {
+			return entry.Name
+		}
 	}
-	close(entry.Done)
+	if token := str(first(nullable(tokens["web_jwt"]), nullable(tokens["business_token"]))); token != "" {
+		if res, e := a.customer(ctx, r, token); e == nil && res.OK {
+			entry.Name = profileName(obj(res.JSON["data"]))
+		}
+	}
 	return entry.Name
 }
 func (a *App) addPlatformNames(ctx context.Context, accounts []any) {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
-	for _, v := range accounts {
-		r := obj(v)
-		wg.Go(func() {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
+	parallelFor(len(accounts), 4, func(i int) {
+		if ctx.Err() == nil {
+			r := obj(accounts[i])
 			r["platform_name"] = a.platformName(ctx, r)
-		})
-	}
-	wg.Wait()
+		}
+	})
 }

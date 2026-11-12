@@ -58,13 +58,6 @@ globalThis.Z2ALogs = (() => {
     delete globalThis._logSnapshots[tab];
     if (/^\d+$/.test(query.snapshot || '') && /^\d+$/.test(query.as_of || '')) globalThis._logSnapshots[tab] = { snapshot: query.snapshot, as_of: query.as_of };
   }
-  function pageNumbers(current, pages) {
-    const set = new Set([1, pages]);
-    for (let n = Math.max(1, current - 2); n <= Math.min(pages, current + 2); n++) set.add(n);
-    const values = [...set].sort((a, b) => a - b), result = [];
-    for (const n of values) { if (result.length && n - result.at(-1) > 1) result.push('…'); result.push(n); }
-    return result;
-  }
   function canAutoRefresh(main) {
     state();
     const doc = main.ownerDocument, form = main.querySelector('#log-filters');
@@ -151,7 +144,7 @@ globalThis.Z2ALogs = (() => {
     const form = `<form id="log-filters" class="log-filter-card"><div class="log-filter-grid log-primary-filters">${common}${specific}</div><details id="log-advanced" class="log-advanced" ${showAdvanced ? 'open' : ''}><summary class="log-advanced-trigger" aria-expanded="${showAdvanced}" aria-controls="log-advanced-fields">${filterIcon}<span class="log-advanced-label">${showAdvanced ? '收起筛选' : '更多筛选'}</span>${selectedAdvanced ? `<span class="log-filter-count" title="已选 ${selectedAdvanced} 项">${selectedAdvanced}</span>` : ''}${chevron}</summary><div id="log-advanced-fields" class="log-filter-grid">${advanced}</div></details><div class="log-filter-actions"><span id="lf-error" role="alert"></span><button type="button" class="btn" id="lf-reset">重置</button><button type="submit" class="btn primary">筛选</button></div></form>`;
     const pages = data.pages, page = data.page, total = data.total;
     const start = total ? (page - 1) * pageSize + 1 : 0, end = Math.min(page * pageSize, total);
-    const pager = `<nav class="pager usage-pager" aria-label="${tabs.find(([id]) => id === tab)[1]}分页"><span class="pinfo">第 ${fmtInt(start)}–${fmtInt(end)} 条 / 共 ${fmtInt(total)} 条 · 每页 20 条</span><button type="button" data-pg="1" aria-label="首页" ${page === 1 ? 'disabled' : ''}>«</button><button type="button" data-pg="${page - 1}" aria-label="上一页" ${page === 1 ? 'disabled' : ''}>‹</button>${pageNumbers(page, pages).map(n => n === '…' ? '<span aria-hidden="true">…</span>' : `<button type="button" data-pg="${n}" aria-label="第 ${n} 页" ${n === page ? 'class="cur" aria-current="page"' : ''}>${n}</button>`).join('')}<button type="button" data-pg="${page + 1}" aria-label="下一页" ${page === pages ? 'disabled' : ''}>›</button><button type="button" data-pg="${pages}" aria-label="末页" ${page === pages ? 'disabled' : ''}>»</button><form id="log-page-jump"><label>跳至 <input name="page" type="number" min="1" max="${pages}" value="${page}" required aria-label="跳转页码"> 页</label><button class="btn" type="submit">跳转</button></form></nav>`;
+    const pager = `<nav class="pager usage-pager" aria-label="${tabs.find(([id]) => id === tab)[1]}分页"><span class="pinfo">第 ${fmtInt(start)}–${fmtInt(end)} 条 / 共 ${fmtInt(total)} 条 · 每页 20 条</span><button type="button" data-pg="1" aria-label="首页" ${page === 1 ? 'disabled' : ''}>«</button><button type="button" data-pg="${page - 1}" aria-label="上一页" ${page === 1 ? 'disabled' : ''}>‹</button>${Z2AUI.pageNumbers(page, pages).map(n => n === '…' ? '<span aria-hidden="true">…</span>' : `<button type="button" data-pg="${n}" aria-label="第 ${n} 页" ${n === page ? 'class="cur" aria-current="page"' : ''}>${n}</button>`).join('')}<button type="button" data-pg="${page + 1}" aria-label="下一页" ${page === pages ? 'disabled' : ''}>›</button><button type="button" data-pg="${pages}" aria-label="末页" ${page === pages ? 'disabled' : ''}>»</button><form id="log-page-jump"><label>跳至 <input name="page" type="number" min="1" max="${pages}" value="${page}" required aria-label="跳转页码"> 页</label><button class="btn" type="submit">跳转</button></form></nav>`;
     let table = '', strip = '';
     if (tab === 'logs') {
       strip = `<div class="overview-strip logs-strip"><div><span>匹配调用</span><strong>${fmtInt(total)}</strong></div><div><span>成功 / 忙碌</span><strong>${fmtInt(summary.success)}<small> / ${fmtInt(summary.busy)}</small></strong></div><div><span>失败 / 已取消</span><strong>${fmtInt(summary.failed)}<small> / ${fmtInt(summary.canceled)}</small></strong></div><div><span>首 Token 时间 P50</span><strong>${summary.p50 == null ? '—' : fmtInt(summary.p50) + '<small> ms</small>'}</strong></div><div><span>Token 消耗</span><strong>${fmtInt(summary.tokens)}</strong></div></div>`;
@@ -277,5 +270,5 @@ globalThis.Z2ALogs = (() => {
     if (tab === 'logs') main.querySelector('.log-calls')?.scrollTo({ left: scroll.tableX, behavior: 'instant' });
     if (options.live && (view.scrollX !== scroll.x || view.scrollY !== scroll.y)) view.scrollTo({ left: scroll.x, top: scroll.y, behavior: 'instant' });
   }
-  return Object.freeze({ pageSize, pageNumbers, routeValues, restoreRoute, queryFor, render, closeDetails, canAutoRefresh, refreshFailed });
+  return Object.freeze({ pageSize, routeValues, restoreRoute, queryFor, render, closeDetails, canAutoRefresh, refreshFailed });
 })();

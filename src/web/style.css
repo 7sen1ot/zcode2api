@@ -427,18 +427,6 @@ html.dark .badge.plain { background: oklch(1 0 0 / 6%); }
 html:not(.dark) .badge:is(.needs_relogin, .expired, .error, .err) { color: #b42318; }
 html:not(.dark) .badge.web_only { color: #1d4ed8; }
 
-.bar {
-  height: 6px; border-radius: 999px; background: var(--border); overflow: hidden;
-  min-width: 90px;
-}
-.bar > i {
-  display: block; height: 100%; border-radius: 999px;
-  background: var(--ok-strong);
-  transition: width .6s var(--ease-out);
-}
-.bar.warn > i { background: var(--warn); }
-.bar.danger > i { background: var(--destructive); }
-
 .card {
   border-radius: var(--r-card); background: var(--muted);
   padding: 10px 12px;
@@ -543,6 +531,10 @@ html.dark .btn.danger-solid { background: var(--destructive); color: #1b1212; }
 .import-option { gap: 12px; }
 .import-option p, .import-option label { font-size: 12.5px; line-height: 1.6; }
 .import-option input { width: 100%; }
+.transfer-notice { margin: 0; }
+.modal-body .account-transfer-file { height: auto; min-height: 48px; padding: 8px; border-style: dashed; cursor: pointer; }
+.account-transfer-file::file-selector-button { margin-right: 12px; padding: 6px 12px; border: 0; border-radius: 6px; background: var(--muted); color: var(--foreground); font: inherit; cursor: pointer; transition: background 180ms var(--ease-out); }
+.account-transfer-file:hover::file-selector-button { background: var(--accent); }
 .secret-result .log { user-select: all; }
 .modal-bg.closing { opacity: 0; transition: opacity .2s var(--ease-out); }
 .modal-bg.closing .modal { opacity: 0; transform: translateY(8px); transition: opacity .2s var(--ease-out), transform .2s var(--ease-out); }
@@ -597,7 +589,6 @@ html.theme-swap, html.theme-swap body { animation: theme-fade .25s var(--ease-ou
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 #main.no-anim *, #main.no-anim { animation: none !important; }
-#main.no-anim .bar > i { transition: none !important; }
 
 .btn, .pill, .ibtn, .tab { transition-duration: 180ms; }
 .ibtn:focus-visible .tip { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -975,6 +966,7 @@ main[data-page="logs"] { gap: 18px; }
 .settings-panel .code-input { padding: 8px; }
 .settings-subsection { border-top: 1px solid var(--border); padding-top: 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .settings-subsection h3 { margin: 0; font-size: 13px; font-weight: 500; }
+#captcha-panel .settings-subsection:first-child { border-top: 0; padding-top: 0; }
 .proxy-test-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .proxy-test-actions small { color: var(--muted-fg); }
 .settings-section.formcard { display: block; padding: 0; background: var(--card); }
@@ -1017,6 +1009,7 @@ main[data-page="logs"] { gap: 18px; }
 @media (max-width: 600px) { .update-toolbar { align-items: flex-start; flex-direction: column; } .update-actions { width: 100%; } .update-actions .btn { flex: 1; } .update-versions { gap: 14px; } }
 .proxy-small-button.btn { height: 24px; padding: 0 9px; font-size: 11px; flex: none; }
 .mihomo-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 13px; }
+.mihomo-field[hidden], .runtime-status[hidden] { display: none; }
 .mihomo-field-heading, .proxy-field-heading { display: flex; align-items: center; gap: 8px; min-height: 24px; line-height: 1.5; }
 .mihomo-field-heading { justify-content: space-between; }
 .mihomo-field-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }

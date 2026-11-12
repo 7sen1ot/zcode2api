@@ -57,7 +57,7 @@ func (a *App) AdminHandler() http.Handler {
 			writeJSON(w, 401, M{"ok": false, "error": "未登录或会话过期"})
 			return
 		}
-		if r.URL.Path == "/api/claims/verification" || strings.HasPrefix(r.URL.Path, "/api/settings/update") {
+		if r.URL.Path == "/api/claims/verification" || r.URL.Path == "/api/accounts/export" || r.URL.Path == "/api/accounts/import" || strings.HasPrefix(r.URL.Path, "/api/settings/update") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		result, status, e := a.adminRoute(r, b)
@@ -92,12 +92,16 @@ func limitQuery(r *http.Request, d, maxN int) int {
 	}
 	return min(maxN, n)
 }
+
+func adminError(status int, message string) (any, int, error) {
+	return M{"ok": false, "error": message}, status, nil
+}
+
 func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	p, method := r.URL.Path, r.Method
 	ctx := r.Context()
 	ok := M{"ok": true}
 	wrap := func(v any, e error) (any, int, error) { return v, 200, e }
-	cfg := a.config()
 	switch method + " " + p {
 	case "POST /api/auth/logout":
 		a.mu.Lock()
@@ -105,26 +109,29 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		a.mu.Unlock()
 		return ok, 200, nil
 	case "GET /api/runtime-info":
+		cfg := a.config("host", "app_version", "poll_interval_sec")
 		return M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": cfg["app_version"], "version": a.version, "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"]}, 200, nil
 	case "GET /api/accounts":
-		accounts := arr(a.summary()["accounts"])
-		a.addPlatformNames(ctx, accounts)
-		return accounts, 200, nil
+		return arr(a.summary(ctx)["accounts"]), 200, nil
 	case "POST /api/accounts/import-local":
 		v, e := a.importLocal(ctx, b)
 		return wrap(v, e)
 	case "POST /api/accounts/import-cookie":
 		v, e := a.importCookie(ctx, b, nil)
 		return wrap(v, e)
+	case "POST /api/accounts/export":
+		return a.exportAccounts(b)
+	case "POST /api/accounts/import":
+		return a.importAccounts(ctx, b)
 	case "POST /api/accounts/oauth/start":
 		provider := str(fallback(b["provider"], "bigmodel"))
 		if provider != "bigmodel" && provider != "zai" {
-			return M{"ok": false, "error": "provider 须为 bigmodel|zai"}, 400, nil
+			return adminError(400, "provider 须为 bigmodel|zai")
 		}
 		if truth(b["account_id"]) {
 			target := a.account(str(b["account_id"]))
 			if target == nil || str(target["family"]) != provider {
-				return M{"ok": false, "error": "账号不存在或授权平台不匹配"}, 400, nil
+				return adminError(400, "账号不存在或授权平台不匹配")
 			}
 		}
 		v, e := a.startOAuth(ctx, provider, str(b["account_id"]), true)
@@ -156,13 +163,13 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			var err error
 			hours, err = logInteger(r, "hours", 0)
 			if err != nil || (hours != 24 && hours != 168 && hours != 720) {
-				return M{"ok": false, "error": "统计时间范围无效"}, 400, nil
+				return adminError(400, "统计时间范围无效")
 			}
 		}
 		until := nowMS()
 		days, err := logInteger(r, "days", 7)
 		if err != nil || (days != 7 && days != 30) {
-			return M{"ok": false, "error": "日用量统计范围无效"}, 400, nil
+			return adminError(400, "日用量统计范围无效")
 		}
 		endTime := time.UnixMilli(until)
 		startDay := time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 0, 0, 0, 0, endTime.Location()).AddDate(0, 0, -int(days-1))
@@ -173,16 +180,22 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		dailyModels := a.rows("SELECT strftime('%Y-%m-%d',ts/1000,'unixepoch','localtime') bucket,COALESCE(NULLIF(model,''),'未知模型') model,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket,model ORDER BY bucket,model", startDay.UnixMilli(), until)
 		cacheTrend := a.rows("SELECT strftime('%Y-%m-%dT%H:00:00',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", until-86400000, until)
-		cache := a.row("SELECT COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) input_tokens FROM usage_log WHERE ts>=? AND ts<=?", until-86400000, until)
-		busy := a.row("SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN status='busy' THEN 1 ELSE 0 END),0) busy FROM usage_log WHERE ts>?", nowMS()-86400000)
-		usageQuery := "SELECT COALESCE(SUM(tokens_in),0) input_tokens,COALESCE(SUM(tokens_out),0) output_tokens,COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)),0) total_tokens FROM usage_log"
-		usage := a.row(usageQuery)
+		cache := M{"cached_tokens": float64(0), "input_tokens": float64(0)}
+		for _, value := range cacheTrend {
+			row := obj(value)
+			cache["cached_tokens"] = num(cache["cached_tokens"]) + num(row["cached_tokens"])
+			cache["input_tokens"] = num(cache["input_tokens"]) + num(row["tin"])
+		}
+		usageColumns := "COALESCE(SUM(tokens_in),0) input_tokens,COALESCE(SUM(tokens_out),0) output_tokens,COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)),0) total_tokens"
+		usage := a.row("SELECT "+usageColumns+",COALESCE(SUM(ts>?),0) busy_total,COALESCE(SUM(ts>? AND status='busy'),0) busy_count FROM usage_log", until-86400000, until-86400000)
+		busy := M{"total": usage["busy_total"], "busy": usage["busy_count"]}
+		delete(usage, "busy_total")
+		delete(usage, "busy_count")
 		period := usage
 		if hours > 0 {
-			period = a.row(usageQuery+" WHERE ts>=? AND ts<=?", until-hours*3600000, until)
+			period = a.row("SELECT "+usageColumns+" FROM usage_log WHERE ts>=? AND ts<=?", until-hours*3600000, until)
 		}
-		summary := a.summary()
-		a.addPlatformNames(ctx, arr(summary["accounts"]))
+		summary := a.summary(ctx)
 		return M{"summary": summary, "groups": a.groups(), "busy_24h": busy, "cache_24h": cache, "cache_trend_24h": M{"hours": 24, "time_unit": "hour", "range_start": until - 86400000, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": cacheTrend}, "daily_usage": M{"hours": days * 24, "time_unit": "day", "range_start": startDay.UnixMilli(), "range_end": until, "utc_offset_minutes": offset / 60, "byHour": daily, "byModel": dailyModels}, "usage_total": usage, "usage_period": merge(period, M{"hours": hours}), "default_chain": a.defaultChain()}, 200, nil
 	case "GET /api/claims/discover":
 		return a.discover(ctx, r.URL.Query().Get("account_id"), r.URL.Query().Get("scope") == "daily"), 200, nil
@@ -195,12 +208,15 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return a.dailyClaimSchedule(), 200, nil
 	case "POST /api/claims/claim":
 		if !truth(b["account_id"]) || !truth(b["plan_id"]) {
-			return M{"ok": false, "error": "缺少 account_id / plan_id"}, 400, nil
+			return adminError(400, "缺少 account_id / plan_id")
 		}
 		if e := validateClaimVerification(b); e != nil {
-			return M{"ok": false, "error": e.Error()}, 400, nil
+			return adminError(400, e.Error())
 		}
 		v, e := a.claim(ctx, str(b["account_id"]), str(b["plan_id"]), "manual", b)
+		if v["code"] == "captcha_session_invalid" {
+			return v, 200, nil
+		}
 		return wrap(v, e)
 	case "POST /api/claims/auto-run":
 		v, e := a.autoClaim(ctx, truth(b["dry_run"]))
@@ -214,14 +230,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			return a.pagedLogs(r, "logs")
 		}
 		rows := a.rows("SELECT u.*,k.name key_name,a.label account_label FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id LEFT JOIN accounts a ON a.id=u.account_id ORDER BY u.ts DESC LIMIT ?", limitQuery(r, 100, 500))
-		for _, v := range rows {
-			m := obj(v)
-			m["timings"] = parse(m["timings"], nil)
-			if str(m["error_message"]) != "" {
-				m["error_message"] = conciseFailureMessage(&Failure{Code: str(m["error_code"]), Message: str(m["error_message"])})
-			}
-		}
-		return rows, 200, nil
+		return publicUsageLogs(rows), 200, nil
 	case "GET /api/performance":
 		return a.performance(limitQuery(r, 100, 1000)), 200, nil
 	case "GET /api/schedule-logs":
@@ -245,7 +254,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return rows, 200, nil
 	case "POST /api/keys":
 		if !truth(b["name"]) {
-			return M{"ok": false, "error": "缺少 name"}, 400, nil
+			return adminError(400, "缺少 name")
 		}
 		v, e := a.createKey(b)
 		return wrap(v, e)
@@ -253,7 +262,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return a.groups(), 200, nil
 	case "POST /api/groups":
 		if !truth(b["name"]) {
-			return M{"ok": false, "error": "缺少 name"}, 400, nil
+			return adminError(400, "缺少 name")
 		}
 		id := "g_" + random(4)
 		enabled := 1
@@ -266,19 +275,16 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return a.updateStatus(), 200, nil
 	case "POST /api/settings/update/check":
 		if err := a.checkUpdate(ctx); err != nil {
-			return M{"ok": false, "error": err.Error()}, 502, nil
+			return adminError(502, err.Error())
 		}
 		return a.updateStatus(), 200, nil
 	case "POST /api/settings/update/install":
 		if err := a.startUpdate(str(b["version"])); err != nil {
-			return M{"ok": false, "error": err.Error()}, 409, nil
+			return adminError(409, err.Error())
 		}
 		return a.updateStatus(), 202, nil
 	case "GET /api/settings":
-		out := M{}
-		for _, k := range []string{"poll_interval_sec", "poll_jitter_sec", "poll_concurrency", "daily_claim_enabled", "daily_claim_time", "conversation_affinity_minutes", "default_reasoning_level", "http", "outbound_proxy", "inference_driver", "app_version", "zcode_version_auto_update", "zcode_version_check_interval_sec", "aliases", "retry", "web_port", "gateway_port"} {
-			out[k] = cfg[k]
-		}
+		out := a.config(strings.Fields(editableSettings + " web_port gateway_port")...)
 		over := obj(a.setting("config_overrides", M{}))
 		delete(over, "notify_webhook")
 		out["overrides"] = over
@@ -286,63 +292,74 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		return out, 200, nil
 	case "POST /api/settings/zcode-version/sync":
 		if err := a.syncZCodeVersion(ctx); err != nil {
-			return M{"ok": false, "error": err.Error()}, 502, nil
+			return adminError(502, err.Error())
 		}
-		current := a.config()
+		current := a.config("app_version", "http")
 		return M{"ok": true, "app_version": current["app_version"], "client_version": obj(current["http"])["client_version"], "status": a.setting("zcode_version_status", M{})}, 200, nil
 	case "GET /api/settings/captcha/runtime":
-		options := obj(obj(cfg["http"])["captcha"])
-		for _, key := range []string{"node_path", "jsdom_path"} {
+		options := obj(a.configValue("http", "captcha"))
+		for _, key := range []string{"node_path", "jsdom_path", "playwright_path", "browser_path"} {
 			if r.URL.Query().Has(key) {
 				value := r.URL.Query().Get(key)
 				if len(value) > 4096 || validateCaptchaOptions(M{key: value}) != nil {
-					return M{"ok": false, "error": "Node.js 或 jsdom 路径无效"}, 400, nil
+					return adminError(400, "验证运行时路径无效")
 				}
 				options[key] = value
 			}
 		}
 		return a.captchaRuntimeStatus(ctx, options), 200, nil
+	case "POST /api/settings/captcha/browser/install":
+		downloadBrowser, valid := b["install_browser"].(bool)
+		if !valid {
+			return adminError(400, "须明确选择是否安装 Chromium")
+		}
+		options := obj(a.configValue("http", "captcha"))
+		for _, key := range []string{"node_path", "jsdom_path", "playwright_path", "browser_path"} {
+			if value, present := b[key]; present {
+				if len(str(value)) > 4096 || validateCaptchaOptions(M{key: value}) != nil {
+					return adminError(400, "浏览器运行时路径无效")
+				}
+				options[key] = value
+			}
+		}
+		return wrap(a.installClaimBrowser(ctx, options, downloadBrowser))
 	case "GET /api/settings/proxy/mihomo":
 		if r.URL.Query().Has("path") {
 			path := r.URL.Query().Get("path")
 			if len(path) > 4096 || validateOutboundProxyFields(M{"mihomo_path": path}) != nil {
-				return M{"ok": false, "error": "Mihomo 可执行文件路径无效"}, 400, nil
+				return adminError(400, "Mihomo 可执行文件路径无效")
 			}
 			return a.mihomoStatusForPath(path), 200, nil
 		}
 		return a.mihomoStatus(), 200, nil
 	case "POST /api/settings/proxy/nodes":
 		if e := validateOutboundProxyFields(b["outbound_proxy"]); e != nil {
-			return M{"ok": false, "error": e.Error()}, 400, nil
+			return adminError(400, e.Error())
 		}
-		options := merge(obj(cfg["outbound_proxy"]), obj(b["outbound_proxy"]))
+		options := merge(obj(a.configValue("outbound_proxy")), obj(b["outbound_proxy"]))
 		result, e := a.outboundProxyNodes(ctx, options)
 		if e != nil {
-			return M{"ok": false, "error": asProxyFailure(e).Message}, 400, nil
+			return adminError(400, asProxyFailure(e).Message)
 		}
 		return result, 200, nil
 	case "POST /api/settings/proxy/mihomo/install":
 		result, err := a.installMihomo(ctx)
 		if err != nil {
-			return M{"ok": false, "error": err.Error()}, 400, nil
+			return adminError(400, err.Error())
 		}
 		return result, 200, nil
 	case "POST /api/settings/proxy/test":
 		if e := validateOutboundProxy(b["outbound_proxy"]); e != nil {
-			return M{"ok": false, "error": e.Error()}, 400, nil
+			return adminError(400, e.Error())
 		}
 		result, e := a.testOutboundProxies(ctx, obj(b["outbound_proxy"]))
 		if e != nil {
-			return M{"ok": false, "error": asProxyFailure(e).Message}, 502, nil
+			return adminError(502, asProxyFailure(e).Message)
 		}
 		return result, 200, nil
 	case "PUT /api/settings":
 		if e := validateSettings(b); e != nil {
-			return M{"ok": false, "error": e.Error()}, 400, nil
-		}
-		allowed := map[string]bool{}
-		for _, k := range strings.Fields("poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time conversation_affinity_minutes default_reasoning_level app_version zcode_version_auto_update zcode_version_check_interval_sec aliases retry inference_driver http outbound_proxy") {
-			allowed[k] = true
+			return adminError(400, e.Error())
 		}
 		a.configMu.Lock()
 		over := obj(a.setting("config_overrides", M{}))
@@ -352,8 +369,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		if value, present := b["zcode_version_auto_update"]; present {
 			autoVersion = truth(value)
 		}
-		for k, v := range b {
-			if !allowed[k] {
+		for _, k := range strings.Fields(editableSettings) {
+			v, present := b[k]
+			if !present {
 				continue
 			}
 			if autoVersion && k == "app_version" {
@@ -371,7 +389,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		if e := validateOutboundProxy(next["outbound_proxy"]); e != nil {
 			a.configMu.Unlock()
-			return M{"ok": false, "error": e.Error()}, 400, nil
+			return adminError(400, e.Error())
 		}
 		proxyChanged := js(next["outbound_proxy"]) != js(a.cfg["outbound_proxy"])
 		captchaChanged := proxyChanged || js(next["app_version"]) != js(a.cfg["app_version"]) || js(obj(next["http"])["captcha"]) != js(obj(a.cfg["http"])["captcha"])
@@ -383,13 +401,16 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 			a.cfg = next
 		}
 		a.configMu.Unlock()
+		if e == nil && b["poll_concurrency"] != nil {
+			wake(a.pollWake)
+		}
 		if captchaChanged && e == nil {
 			a.resetCaptchaCache()
 		}
 		if proxyChanged && e == nil {
 			a.resetOutboundProxies()
 		}
-		if claimScheduleChanged && e == nil {
+		if (claimScheduleChanged || captchaChanged) && e == nil {
 			a.rescheduleClaims()
 		}
 		if versionScheduleChanged && e == nil {
@@ -415,7 +436,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	if strings.HasPrefix(p, "/api/accounts/oauth/status/") && method == "GET" {
 		row := a.row("SELECT * FROM oauth_flows WHERE flow_id=?", strings.TrimPrefix(p, "/api/accounts/oauth/status/"))
 		if row == nil {
-			return M{"ok": false, "error": "授权流程不存在"}, 404, nil
+			return adminError(404, "授权流程不存在")
 		}
 		return publicFlow(row), 200, nil
 	}
@@ -428,7 +449,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		n, _ := res.RowsAffected()
 		if n == 0 {
 			if r := a.row("SELECT status FROM oauth_flows WHERE flow_id=?", id); str(r["status"]) == "exchanging" {
-				return M{"ok": false, "error": "正在处理授权结果，无法取消"}, 409, nil
+				return adminError(409, "正在处理授权结果，无法取消")
 			}
 		}
 		return ok, 200, nil
@@ -438,7 +459,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		id := parts[0]
 		account := a.account(id)
 		if account == nil {
-			return M{"ok": false, "error": "账号不存在"}, 404, nil
+			return adminError(404, "账号不存在")
 		}
 		if len(parts) == 1 {
 			switch method {
@@ -473,13 +494,13 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 				if v, exists := fields["proxy_url"]; exists {
 					p := strings.TrimSpace(str(v))
 					if p != "" && !validProxy(p) {
-						return M{"ok": false, "error": "proxy_url 仅支持 http(s)://host:port"}, 400, nil
+						return adminError(400, "proxy_url 仅支持 http(s)://host:port")
 					}
 					fields["proxy_url"] = nullable(p)
 					proxyChanged = p != str(account["proxy_url"])
 				}
 				if truth(fields["group_id"]) && a.row("SELECT id FROM groups WHERE id=?", fields["group_id"]) == nil {
-					return M{"ok": false, "error": "分组不存在"}, 400, nil
+					return adminError(400, "分组不存在")
 				}
 				e := a.updateAccount(id, fields)
 				return M{"ok": e == nil, "proxy_updated": proxyChanged}, 200, e
@@ -518,14 +539,14 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		case "DELETE":
 			n := integer(a.row("SELECT COUNT(*) n FROM accounts WHERE group_id=?", id)["n"])
 			if n > 0 {
-				return M{"ok": false, "error": fmt.Sprintf("分组下还有 %d 个账号，先移出再删除", n)}, 200, nil
+				return adminError(200, fmt.Sprintf("分组下还有 %d 个账号，先移出再删除", n))
 			}
 			return ok, 200, a.exec("DELETE FROM groups WHERE id=?", id)
 		case "PATCH":
 			return ok, 200, a.update("groups", "id", id, b, "name role family_filter policy urgent_window_min enabled")
 		}
 	}
-	return M{"ok": false, "error": "接口不存在"}, 404, nil
+	return adminError(404, "接口不存在")
 }
 func (a *App) pendingFlows() []any {
 	out := []any{}
@@ -539,10 +560,7 @@ var versionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 func validateSettings(b M) error {
 	if value, present := b["zcode_version_check_interval_sec"]; present {
-		_, isFloat := value.(float64)
-		_, isJSONNumber := value.(json.Number)
-		n := num(value)
-		if (!isFloat && !isJSONNumber) || n != math.Trunc(n) || n < minZCodeVersionCheckIntervalSec || n > maxZCodeVersionCheckIntervalSec {
+		if !integerInRange(value, minZCodeVersionCheckIntervalSec, maxZCodeVersionCheckIntervalSec) {
 			return fmt.Errorf("ZCode 版本检查间隔须为 1 分钟到 365 天之间的整数秒数")
 		}
 	}
@@ -645,11 +663,15 @@ func (a *App) usageStats(r *http.Request) M {
 }
 func (a *App) performance(limit int) M {
 	rows := a.rows("SELECT timings FROM usage_log WHERE timings IS NOT NULL ORDER BY id DESC LIMIT ?", limit)
+	for _, value := range rows {
+		row := obj(value)
+		row["timings"] = parse(row["timings"], nil)
+	}
 	metrics := M{}
 	for _, stage := range strings.Fields("queue_ms retry_ms ttft_ms first_reasoning_ms first_text_ms generation_ms total_ms") {
 		xs := []float64{}
 		for _, v := range rows {
-			m := obj(parse(obj(v)["timings"], nil))
+			m := obj(obj(v)["timings"])
 			if m[stage] != nil {
 				xs = append(xs, num(m[stage]))
 			}

@@ -72,9 +72,6 @@ function installCanvasWebGL(window) {
     getContext(kind) { return getContext.call(this, kind); }
     convertToBlob() { return Promise.resolve(new window.Blob([png], { type: 'image/png' })); }
   };
-  window.Worker ??= class extends window.EventTarget {
-    postMessage() {} terminate() {}
-  };
   window.matchMedia ??= media => Object.assign(new window.EventTarget(), {
     matches: false, media: String(media), onchange: null, addListener: noop, removeListener: noop,
   });
@@ -83,6 +80,8 @@ function installCanvasWebGL(window) {
 // This function is evaluated inside the jsdom realm.
 async function verifyInWindow(config, outcome) {
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const progress = window.__captchaProgress = { stage: 'sdk_load', sdk_initialized: false, sdk_executed: false };
+  const loadingAt = performance.now();
   document.body.replaceChildren();
   const container = document.createElement('div'); container.id = 'z2a-captcha'; document.body.appendChild(container);
   const button = document.createElement('button'); button.id = 'z2a-captcha-button'; document.body.appendChild(button);
@@ -91,20 +90,26 @@ async function verifyInWindow(config, outcome) {
     await new Promise((resolve, reject) => {
       const script = document.createElement('script');
       script.src = config.sdkURL;
-      script.onload = resolve; script.onerror = () => reject(new Error('SDK load failed'));
+      script.onload = () => typeof window.initAliyunCaptcha === 'function' ? resolve() : reject(new Error('SDK unavailable'));
+      script.onerror = () => reject(new Error('SDK load failed'));
       document.head.appendChild(script);
     });
   }
+  progress.sdk_load_ms = Math.round(performance.now() - loadingAt);
   return new Promise(resolve => {
     let settled = false;
     let instance, verificationStartedAt;
     const finish = value => {
       if (!settled) {
         settled = true;
+        if (verificationStartedAt) progress.sdk_verify_ms = Date.now() - verificationStartedAt;
         resolve(value.ok ? { ...value, issued_at_ms: verificationStartedAt || Date.now() } : value);
       }
     };
-    const failed = () => finish({ ok: false, code: 'captcha_sdk_error', message: '验证码 SDK 初始化失败' });
+    const failed = error => {
+      const code = String(error?.code || '');
+      finish({ ok: false, code: 'captcha_sdk_error', sdk_error_code: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) ? code : '', message: '验证码 SDK 初始化失败' });
+    };
     window.addEventListener('error', failed);
     window.addEventListener('unhandledrejection', failed);
     window.__disposeCaptcha = () => {
@@ -113,10 +118,11 @@ async function verifyInWindow(config, outcome) {
       window.removeEventListener('unhandledrejection', failed);
       try { instance?.destroy?.(); } catch {}
     };
+    progress.stage = 'sdk_init';
     const initializedAt = performance.now();
     const initialization = window.initAliyunCaptcha({
       SceneId: config.sceneId, mode: 'popup', element: '#z2a-captcha', button: '#z2a-captcha-button',
-      delayBeforeSuccess: false,
+      language: 'cn', delayBeforeSuccess: false,
       success: param => finish(typeof param === 'string' && param.trim()
         ? { ok: true, param, region: config.region }
         : { ok: false, code: 'captcha_empty_result', message: '验证结果为空' }),
@@ -124,18 +130,33 @@ async function verifyInWindow(config, outcome) {
       onError: failed,
       getInstance: value => {
         if (settled) { try { value?.destroy?.(); } catch {} return; }
+        if (!value) { failed(); return; }
         if (instance) { if (value !== instance) { try { value?.destroy?.(); } catch {} } return; }
         instance = value;
+        progress.sdk_initialized = true;
+        progress.sdk_init_ms = Math.round(performance.now() - initializedAt);
         if (typeof instance?.startTracelessVerification !== 'function') {
           finish({ ok: false, code: 'captcha_interaction_required', message: '当前验证场景需要人工交互' });
           return;
         }
-        // Initialization already loads resources; count that time toward the
-        // SDK's >2s interval rather than starting another full wait when ready.
-        pause(Math.max(0, config.delayMs - (performance.now() - initializedAt))).then(() => {
+        // getInstance confirms initialization, but device collection and async
+        // resources can still be settling. Slow initialization must not erase
+        // the SDK's preparation interval before verification.
+        progress.stage = 'sdk_ready';
+        const readyAt = performance.now();
+        pause(config.delayMs).then(() => {
           if (settled) return;
+          progress.sdk_ready_wait_ms = Math.round(performance.now() - readyAt);
           verificationStartedAt = Date.now();
+          progress.stage = 'sdk_verify';
+          progress.sdk_executed = true;
           return instance.startTracelessVerification();
+        }).then(value => {
+          if (settled || !value || typeof value !== 'object') return;
+          // Accept an explicitly successful returned ticket too. Intermediate
+          // return values must not preempt the official success/fail callbacks.
+          const result = outcome(value, config.region);
+          if (result.ok) finish(result);
         }).catch(failed);
       },
     });
@@ -166,22 +187,52 @@ function proxyConnectionError(error, address) {
   return inspect(error);
 }
 
+function captchaSessionState(dom) {
+  if (!dom) return;
+  try {
+    const localStorage = [], storage = dom.window.localStorage;
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index);
+      localStorage.push([key, storage.getItem(key)]);
+    }
+    const cookieJar = dom.cookieJar.serializeSync();
+    const state = { cookieJar, localStorage };
+    // Leave room for the fresh ticket in the bounded process output. State
+    // stays in the account's memory pool; it is never written to disk/logs.
+    if (Buffer.byteLength(JSON.stringify(state), 'utf8') <= (16 << 10)) return state;
+  } catch {}
+}
+
 async function run(config, dependencies = {}) {
+  let dom, timer, interrupt, networkFailed = false, proxyFailed = false, resourceStatus = 0, resourceRetryAfter = '';
+  const withProgress = result => ({
+    stage: 'runtime', sdk_initialized: false, sdk_executed: false,
+    ...dom?.window.__captchaProgress, ...result, state: captchaSessionState(dom),
+  });
   try {
     if (new URL(config.origin).protocol !== 'https:') throw new Error('invalid origin');
-  } catch { return { ok: false, code: 'captcha_origin_invalid', message: '验证码页面必须使用 HTTPS' }; }
+  } catch { return withProgress({ ok: false, code: 'captcha_origin_invalid', message: '验证码页面必须使用 HTTPS' }); }
   if (config.proxy_url) {
     try {
       const proxy = new URL(config.proxy_url);
       if (!['http:', 'https:'].includes(proxy.protocol) || !proxy.hostname || (proxy.pathname && proxy.pathname !== '/') || proxy.search || proxy.hash || /[\r\n\x00]/.test(config.proxy_url)) throw new Error('unsupported proxy');
-    } catch { return { ok: false, code: 'captcha_proxy_unsupported', message: '验证需要有效的 HTTP/HTTPS 代理' }; }
+    } catch { return withProgress({ ok: false, code: 'captcha_proxy_unsupported', message: '验证需要有效的 HTTP/HTTPS 代理' }); }
   }
   let library;
   try { library = (dependencies.loadJSDOM || loadJSDOM)(config); }
-  catch { return { ok: false, code: 'captcha_jsdom_missing', message: '未找到 jsdom，请安装验证码运行时依赖' }; }
-  const { JSDOM, ResourceLoader, VirtualConsole } = library;
-  let dom, timer, interrupt, networkFailed = false, proxyFailed = false, resourceStatus = 0, resourceRetryAfter = '';
+  catch { return withProgress({ ok: false, code: 'captcha_jsdom_missing', message: '未找到 jsdom，请安装验证码运行时依赖' }); }
+  const { JSDOM, ResourceLoader, VirtualConsole, CookieJar } = library;
   try {
+    let cookieJar = new CookieJar();
+    if (config.state?.cookieJar) {
+      try { cookieJar = CookieJar.deserializeSync(config.state.cookieJar); } catch {}
+    }
+    const origin = new URL(config.origin).origin + '/';
+    // Reuse the account's upstream cookies only for the upstream origin. The
+    // jar enforces domains for subsequent SDK resource and XHR requests.
+    for (const cookie of String(config.cookies || '').split(';')) {
+      if (cookie.trim()) cookieJar.setCookieSync(cookie.trim() + '; Path=/; Secure', origin, { ignoreError: true });
+    }
     const canceled = new Promise(resolve => {
       interrupt = () => resolve({ ok: false, code: 'captcha_canceled', message: '验证码请求已取消' });
       process.once('SIGINT', interrupt);
@@ -207,10 +258,17 @@ async function run(config, dependencies = {}) {
     const console = new VirtualConsole();
     console.on('jsdomError', error => { if (error.type === 'XMLHttpRequest') networkFailed = true; });
     dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
-      url: new URL(config.origin).origin + '/', runScripts: 'dangerously', pretendToBeVisual: true,
+      url: origin, cookieJar, runScripts: 'dangerously', pretendToBeVisual: true,
       resources: new VerificationResources({ ...(config.proxy_url ? { proxy: config.proxy_url } : {}), strictSSL: true }),
       virtualConsole: console,
-      beforeParse(window) { if (config.simulate_canvas_webgl !== false) installCanvasWebGL(window); },
+      beforeParse(window) {
+        for (const entry of Array.isArray(config.state?.localStorage) ? config.state.localStorage : []) {
+          if (Array.isArray(entry) && entry.length === 2 && entry.every(value => typeof value === 'string')) {
+            try { window.localStorage.setItem(entry[0], entry[1]); } catch {}
+          }
+        }
+        if (config.simulate_canvas_webgl !== false) installCanvasWebGL(window);
+      },
     });
     const timeoutMs = dependencies.timeoutMs ?? Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
     const operation = dom.window.eval(captchaExpression(config, dependencies.delayMs ?? 2100));
@@ -220,19 +278,19 @@ async function run(config, dependencies = {}) {
       new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: 'captcha_timeout', message: '验证码请求超时或需要人工交互' }), timeoutMs); }),
     ]);
     if (resourceStatus && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
-      return { ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: resourceRetryAfter, message: '验证码 SDK 资源返回 HTTP 错误' };
+      return withProgress({ ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: resourceRetryAfter, message: '验证码 SDK 资源返回 HTTP 错误' });
     }
     if (proxyFailed && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
-      return { ok: false, code: 'proxy_connection_failed', message: '验证码代理连接失败' };
+      return withProgress({ ok: false, code: 'proxy_connection_failed', message: '验证码代理连接失败' });
     }
     if (networkFailed && !result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
-      return { ok: false, code: 'captcha_network_error', message: '验证码 SDK 资源连接失败' };
+      return withProgress({ ok: false, code: 'captcha_network_error', message: '验证码 SDK 资源连接失败' });
     }
-    return result;
+    return withProgress(result);
   } catch {
-    if (resourceStatus) return { ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: resourceRetryAfter, message: '验证码 SDK 资源返回 HTTP 错误' };
-    if (proxyFailed) return { ok: false, code: 'proxy_connection_failed', message: '验证码代理连接失败' };
-    return { ok: false, code: networkFailed ? 'captcha_network_error' : 'captcha_sdk_error', message: '验证码 SDK 初始化或网络请求失败' };
+    if (resourceStatus) return withProgress({ ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: resourceRetryAfter, message: '验证码 SDK 资源返回 HTTP 错误' });
+    if (proxyFailed) return withProgress({ ok: false, code: 'proxy_connection_failed', message: '验证码代理连接失败' });
+    return withProgress({ ok: false, code: networkFailed ? 'captcha_network_error' : 'captcha_sdk_error', message: '验证码 SDK 初始化或网络请求失败' });
   } finally {
     clearTimeout(timer);
     if (interrupt) {
@@ -246,7 +304,7 @@ async function run(config, dependencies = {}) {
 
 function captchaOutcome(value, region) {
   const result = value?.Result || value?.result || value || {};
-  const rawCode = String(result.VerifyCode || result.verifyCode || 'unknown');
+  const rawCode = String(result.VerifyCode || result.verifyCode || value?.verifyCode || 'unknown');
   const code = /^[FT][0-9]{3}$/.test(rawCode) ? rawCode : 'unknown';
   const param = value?.captchaVerifyParam || value?.CaptchaVerifyParam || result.captchaVerifyParam || result.CaptchaVerifyParam;
   const accepted = (value?.success === true || result.success === true) && (result.VerifyResult === true || result.verifyResult === true);
@@ -268,4 +326,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { captchaOutcome, installCanvasWebGL, run };
+module.exports = { captchaExpression, captchaOutcome, installCanvasWebGL, run };

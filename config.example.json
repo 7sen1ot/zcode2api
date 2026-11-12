@@ -3,7 +3,7 @@
   "web_port": 6789,
   "gateway_port": 6780,
   "host": "127.0.0.1",
-  "poll_interval_sec": 5,
+  "poll_interval_sec": 30,
   "poll_jitter_sec": 0,
   "daily_claim_enabled": true,
   "daily_claim_time": "19:02",
@@ -25,6 +25,9 @@
     "total_timeout_ms": 0,
     "captcha": {
       "mode": "off",
+      "claim_runtime": "jsdom",
+      "playwright_path": "",
+      "browser_path": "",
       "node_path": "node",
       "jsdom_path": "",
       "simulate_canvas_webgl": true,

@@ -51,7 +51,12 @@ func openDB(data string) (*sql.DB, error) {
 	return d, nil
 }
 
-func query(d *sql.DB, q string, args ...any) ([]any, error) {
+type sqlStore interface {
+	Query(string, ...any) (*sql.Rows, error)
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func query(d sqlStore, q string, args ...any) ([]any, error) {
 	rows, e := d.Query(q, args...)
 	if e != nil {
 		return nil, e
@@ -111,7 +116,7 @@ func (a *App) setting(k string, d any) any {
 	return parse(r["v"], d)
 }
 func (a *App) setSetting(k string, v any) error {
-	return a.exec("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", k, js(v))
+	return a.exec("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v WHERE settings.v IS NOT excluded.v", k, js(v))
 }
 func (a *App) audit(actor, action string, detail any, ip string) {
 	_ = a.exec("INSERT INTO audit_log(ts,actor,action,detail,ip) VALUES(?,?,?,?,?)", nowMS(), actor, action, js(detail), ip)

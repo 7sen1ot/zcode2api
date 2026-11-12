@@ -8,14 +8,39 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	googleuuid "github.com/google/uuid"
 )
 
 type M = map[string]any
+
+func wake(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// Keep batch concurrency bounded even when the input contains many accounts.
+// Each callback handles cancellation according to its operation's semantics.
+func parallelFor(count, concurrency int, work func(int)) {
+	var next atomic.Int64
+	var workers sync.WaitGroup
+	for range min(count, max(1, concurrency)) {
+		workers.Go(func() {
+			for i := int(next.Add(1) - 1); i < count; i = int(next.Add(1) - 1) {
+				work(i)
+			}
+		})
+	}
+	workers.Wait()
+}
 
 func obj(v any) M {
 	if m, ok := v.(map[string]any); ok && m != nil {
@@ -71,6 +96,14 @@ func integer(v any) int64 {
 		}
 	}
 	return int64(num(v))
+}
+func integerInRange(v any, minimum, maximum float64) bool {
+	switch v.(type) {
+	case int, int64, float64, json.Number:
+		n := num(v)
+		return n >= minimum && n <= maximum && n == math.Trunc(n)
+	}
+	return false
 }
 func truth(v any) bool {
 	if v == nil {

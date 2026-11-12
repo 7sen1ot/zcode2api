@@ -110,10 +110,11 @@ func captchaTicketTTL(options M) time.Duration {
 }
 
 const (
-	captchaPurposeInference     = "inference"
-	captchaPurposeClaim         = "claim"
-	captchaPrefetchDemandWindow = 30 * time.Second
-	maxCaptchaPools             = 128
+	captchaPurposeInference      = "inference"
+	captchaPurposeClaim          = "claim"
+	captchaPurposeScheduledClaim = "scheduled_claim"
+	captchaPrefetchDemandWindow  = 30 * time.Second
+	maxCaptchaPools              = 128
 )
 
 type captchaTicketScope struct {
@@ -138,6 +139,7 @@ type captchaPrefetchJob struct{ cancel context.CancelFunc }
 type captchaTicketPool struct {
 	scope                  captchaTicketScope
 	ticket                 *captchaTicket
+	runtimeState           M
 	job                    *captchaPrefetchJob
 	lastUsed, lastAccepted time.Time
 }
@@ -173,7 +175,7 @@ func validateCaptchaRequestToken(verification captchaVerification, account M, to
 }
 
 func (a *App) captchaScope(ctx context.Context, account M, purpose string, scene M) (captchaTicketScope, *Failure) {
-	if str(account["id"]) == "" || (purpose != captchaPurposeInference && purpose != captchaPurposeClaim) {
+	if str(account["id"]) == "" || (purpose != captchaPurposeInference && purpose != captchaPurposeClaim && purpose != captchaPurposeScheduledClaim) {
 		return captchaTicketScope{}, captchaScopeChanged()
 	}
 	scope := captchaTicketScope{sceneKey: a.captchaSceneKey(ctx), accountID: str(account["id"]), accountVersion: a.captchaAccountVersion(account), purpose: purpose, guard: a.captchaRequestScope(ctx, account, scene), accountDevice: a.upstreamScope(ctx, account, a.origin, true).device}
@@ -251,7 +253,7 @@ func (a *App) dropCaptchaScenePoolsLocked(sceneKey string) {
 }
 
 func (a *App) takeCaptchaTicket(pool *captchaTicketPool) (captchaTicket, bool) {
-	if captchaTicketTTL(obj(obj(a.config()["http"])["captcha"])) <= 0 {
+	if captchaTicketTTL(obj(a.configValue("http", "captcha"))) <= 0 {
 		return captchaTicket{}, false
 	}
 	a.captcha.mu.Lock()
@@ -329,7 +331,12 @@ func (a *App) captchaPrefetchBlocked(scope captchaTicketScope) bool {
 }
 
 func (a *App) scheduleTicketRenewal(pool *captchaTicketPool, proxyURL string) {
-	options := obj(obj(a.config()["http"])["captcha"])
+	options := obj(a.configValue("http", "captcha"))
+	// Claim tickets are minted on demand; prefetch must not restart Chromium
+	// after its scheduled window or after the user's last manual claim.
+	if captchaUsesBrowser(pool.scope.purpose, options) {
+		return
+	}
 	if captchaTicketTTL(options) <= 0 || a.ctx.Err() != nil || a.captchaPrefetchBlocked(pool.scope) {
 		return
 	}
@@ -381,7 +388,7 @@ func (a *App) renewCaptchaTicket(ctx context.Context, pool *captchaTicketPool, o
 		return captchaTicket{}, false
 	}
 	defer a.releaseCaptchaSlot()
-	if ctx.Err() != nil || !a.captchaScopeCurrent(ctx, pool.scope) || a.captchaPrefetchBlocked(pool.scope) || js(options) != js(obj(obj(a.config()["http"])["captcha"])) {
+	if ctx.Err() != nil || !a.captchaScopeCurrent(ctx, pool.scope) || a.captchaPrefetchBlocked(pool.scope) || js(options) != js(obj(a.configValue("http", "captcha"))) {
 		return captchaTicket{}, false
 	}
 	a.captcha.mu.Lock()

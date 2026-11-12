@@ -16,11 +16,26 @@ import (
 const accountFields = "label family customer_id group_id status enc_tokens device_mid app_version card_started_at card_expires_at web_cookie_expires_at business_token_expires_at zcode_jwt_last_ok_at fail_streak cooldown_until capabilities last_balance last_error proxy_url last_ok_at last_used_at"
 
 func (a *App) updateAccount(id string, m M) error {
-	return a.update("accounts", "id", id, m, accountFields)
+	invalidate := m["status"] == "disabled" || m["status"] == "needs_relogin" || m["status"] == "web_only"
+	for _, key := range []string{"enc_tokens", "device_mid", "proxy_url"} {
+		if _, changed := m[key]; changed {
+			invalidate = true
+		}
+	}
+	if invalidate {
+		a.balances.applyMu.Lock()
+		defer a.balances.applyMu.Unlock()
+	}
+	err := a.update("accounts", "id", id, m, accountFields)
+	if err == nil && invalidate {
+		a.invalidateBalanceLocked(id)
+	}
+	return err
 }
-func (a *App) tokens(id string) M {
-	out := M{}
-	r := a.account(id)
+func (a *App) tokens(id string) map[string]string { return a.accountTokens(a.account(id)) }
+
+func (a *App) accountTokens(r M) map[string]string {
+	out := map[string]string{}
 	for k, v := range obj(parse(r["enc_tokens"], nil)) {
 		s, e := decrypt(str(v), a.secret)
 		if e == nil {
@@ -49,32 +64,41 @@ func (a *App) setTokens(id string, m M) error {
 	return a.updateAccount(id, M{"enc_tokens": enc})
 }
 func (a *App) insertAccount(fields, tokens M) (M, error) {
-	id := "acc_" + random(4)
-	enc := M{}
+	plain := map[string]string{}
 	for k, v := range tokens {
 		if truth(v) {
-			s, e := encrypt(str(v), a.secret)
-			if e != nil {
-				return nil, e
-			}
-			enc[k] = s
+			plain[k] = str(v)
 		}
+	}
+	id, err := a.insertAccountRow(a.db, fields, plain, str(a.configValue("app_version")))
+	if err != nil {
+		return nil, err
+	}
+	return a.account(id), nil
+}
+
+func (a *App) insertAccountRow(db sqlStore, fields M, tokens map[string]string, appVersion string) (string, error) {
+	enc := map[string]string{}
+	for key, value := range tokens {
+		ciphertext, err := encrypt(value, a.secret)
+		if err != nil {
+			return "", err
+		}
+		enc[key] = ciphertext
 	}
 	group := fields["group_id"]
 	if _, ok := fields["group_id"]; !ok {
-		for _, v := range a.groups() {
-			g := obj(v)
-			if truth(g["enabled"]) && str(g["role"]) == "primary" && (!truth(g["family_filter"]) || g["family_filter"] == fields["family"]) {
-				group = g["id"]
-				break
-			}
+		groups, err := query(db, "SELECT id FROM groups WHERE enabled=1 AND role='primary' AND (family_filter IS NULL OR family_filter='' OR family_filter=?) ORDER BY created_at LIMIT 1", fallback(fields["family"], "bigmodel"))
+		if err != nil {
+			return "", err
+		}
+		if len(groups) > 0 {
+			group = obj(groups[0])["id"]
 		}
 	}
-	e := a.exec("INSERT INTO accounts(id,label,family,customer_id,group_id,status,enc_tokens,device_mid,app_version,web_cookie_expires_at,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", id, fallback(fields["label"], "账号"), fallback(fields["family"], "bigmodel"), fields["customer_id"], group, fallback(fields["status"], "unverified"), js(enc), fallback(fields["device_mid"], uuid()), a.config()["app_version"], fields["web_cookie_expires_at"], fallback(fields["source"], "local"), nowMS())
-	if e != nil {
-		return nil, e
-	}
-	return a.account(id), nil
+	id := "acc_" + random(8)
+	_, err := db.Exec("INSERT INTO accounts(id,label,family,customer_id,group_id,status,enc_tokens,device_mid,app_version,web_cookie_expires_at,business_token_expires_at,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, fallback(fields["label"], "账号"), fallback(fields["family"], "bigmodel"), fields["customer_id"], group, fallback(fields["status"], "unverified"), js(enc), fallback(fields["device_mid"], uuid()), appVersion, fields["web_cookie_expires_at"], fields["business_token_expires_at"], fallback(fields["source"], "local"), nowMS())
+	return id, err
 }
 func jwtPayload(s string) M {
 	p := strings.Split(s, ".")
@@ -109,12 +133,12 @@ func (a *App) publicAccount(r M) M {
 	}
 	m["capabilities"] = parse(m["capabilities"], []any{})
 	m["last_balance"] = parse(m["last_balance"], nil)
-	m["platform_name"] = nil
+	m["platform_name"] = r["platform_name"]
 	return m
 }
-func (a *App) fetchBalance(ctx context.Context, r M) (M, error) {
-	t := a.tokens(str(r["id"]))
-	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/balance?app_version="+str(a.config()["app_version"]), str(t["zcode_jwt"]), nil, M{"X-Device-Mid": r["device_mid"], "X-Request-Id": uuid()}, a.jar(str(r["id"])))
+func (a *App) fetchBalanceUpstream(ctx context.Context, r M) (M, error) {
+	t := a.accountTokens(r)
+	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/balance?app_version="+str(a.configValue("app_version")), str(t["zcode_jwt"]), nil, M{"X-Device-Mid": r["device_mid"], "X-Request-Id": uuid()}, a.jar(str(r["id"])))
 	if e != nil {
 		return nil, e
 	}
@@ -181,27 +205,56 @@ func secondsMS(v any) any {
 }
 func (a *App) applyBalance(r, b M, snapshot bool) {
 	id := str(r["id"])
+	a.balances.applyMu.Lock()
+	defer a.balances.applyMu.Unlock()
+	r = a.account(id)
+	if r == nil || r["status"] == "disabled" || !a.balanceResultCurrent(r, b) {
+		return
+	}
+	sequence := uint64(integer(b["_balance_sequence"]))
+	if sequence > 0 && sequence < a.balances.applied[id] {
+		return
+	}
 	fields := M{"status": "active", "zcode_jwt_last_ok_at": nowMS(), "last_ok_at": nowMS(), "fail_streak": 0, "last_error": nil, "capabilities": b["capabilities"], "last_balance": b["raw"], "card_expires_at": nil}
 	if c := obj(b["card"]); len(c) > 0 {
 		fields["card_started_at"], fields["card_expires_at"] = c["startedAt"], c["endsAt"]
 	}
-	_ = a.updateAccount(id, fields)
+	changed := balancePayloadFingerprint(parse(r["last_balance"], nil)) != balancePayloadFingerprint(b["raw"])
+	for key, value := range fields {
+		if key == "last_balance" || key == "last_ok_at" || key == "zcode_jwt_last_ok_at" {
+			continue
+		}
+		previous := r[key]
+		if key == "capabilities" {
+			previous = parse(previous, []any{})
+		}
+		changed = changed || js(previous) != js(value)
+	}
+	if changed || nowMS()-integer(r["last_ok_at"]) >= balanceSnapshotBaseline.Milliseconds() {
+		if err := a.updateAccount(id, fields); err != nil {
+			return
+		}
+	}
+	if sequence > 0 {
+		if a.balances.applied == nil {
+			a.balances.applied = map[string]uint64{}
+		}
+		a.balances.applied[id] = sequence
+	}
 	a.mu.Lock()
 	if s := a.states[id]; s != nil {
 		s.Cooldown = 0
 	}
 	a.mu.Unlock()
 	if snapshot {
-		for _, v := range arr(b["balances"]) {
-			x := obj(v)
-			_ = a.exec("INSERT INTO quota_snapshots(account_id,ts,bucket_id,entitlement_id,meter,total_units,used_units,remaining_units,expires_at) VALUES(?,?,?,?,?,?,?,?,?)", id, nowMS(), x["bucket_id"], x["entitlement_id"], x["meter"], x["total_units"], x["used_units"], x["remaining_units"], secondsMS(x["expires_at"]))
+		if err := a.saveBalanceSnapshot(id, arr(b["balances"])); err != nil {
+			a.log.Printf("余额快照保存失败: %v", err)
 		}
-		_ = a.exec("DELETE FROM quota_snapshots WHERE account_id=? AND ts<?", id, nowMS()-48*3600000)
 	}
 }
 func (a *App) verify(ctx context.Context, r M) (M, error) {
 	id := str(r["id"])
-	t := a.tokens(id)
+	t := a.accountTokens(r)
 	if !truth(t["zcode_jwt"]) {
 		if truth(t["web_jwt"]) {
 			res, e := a.customer(ctx, r, str(t["web_jwt"]))
@@ -215,13 +268,17 @@ func (a *App) verify(ctx context.Context, r M) (M, error) {
 		}
 		return M{"ok": false, "status": "unverified", "reason": "缺少可用凭据"}, nil
 	}
-	bal, e := a.fetchBalance(ctx, r)
+	bal, e := a.fetchBalanceFresh(ctx, r)
 	if e != nil {
 		return nil, e
 	}
 	if truth(bal["ok"]) {
 		a.applyBalance(r, bal, true)
-		return M{"ok": true, "status": "active", "balance": bal}, nil
+		publicBalance := clone(bal)
+		delete(publicBalance, "_balance_scope")
+		delete(publicBalance, "_balance_generation")
+		delete(publicBalance, "_balance_sequence")
+		return M{"ok": true, "status": "active", "balance": publicBalance}, nil
 	}
 	status := "cooldown"
 	if str(r["status"]) == "unverified" {
@@ -337,8 +394,10 @@ func (a *App) importCookie(ctx context.Context, b M, target M) (M, error) {
 	return M{"ok": true, "id": r["id"], "status": "web_only"}, nil
 }
 
-func balanceData(r M) M {
-	d := obj(parse(r["last_balance"], nil))
+func balanceData(r M) M { return balancePayload(parse(r["last_balance"], nil)) }
+
+func balancePayload(value any) M {
+	d := obj(value)
 	if x, ok := d["data"].(map[string]any); ok {
 		return x
 	}
@@ -368,7 +427,7 @@ func liveBalances(data M, now int64) []any {
 	}
 	return out
 }
-func (a *App) summary() M {
+func (a *App) summary(ctx context.Context) M {
 	out := M{"accounts": []any{}, "totalRemaining": 0, "totalUsed": 0, "totalGranted": 0, "totalPending": 0, "activeCount": 0, "count": 0}
 	accounts := []any{}
 	now := nowMS()
@@ -377,9 +436,12 @@ func (a *App) summary() M {
 		r := obj(v)
 		deltas[str(r["account_id"])] = r["n"]
 	}
-	for _, v := range a.rows("SELECT * FROM accounts ORDER BY created_at") {
+	rows := a.rows("SELECT * FROM accounts ORDER BY created_at")
+	a.addPlatformNames(ctx, rows)
+	for _, v := range rows {
 		r := obj(v)
-		d := balanceData(r)
+		m := a.publicAccount(r)
+		d := balancePayload(m["last_balance"])
 		buckets, pending := []any{}, []any{}
 		remaining, used, total, pendingTotal := float64(0), float64(0), float64(0), float64(0)
 		ents := map[string]bool{}
@@ -409,7 +471,6 @@ func (a *App) summary() M {
 		sort.Slice(pending, func(i, j int) bool {
 			return integer(obj(pending[i])["effective_at"]) < integer(obj(pending[j])["effective_at"])
 		})
-		m := a.publicAccount(r)
 		m["remaining"], m["used"], m["total"] = remaining, used, total
 		if len(d) == 0 {
 			m["remaining"], m["used"], m["total"] = nil, nil, nil

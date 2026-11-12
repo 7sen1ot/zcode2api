@@ -66,11 +66,15 @@ type App struct {
 	clients                map[string]*http.Client
 	jars                   map[string]*diskJar
 	claimLocks             map[string]bool
+	claimBatchMu           sync.Mutex
 	claimReschedule        chan struct{}
+	claimScheduleCancel    context.CancelFunc
 	flowLocks              map[string]bool
 	reauth                 map[string]int64
 	pollDue                map[string]int64
 	polling                map[string]bool
+	pollWake               chan struct{}
+	balances               balanceManager
 	profiles               map[string]*profileEntry
 	ctx                    context.Context
 	cancel                 context.CancelFunc
@@ -78,6 +82,7 @@ type App struct {
 	webPort, gatewayPort   int
 	origin                 string
 	captcha                captchaManager
+	claimBrowser           claimBrowserManager
 	proxies                outboundProxyManager
 	proxyHealthOnce        sync.Once
 	proxyHealthReschedule  chan struct{}
@@ -112,35 +117,16 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	a.version = buildVersion
 	a.zcodeVersionReschedule = make(chan struct{}, 1)
 	a.proxyHealthReschedule = make(chan struct{}, 1)
+	a.pollWake = make(chan struct{}, 1)
 	saved := obj(a.setting("config_overrides", M{}))
 	migrateHTTPVersion := !truth(a.setting("http_client_version_3_17_2_migrated", false))
-	clean := M{}
-	for k, v := range saved {
-		if _, exists := cfg[k]; !exists {
-			continue
-		}
+	migrateBalancePoll := !truth(a.setting("balance_poll_30s_migrated", false))
+	clean := knownConfig(cfg, saved)
+	for k, v := range clean {
 		if k == "http" || k == "retry" || k == "outbound_proxy" {
-			part := M{}
-			for field, value := range obj(v) {
-				if _, exists := obj(cfg[k])[field]; exists {
-					if k == "http" && field == "captcha" {
-						options := M{}
-						for name, option := range obj(value) {
-							if _, exists := obj(obj(cfg[k])[field])[name]; exists {
-								options[name] = option
-							}
-						}
-						value = options
-					}
-					part[field] = value
-				}
-			}
-			v = part
-			a.cfg[k] = deepMerge(obj(cfg[k]), part, false)
-		} else {
-			a.cfg[k] = v
+			v = deepMerge(obj(cfg[k]), obj(v), false)
 		}
-		clean[k] = v
+		a.cfg[k] = v
 	}
 	a.cfg["inference_driver"] = "http"
 	if clean["inference_driver"] != nil {
@@ -152,6 +138,12 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 		httpOverrides := obj(clean["http"])
 		httpOverrides["client_version"] = defaultHTTPClientVersion
 		clean["http"] = httpOverrides
+	}
+	// Migrate the previous five-second default once. Preserve custom intervals
+	// and allow later explicit edits, including opting back into five seconds.
+	if migrateBalancePoll && num(a.cfg["poll_interval_sec"]) == 5 {
+		a.cfg["poll_interval_sec"] = defaultBalancePollInterval
+		clean["poll_interval_sec"] = defaultBalancePollInterval
 	}
 	if js(clean) != js(saved) {
 		if e = a.setSetting("config_overrides", clean); e != nil {
@@ -165,14 +157,42 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 			return nil, e
 		}
 	}
+	if migrateBalancePoll {
+		if e = a.setSetting("balance_poll_30s_migrated", true); e != nil {
+			a.Close()
+			return nil, e
+		}
+	}
 	a.ensureGroups()
 	a.restoreProxyState()
 	a.background(a.runAccountQueue)
 	return a, nil
 }
-func (a *App) config() M { a.configMu.RLock(); defer a.configMu.RUnlock(); return clone(a.cfg) }
+func (a *App) config(keys ...string) M {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	if len(keys) == 0 {
+		return clone(a.cfg)
+	}
+	out := make(M, len(keys))
+	for _, key := range keys {
+		out[key] = cloneValue(a.cfg[key])
+	}
+	return out
+}
+
+func (a *App) configValue(path ...string) any {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	var value any = a.cfg
+	for _, key := range path {
+		value = obj(value)[key]
+	}
+	return cloneValue(value)
+}
 func (a *App) Close() {
 	a.cancel()
+	a.closeClaimBrowser()
 	a.closeOutboundProxies()
 	a.wg.Wait()
 	a.mu.Lock()
@@ -276,7 +296,7 @@ func (a *App) ip(r *http.Request) string {
 	if e != nil {
 		ip = r.RemoteAddr
 	}
-	if truth(a.config()["trust_proxy"]) {
+	if truth(a.configValue("trust_proxy")) {
 		if f := r.Header.Get("X-Forwarded-For"); f != "" {
 			return strings.TrimSpace(strings.Split(f, ",")[0])
 		}
@@ -315,7 +335,11 @@ func (a *App) guard(next http.Handler) http.Handler {
 }
 func (a *App) scheduleNext(id string, delay time.Duration) {
 	a.mu.Lock()
-	a.pollDue[id] = nowMS() + delay.Milliseconds()
+	due := nowMS() + delay.Milliseconds()
+	if pending, exists := a.pollDue[id]; !exists || due < pending {
+		a.pollDue[id] = due
+		wake(a.pollWake)
+	}
 	a.mu.Unlock()
 }
 func pause(ctx context.Context, d time.Duration) error {

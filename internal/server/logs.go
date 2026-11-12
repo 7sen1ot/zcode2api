@@ -9,6 +9,17 @@ import (
 
 const logPageSize = 20
 
+func publicUsageLogs(rows []any) []any {
+	for _, v := range rows {
+		m := obj(v)
+		m["timings"] = parse(m["timings"], nil)
+		if str(m["error_message"]) != "" {
+			m["error_message"] = conciseFailureMessage(&Failure{Code: str(m["error_code"]), Message: str(m["error_message"])})
+		}
+	}
+	return rows
+}
+
 type logSelection struct {
 	conditions []string
 	args       []any
@@ -59,10 +70,13 @@ func (a *App) pagedLogs(r *http.Request, kind string) (any, int, error) {
 		table, alias, from, columns = "audit_log", "d", "audit_log d", "d.*"
 	}
 	q := r.URL.Query()
-	bad := func(err error) (any, int, error) { return M{"ok": false, "error": err.Error()}, 400, nil }
-	snapshot, err := logInteger(r, "snapshot", integer(a.row("SELECT COALESCE(MAX(id),0) n FROM " + table)["n"]))
+	bad := func(err error) (any, int, error) { return adminError(400, err.Error()) }
+	snapshot, err := logInteger(r, "snapshot", 0)
 	if err != nil {
 		return bad(err)
+	}
+	if q.Get("snapshot") == "" {
+		snapshot = integer(a.row("SELECT COALESCE(MAX(id),0) n FROM " + table)["n"])
 	}
 	asOf, err := logInteger(r, "as_of", nowMS())
 	if err != nil {
@@ -194,7 +208,12 @@ func (a *App) pagedLogs(r *http.Request, kind string) (any, int, error) {
 		s.add("("+strings.Join(parts, " OR ")+")", args...)
 	}
 	where := s.where()
-	total := integer(a.row("SELECT COUNT(*) n FROM "+from+where, s.args...)["n"])
+	aggregate := "COUNT(*) total"
+	if kind == "logs" {
+		aggregate += ",COALESCE(SUM(u.status='success'),0) success,COALESCE(SUM(u.status='busy'),0) busy,COALESCE(SUM(u.status='canceled'),0) canceled,COALESCE(SUM(COALESCE(u.status,'') NOT IN ('success','busy','canceled')),0) failed,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens,COUNT(u.ttft_ms) ttft_count"
+	}
+	summary := a.row("SELECT "+aggregate+" FROM "+from+where, s.args...)
+	total := integer(summary["total"])
 	page, err := logInteger(r, "page", 1)
 	if err != nil {
 		return bad(err)
@@ -206,16 +225,8 @@ func (a *App) pagedLogs(r *http.Request, kind string) (any, int, error) {
 	if items == nil {
 		items = []any{}
 	}
-	summary := M{"total": total}
 	if kind == "logs" {
-		for _, v := range items {
-			row := obj(v)
-			row["timings"] = parse(row["timings"], nil)
-			if str(row["error_message"]) != "" {
-				row["error_message"] = conciseFailureMessage(&Failure{Code: str(row["error_code"]), Message: str(row["error_message"])})
-			}
-		}
-		summary = a.row("SELECT COUNT(*) total,COALESCE(SUM(u.status='success'),0) success,COALESCE(SUM(u.status='busy'),0) busy,COALESCE(SUM(u.status='canceled'),0) canceled,COALESCE(SUM(COALESCE(u.status,'') NOT IN ('success','busy','canceled')),0) failed,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens,COUNT(u.ttft_ms) ttft_count FROM "+from+where, s.args...)
+		items = publicUsageLogs(items)
 		n := integer(summary["ttft_count"])
 		if n > 0 {
 			args := append(append([]any{}, s.args...), n/2)

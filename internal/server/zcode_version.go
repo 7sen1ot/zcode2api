@@ -29,10 +29,7 @@ func zcodeVersionInterval(cfg M) time.Duration {
 }
 
 func (a *App) rescheduleZCodeVersionChecks() {
-	select {
-	case a.zcodeVersionReschedule <- struct{}{}:
-	default:
-	}
+	wake(a.zcodeVersionReschedule)
 }
 
 func zcodeReleasePlatform() string {
@@ -105,7 +102,7 @@ func (a *App) syncZCodeVersion(parent context.Context) (err error) {
 		return fmt.Errorf("正在同步 ZCode 版本")
 	}
 	defer a.zcodeVersionMu.Unlock()
-	if !truth(a.config()["zcode_version_auto_update"]) {
+	if !truth(a.configValue("zcode_version_auto_update")) {
 		return fmt.Errorf("请先启用自动跟随 ZCode 稳定版")
 	}
 	state := obj(a.setting("zcode_version_status", M{}))
@@ -162,7 +159,7 @@ func (a *App) startZCodeVersionUpdates() {
 	a.background(func() {
 		var lastAttempt int64
 		for {
-			cfg := a.config()
+			cfg := a.config("zcode_version_auto_update", "zcode_version_check_interval_sec")
 			var timer *time.Timer
 			var due <-chan time.Time
 			if truth(cfg["zcode_version_auto_update"]) {

@@ -45,5 +45,15 @@ globalThis.Z2AUI = (() => {
     const start = (current - 1) * size;
     return { items: items.slice(start, start + size), page: current, pageSize: size, pages, total: items.length, start: items.length ? start + 1 : 0, end: Math.min(start + size, items.length) };
   }
-  return Object.freeze({ readRoute, routeHash, usageTimeline, paginate });
+  function pageNumbers(current, pages) {
+    const candidates = new Set([1, pages]);
+    for (let n = Math.max(1, current - 2); n <= Math.min(pages, current + 2); n++) candidates.add(n);
+    const result = [];
+    for (const n of [...candidates].sort((a, b) => a - b)) {
+      if (result.length && n - result.at(-1) > 1) result.push('…');
+      result.push(n);
+    }
+    return result;
+  }
+  return Object.freeze({ readRoute, routeHash, usageTimeline, paginate, pageNumbers });
 })();

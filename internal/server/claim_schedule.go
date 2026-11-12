@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,7 +30,7 @@ func validDailyClaimTime(value string) bool {
 }
 
 func (a *App) dailyClaimTime() string {
-	value := strings.TrimSpace(str(a.config()["daily_claim_time"]))
+	value := strings.TrimSpace(str(a.configValue("daily_claim_time")))
 	if value == "" {
 		return defaultDailyClaimTime
 	}
@@ -45,39 +47,66 @@ func claimRunRecorded(last M, due time.Time) bool {
 func nextDailyClaim(now time.Time, hour, minute int, last M) time.Time {
 	local := now.In(claimTimezone)
 	next := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, claimTimezone)
-	// Saving/enabling during the selected minute must still run this occurrence.
-	if !now.Before(next.Add(time.Minute)) || claimRunRecorded(last, next) {
+	if integer(last["version"]) == 2 && scheduledClaimOpen(str(last["status"])) {
+		saved := time.UnixMilli(integer(last["scheduled_at"]))
+		if !now.Before(saved) && now.UnixMilli() < integer(last["retry_deadline"]) && saved.In(claimTimezone).Format("15:04") == fmt.Sprintf("%02d:%02d", hour, minute) {
+			return saved
+		}
+	}
+	if now.Before(next) {
+		previous := next.AddDate(0, 0, -1)
+		if now.Before(previous.Add(dailyClaimRecoveryWindow)) && !claimRunRecorded(last, previous) {
+			return previous
+		}
+	}
+	// Only versioned, unfinished checkpoints may resume. Legacy runs retain
+	// their original no-replay behavior when upgrading.
+	resume := integer(last["version"]) == 2 && integer(last["scheduled_at"]) == next.UnixMilli() && scheduledClaimOpen(str(last["status"]))
+	if !now.Before(next.Add(dailyClaimRecoveryWindow)) || (claimRunRecorded(last, next) && !resume) {
 		next = next.AddDate(0, 0, 1)
 	}
 	return next
 }
 
 func (a *App) dailyClaimSchedule() M {
-	enabled := truth(a.config()["daily_claim_enabled"])
+	enabled := truth(a.configValue("daily_claim_enabled"))
 	at := a.dailyClaimTime()
 	hour, minute := dailyClaimClock(at)
 	last := a.setting("daily_claim_last_run", nil)
-	var next any
-	if enabled {
-		next = nextDailyClaim(time.Now(), hour, minute, obj(last)).UnixMilli()
+	if record, ok := last.(map[string]any); ok {
+		last = scheduledClaimReport(record)
 	}
-	return M{"enabled": enabled, "time": at, "timezone": "Asia/Shanghai", "next_run_at": next, "last_run": last}
+	var next, browserWindow any
+	if enabled {
+		due := nextDailyClaim(time.Now(), hour, minute, obj(last))
+		browserWindow = M{"start_at": due.Add(-claimBrowserWarmup).UnixMilli(), "end_at": due.Add(dailyClaimRecoveryWindow).UnixMilli(), "idle_seconds": int(claimBrowserIdle.Seconds())}
+		if integer(obj(last)["scheduled_at"]) == due.UnixMilli() {
+			due = time.UnixMilli(max(due.UnixMilli(), integer(obj(last)["next_retry_at"])))
+		}
+		next = due.UnixMilli()
+	}
+	return M{"enabled": enabled, "time": at, "timezone": "Asia/Shanghai", "next_run_at": next, "last_run": last, "browser_window": browserWindow, "next_retry_at": obj(last)["next_retry_at"], "retry_deadline": obj(last)["retry_deadline"], "pending": obj(last)["pending"], "pending_manual": obj(last)["pending_manual"], "failed": obj(last)["failed"]}
 }
 
 // rescheduleClaims wakes the worker after its time or enabled state changes.
 func (a *App) rescheduleClaims() {
-	select {
-	case a.claimReschedule <- struct{}{}:
-	default:
+	a.mu.Lock()
+	cancel := a.claimScheduleCancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+	wake(a.claimReschedule)
 }
 
 func (a *App) startDailyClaims() {
 	a.background(func() {
-		var attemptedAt time.Time
-	schedule:
+		defer a.claimBrowserWindow(time.Time{})
+		var unavailableUntil, preparedAt time.Time
 		for a.ctx.Err() == nil {
-			if !truth(a.config()["daily_claim_enabled"]) {
+			if !truth(a.configValue("daily_claim_enabled")) {
+				preparedAt = time.Time{}
+				a.claimBrowserWindow(time.Time{})
 				select {
 				case <-a.ctx.Done():
 					return
@@ -87,44 +116,81 @@ func (a *App) startDailyClaims() {
 			}
 			at := a.dailyClaimTime()
 			hour, minute := dailyClaimClock(at)
-			due := nextDailyClaim(time.Now(), hour, minute, obj(a.setting("daily_claim_last_run", nil)))
-			if !due.After(attemptedAt) {
-				due = due.AddDate(0, 0, 1)
+			last := obj(a.setting("daily_claim_last_run", nil))
+			if integer(last["version"]) == 2 && scheduledClaimOpen(str(last["status"])) && nowMS() >= integer(last["retry_deadline"]) {
+				var expired scheduledClaimRun
+				if err := json.Unmarshal([]byte(js(last)), &expired); err == nil {
+					if err := a.reconcileScheduledClaims(&expired); err != nil {
+						a.log.Printf("自动领卡领取记录核对失败: %v", err)
+					} else {
+						expired.recoverInterrupted(time.Now())
+						if err := a.saveScheduledClaims(&expired); err != nil {
+							a.log.Printf("自动领卡结束状态保存失败: %v", err)
+						}
+						last = obj(parse(js(expired), nil))
+					}
+				}
 			}
-			timer := time.NewTimer(time.Until(due))
+			due := nextDailyClaim(time.Now(), hour, minute, last)
+			if time.Now().Before(due.Add(-claimBrowserWarmup)) {
+				a.claimBrowserWindow(time.Time{})
+			}
+			wake := maxTime(due, unavailableUntil)
+			if integer(last["scheduled_at"]) == due.UnixMilli() {
+				wake = maxTime(wake, time.UnixMilli(integer(last["next_retry_at"])))
+			}
+			if !due.Equal(preparedAt) && time.Now().Before(due) && due.Add(-claimBrowserWarmup).Before(wake) {
+				wake = due.Add(-claimBrowserWarmup)
+			}
+			timer := time.NewTimer(time.Until(wake))
 			select {
 			case <-a.ctx.Done():
 				timer.Stop()
 				return
 			case <-a.claimReschedule:
 				timer.Stop()
+				preparedAt = time.Time{}
 				continue
 			case <-timer.C:
 			}
-			// Let an existing manual batch finish before taking the shared lock.
-			for truth(a.config()["daily_claim_enabled"]) && a.dailyClaimTime() == at && time.Now().Before(due.Add(5*time.Minute)) {
-				result, err := a.autoClaimScope(a.ctx, false, due)
-				if err != nil {
-					attemptedAt = due
-					a.log.Printf("每日 %s 自动领卡启动失败: %v", at, err)
-					break
+			if !a.scheduledClaimEnabled(due) || !time.Now().Before(due.Add(dailyClaimRecoveryWindow)) {
+				continue
+			}
+			ctx, cancel := context.WithCancel(a.ctx)
+			a.mu.Lock()
+			a.claimScheduleCancel = cancel
+			a.mu.Unlock()
+			warming := time.Now().Before(due)
+			var result M
+			var err error
+			if warming {
+				preparedAt = due
+				err = a.warmClaimBrowser(ctx, obj(a.configValue("http", "captcha")), due)
+			} else {
+				result, err = a.autoClaimScope(ctx, false, due)
+			}
+			cancel()
+			a.mu.Lock()
+			a.claimScheduleCancel = nil
+			a.mu.Unlock()
+			if warming {
+				if err != nil && a.ctx.Err() == nil {
+					a.log.Printf("自动领卡浏览器预热失败: %v", err)
 				}
-				if !truth(result["in_progress"]) {
-					attemptedAt = due
-					if !truth(result["skipped"]) {
-						a.log.Printf("每日 %s 自动领卡完成: 检查 %v 个账号，领取 %v 张", at, result["checked"], result["claimed"])
-					}
-					break
-				}
-				retry := time.NewTimer(15 * time.Second)
-				select {
-				case <-a.ctx.Done():
-					retry.Stop()
-					return
-				case <-a.claimReschedule:
-					retry.Stop()
-					continue schedule
-				case <-retry.C:
+				continue
+			}
+			if err == nil && !truth(result["in_progress"]) && integer(result["pending"]) == 0 {
+				a.claimBrowserWindow(time.Time{})
+			}
+			if err != nil {
+				unavailableUntil = time.Now().Add(dailyClaimRecoveryDelay)
+				a.log.Printf("每日 %s 自动领卡执行失败: %v", at, err)
+			} else if truth(result["in_progress"]) {
+				unavailableUntil = time.Now().Add(15 * time.Second)
+			} else {
+				unavailableUntil = time.Time{}
+				if !truth(result["skipped"]) {
+					a.log.Printf("每日 %s 自动领卡状态 %v: 检查 %v 个账号，领取 %v 张，失败 %v 项，需人工 %v 项，待恢复 %v 个账号", at, result["status"], result["checked"], result["claimed"], result["failed"], result["pending_manual"], result["pending"])
 				}
 			}
 		}

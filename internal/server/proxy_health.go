@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -57,33 +56,13 @@ func (a *App) startProxyHealthProbes() {
 
 func (a *App) probeManualExits(ctx context.Context, options M, scope proxyProbeScope) {
 	endpoints := manualProxyEndpoints(arr(options["urls"]))
-	jobs := make(chan proxyEndpoint)
-	var workers sync.WaitGroup
-	for i := 0; i < min(4, len(endpoints)); i++ {
-		workers.Go(func() {
-			for endpoint := range jobs {
-				if ctx.Err() != nil {
-					continue
-				}
-				result := a.probeManualExit(ctx, endpoint.URL)
-				a.applyExitVerdict(ctx, scope, endpoint.identity(), result)
-			}
-		})
-	}
-	for _, endpoint := range endpoints {
-		if !validProxy(endpoint.URL) {
-			continue
+	parallelFor(len(endpoints), 4, func(i int) {
+		endpoint := endpoints[i]
+		if ctx.Err() == nil && validProxy(endpoint.URL) {
+			result := a.probeManualExit(ctx, endpoint.URL)
+			a.applyExitVerdict(ctx, scope, endpoint.identity(), result)
 		}
-		select {
-		case jobs <- endpoint:
-		case <-ctx.Done():
-			close(jobs)
-			workers.Wait()
-			return
-		}
-	}
-	close(jobs)
-	workers.Wait()
+	})
 }
 
 func (a *App) probeManualExit(parent context.Context, address string) proxyProbeResult {
@@ -207,53 +186,42 @@ func (a *App) testOutboundProxies(parent context.Context, options M) (M, error) 
 		}
 	}
 	results := make([]any, len(endpoints))
-	var workers sync.WaitGroup
-	jobs := make(chan int)
-	for i := 0; i < min(4, len(endpoints)); i++ {
-		workers.Go(func() {
-			for index := range jobs {
-				endpoint := endpoints[index]
-				started := time.Now()
-				result := M{"name": endpoint.Name, "reachable": false, "transport_reachable": false, "failure_kind": "network", "message": "连接失败或超时"}
-				status, failure, _ := a.probeProxy(ctx, endpoint.URL)
-				if status != 0 {
-					result["transport_reachable"] = true
-					result["status"] = status
-					classify(failure)
-					blocked := failure.Code == "upstream_waf_blocked" || failure.Kind == "account_risk"
-					reachable := status == 401 && !blocked
-					result["reachable"] = reachable
-					result["blocked"] = blocked
-					result["code"], result["failure_kind"] = failure.Code, failure.Kind
-					if reachable {
-						result["failure_kind"], result["code"] = "", ""
-					}
-					if failure.Kind == "account_risk" {
-						// Anonymous probes cannot identify an affected account or exit.
-						result["failure_kind"] = "risk"
-						result["message"] = "上游风控拒绝"
-						if failure.Code == "3012" {
-							result["message"] = "上游风控拒绝（3012）"
-						}
-					} else if blocked {
-						result["message"] = "上游安全网关拦截"
-					} else if status == 401 {
-						result["message"] = "出口可达；仍需用真实推理确认账号与模型可用"
-					} else {
-						result["message"] = "已连接，但上游未返回预期的鉴权响应"
-					}
-				} else if failure != nil {
-					result["code"] = failure.Code
-				}
-				result["elapsed_ms"] = time.Since(started).Milliseconds()
-				results[index] = result
+	parallelFor(len(endpoints), 4, func(index int) {
+		endpoint := endpoints[index]
+		started := time.Now()
+		result := M{"name": endpoint.Name, "reachable": false, "transport_reachable": false, "failure_kind": "network", "message": "连接失败或超时"}
+		status, failure, _ := a.probeProxy(ctx, endpoint.URL)
+		if status != 0 {
+			result["transport_reachable"] = true
+			result["status"] = status
+			classify(failure)
+			blocked := failure.Code == "upstream_waf_blocked" || failure.Kind == "account_risk"
+			reachable := status == 401 && !blocked
+			result["reachable"] = reachable
+			result["blocked"] = blocked
+			result["code"], result["failure_kind"] = failure.Code, failure.Kind
+			if reachable {
+				result["failure_kind"], result["code"] = "", ""
 			}
-		})
-	}
-	for i := range endpoints {
-		jobs <- i
-	}
-	close(jobs)
-	workers.Wait()
+			if failure.Kind == "account_risk" {
+				// Anonymous probes cannot identify an affected account or exit.
+				result["failure_kind"] = "risk"
+				result["message"] = "上游风控拒绝"
+				if failure.Code == "3012" {
+					result["message"] = "上游风控拒绝（3012）"
+				}
+			} else if blocked {
+				result["message"] = "上游安全网关拦截"
+			} else if status == 401 {
+				result["message"] = "出口可达；仍需用真实推理确认账号与模型可用"
+			} else {
+				result["message"] = "已连接，但上游未返回预期的鉴权响应"
+			}
+		} else if failure != nil {
+			result["code"] = failure.Code
+		}
+		result["elapsed_ms"] = time.Since(started).Milliseconds()
+		results[index] = result
+	})
 	return M{"ok": true, "results": results, "note": "检测不保存设置、不发送账号令牌、不计模型用量；连通性通过不代表真实推理一定通过风控"}, nil
 }

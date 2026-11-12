@@ -17,58 +17,79 @@ func (a *App) startWorkers() {
 	a.restoreOAuth()
 	a.startDailyClaims()
 	a.startProxyHealthProbes()
+	a.startBalanceSnapshotCleanup()
 	a.background(func() {
-		t := time.NewTicker(time.Second)
+		t := time.NewTimer(0)
 		defer t.Stop()
 		for {
 			select {
 			case <-a.ctx.Done():
 				return
+			case <-a.pollWake:
 			case <-t.C:
-				cfg := a.config()
-				a.mu.Lock()
-				active := len(a.polling)
-				ids := []string{}
-				for id, due := range a.pollDue {
-					if due <= nowMS() && !a.polling[id] && active < max(1, int(integer(cfg["poll_concurrency"]))) {
-						a.polling[id] = true
-						delete(a.pollDue, id)
-						ids = append(ids, id)
-						active++
-					}
+			}
+			t.Stop()
+			limit := max(1, int(integer(a.configValue("poll_concurrency"))))
+			now, next := nowMS(), int64(0)
+			a.mu.Lock()
+			active := len(a.polling)
+			ids := []string{}
+			for id, due := range a.pollDue {
+				if a.polling[id] {
+					continue
 				}
-				a.mu.Unlock()
-				for _, id := range ids {
-					a.background(func() { defer func() { a.mu.Lock(); delete(a.polling, id); a.mu.Unlock() }(); a.pollAccount(a.ctx, id) })
+				if due <= now && active < limit {
+					a.polling[id] = true
+					delete(a.pollDue, id)
+					ids = append(ids, id)
+					active++
+				} else if next == 0 || due < next {
+					next = due
 				}
+			}
+			a.mu.Unlock()
+			// Full workers wake us when they finish; an empty queue needs no timer.
+			if active < limit && next > 0 {
+				t.Reset(max(time.Until(time.UnixMilli(next)), time.Millisecond))
+			}
+			for _, id := range ids {
+				a.background(func() {
+					defer func() { a.mu.Lock(); delete(a.polling, id); a.mu.Unlock(); wake(a.pollWake) }()
+					a.pollAccount(a.ctx, id)
+				})
 			}
 		}
 	})
 }
 func (a *App) pollAccount(ctx context.Context, id string) {
 	r := a.account(id)
-	if r == nil {
+	if r == nil || r["status"] == "disabled" {
 		return
 	}
-	cfg := a.config()
+	cfg := a.config("poll_interval_sec", "poll_jitter_sec", "web_only_ping_min")
 	delay := time.Duration(num(cfg["poll_interval_sec"])+rand.Float64()*num(cfg["poll_jitter_sec"])) * time.Second
-	defer func() { a.scheduleNext(id, delay) }()
-	a.cookieNotice(r)
+	defer func() { a.scheduleNext(id, max(delay, time.Second)) }()
+	tokens := a.accountTokens(r)
+	a.cookieNotice(r, tokens)
 	if str(r["status"]) == "web_only" {
 		delay = time.Duration(num(cfg["web_only_ping_min"]) * float64(time.Minute))
-		if res, e := a.customer(ctx, r, str(a.tokens(id)["web_jwt"])); e == nil && res.OK {
+		if res, e := a.customer(ctx, r, tokens["web_jwt"]); e == nil && res.OK {
 			_ = a.updateAccount(id, M{"last_ok_at": nowMS(), "last_error": nil})
 		} else {
 			_ = a.updateAccount(id, M{"last_error": "网页会话检查失败"})
 		}
 		return
 	}
-	if !truth(a.tokens(id)["zcode_jwt"]) {
+	if tokens["zcode_jwt"] == "" {
 		return
 	}
 	b, e := a.fetchBalance(ctx, r)
 	if e != nil {
 		var failure *Failure
+		if errors.As(e, &failure) && failure.Code == "balance_context_changed" {
+			delay = 0
+			return
+		}
 		if errors.As(e, &failure) && failure.RetryAfter > 0 && (failure.Kind == "rate_limit" || failure.Kind == "account_risk") {
 			delay = max(delay, failure.RetryAfter)
 			_ = a.updateAccount(id, M{"last_error": conciseFailureMessage(failure)})
@@ -96,9 +117,9 @@ func (a *App) pollAccount(ctx context.Context, id string) {
 	_ = a.updateAccount(id, M{"fail_streak": streak, "last_error": fmt.Sprintf("balance HTTP %v", b["httpStatus"])})
 	delay = time.Duration(math.Min(3600, num(cfg["poll_interval_sec"])*math.Pow(2, float64(min(streak, 6))))) * time.Second
 }
-func (a *App) cookieNotice(r M) {
+func (a *App) cookieNotice(r M, tokens map[string]string) {
 	expiry := integer(r["web_cookie_expires_at"])
-	if expiry <= 0 || !truth(a.tokens(str(r["id"]))["web_jwt"]) {
+	if expiry <= 0 || tokens["web_jwt"] == "" {
 		return
 	}
 	left := expiry - nowMS()

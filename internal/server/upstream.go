@@ -119,9 +119,8 @@ func (t *requestTiming) snapshot() M {
 	return M{"queue_ms": t.queue.Milliseconds(), "retry_ms": t.retry.Milliseconds(), "ttft_ms": value(t.first), "first_reasoning_ms": value(t.reason), "first_text_ms": value(t.text), "generation_ms": generation, "total_ms": time.Since(t.start).Milliseconds()}
 }
 func (a *App) upstreamHeaders(token, session, id string) http.Header {
-	cfg := a.config()
 	// ZCode 3.17.2 sends the desktop app version, not the inference API version.
-	version := str(fallback(cfg["app_version"], defaultHTTPClientVersion))
+	version := str(fallback(a.configValue("app_version"), defaultHTTPClientVersion))
 	clientPlatform := platform()
 	osCategory := runtime.GOOS
 	if osCategory == "darwin" {
@@ -190,7 +189,7 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	}
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
-	params := obj(a.config()["http"])
+	params := obj(a.configValue("http"))
 	timers := []*time.Timer{}
 	timer := func(code, label string, d time.Duration) *time.Timer {
 		if d <= 0 {
@@ -324,7 +323,7 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 			return nil, transportFailure(ctx, readError)
 		}
 		failure := upstreamHTTPFailure(res, b)
-		captchaMode := str(fallback(obj(obj(a.config()["http"])["captcha"])["mode"], "off"))
+		captchaMode := str(fallback(obj(a.configValue("http", "captcha"))["mode"], "off"))
 		if captchaExpired(failure) {
 			failure.Kind, failure.Retryable = "risk", false
 			if verification.Headers.Get("X-Aliyun-Captcha-Verify-Param") != "" {

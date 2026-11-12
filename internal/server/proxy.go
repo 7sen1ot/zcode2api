@@ -2,10 +2,8 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"net/url"
 	"regexp"
@@ -80,13 +78,7 @@ func validateOutboundProxyFields(value any) error {
 			if key == "rotation_interval_sec" {
 				minimum, label = 0, "代理轮换间隔"
 			}
-			switch value.(type) {
-			case int, int64, float64, json.Number:
-			default:
-				return fmt.Errorf("%s须为 %.0f 到 86400 的整数秒", label, minimum)
-			}
-			n := num(value)
-			if math.IsNaN(n) || n < minimum || n > 86400 || n != math.Trunc(n) {
+			if !integerInRange(value, minimum, 86400) {
 				return fmt.Errorf("%s须为 %.0f 到 86400 的整数秒", label, minimum)
 			}
 		default:
@@ -157,19 +149,20 @@ func selectedProxy(ctx context.Context) string {
 }
 
 type outboundProxyManager struct {
-	mu          sync.Mutex
-	generation  uint64
-	selected    string
-	claimCursor int
-	endpoints   []proxyEndpoint
-	key         string
-	current     *managedProxyRuntime
-	runtimes    map[*managedProxyRuntime]bool
-	closing     bool
-	unavailable map[string]bool
-	retryAt     map[string]time.Time
-	blocked     map[string]time.Time
-	probeCancel context.CancelFunc
+	mu            sync.Mutex
+	generation    uint64
+	selected      string
+	claimCursor   int
+	endpoints     []proxyEndpoint
+	key           string
+	current       *managedProxyRuntime
+	runtimes      map[*managedProxyRuntime]bool
+	closing       bool
+	unavailable   map[string]bool
+	retryAt       map[string]time.Time
+	blocked       map[string]time.Time
+	probeCancel   context.CancelFunc
+	persistQueued bool
 }
 
 // Call with mu held; the zero-value manager and configuration resets are valid.
@@ -266,7 +259,7 @@ func (a *App) pinOutboundProxyMode(parent context.Context, account M, rotatePerC
 		}
 		return context.WithValue(ctx, proxyContextKey{}, proxyRoute{address}), cleanup, nil
 	}
-	options := obj(a.config()["outbound_proxy"])
+	options := obj(a.configValue("outbound_proxy"))
 	if err := validateOutboundProxy(options); err != nil {
 		cleanup()
 		return parent, func() {}, proxyFailure("proxy_config_invalid", err.Error())
@@ -448,9 +441,14 @@ func proxyExitFailure(failure *Failure) bool {
 // forget WAF blocks and re-walk dead exits. Call with proxies.mu held; the
 // writes are serialized and joined by App.Close.
 func (a *App) persistProxyStateLocked() {
+	if a.proxies.persistQueued {
+		return
+	}
+	a.proxies.persistQueued = true
 	a.background(func() {
 		a.proxies.mu.Lock()
 		defer a.proxies.mu.Unlock()
+		a.proxies.persistQueued = false
 		if err := a.writeProxyStateLocked(); err != nil {
 			a.log.Printf("proxy state persistence: %v", err)
 		}
@@ -619,10 +617,7 @@ func (a *App) resetOutboundProxies() {
 		old.stop()
 	}
 	a.forgetProxyClients(nil)
-	select {
-	case a.proxyHealthReschedule <- struct{}{}:
-	default:
-	}
+	wake(a.proxyHealthReschedule)
 }
 
 func (a *App) closeOutboundProxies() {

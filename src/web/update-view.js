@@ -21,16 +21,9 @@ async function mountSettingsUpdate(main) {
   const remember = version => { try { sessionStorage.setItem(pendingKey, JSON.stringify({ version, started_at: Date.now() })); } catch {} };
   const forget = () => { try { sessionStorage.removeItem(pendingKey); } catch {} };
   const setMessage = (text, error = false) => { message.textContent = text; message.classList.toggle('error', error); };
-  async function request(path, body, timeout = 8000) {
-    const response = await fetch(path, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: { authorization: 'Bearer ' + session, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) { const error = new Error(data.error || `HTTP ${response.status}`); error.status = response.status; throw error; }
-    return data;
-  }
+  const request = (path, body, timeout = 8000) => api(path, {
+    token: session, reauthenticate: false, method: body === undefined ? 'GET' : 'POST', body, signal: AbortSignal.timeout(timeout),
+  });
   function paint() {
     if (!active()) return;
     const state = info?.state || {}, busy = !!info?.busy;

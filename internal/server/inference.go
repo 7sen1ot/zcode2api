@@ -105,7 +105,9 @@ func classify(f *Failure) *Failure {
 	f.Kind, f.Retryable = kind, retry
 	return f
 }
-func (a *App) retryParams() M { return merge(obj(a.config()["retry"]), obj(a.setting("retry", M{}))) }
+func (a *App) retryParams() M {
+	return merge(obj(a.configValue("retry")), obj(a.setting("retry", M{})))
+}
 func busyWait(p M) time.Duration {
 	s := num(p["busy_wait_sec"])
 	if s <= 0 {
@@ -313,9 +315,9 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			excluded[id] = true
 			clearThrottle(id)
 			a.background(func() {
-				if b, e := a.fetchBalance(a.ctx, account); e == nil {
+				if b, e := a.fetchBalanceFresh(a.ctx, account); e == nil {
 					if truth(b["ok"]) {
-						_ = a.updateAccount(id, M{"last_balance": b["raw"], "capabilities": b["capabilities"], "last_ok_at": nowMS()})
+						a.applyBalance(account, b, true)
 					} else if truth(b["authFailed"]) {
 						_ = a.updateAccount(id, M{"status": "needs_relogin"})
 					}

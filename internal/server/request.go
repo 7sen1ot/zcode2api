@@ -100,61 +100,69 @@ func chatMessages(items any, instructions *instructionContext, tools *toolCatalo
 	conversation := false
 	for _, v := range list {
 		m := obj(v)
-		role := str(m["role"])
-		if role == "system" || role == "developer" {
-			message, e := instructions.message(m, conversation)
-			if e != nil {
-				return nil, e
-			}
-			if message != nil {
-				out = append(out, message)
-			}
-			continue
-		}
-		conversation = true
-		if role == "tool" {
-			content, e := toolResultContent(m["content"])
-			if e != nil {
-				return nil, e
-			}
-			out = append(out, M{"role": "user", "content": []any{M{"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": content}}})
-			continue
-		}
-		if role != "user" && role != "assistant" {
-			return nil, invalid("不支持消息角色 " + role)
-		}
-		content, e := blocks(m["content"])
+		message, e := chatMessage(m, instructions, tools, conversation)
 		if e != nil {
 			return nil, e
 		}
-		if truth(m["reasoning_content"]) {
-			content = append([]any{M{"type": "thinking", "thinking": m["reasoning_content"], "signature": ""}}, content...)
+		if message != nil {
+			out = append(out, message)
 		}
-		for _, v := range arr(m["tool_calls"]) {
-			call := obj(v)
-			kind := str(fallback(call["type"], "function"))
-			f := obj(call[kind])
-			var input any
-			switch kind {
-			case "custom":
-				text, ok := f["input"].(string)
-				if !ok {
-					return nil, invalid("历史 custom 工具的 input 必须为字符串")
-				}
-				input = M{"input": text}
-			case "function":
-				input = parse(fallback(f["arguments"], "{}"), nil)
-				if input == nil {
-					return nil, invalid("历史工具参数不是有效 JSON")
-				}
-			default:
-				return nil, invalid("不支持的历史工具调用类型 " + kind)
-			}
-			content = append(content, M{"type": "tool_use", "id": call["id"], "name": tools.historyName(f), "input": input})
-		}
-		out = append(out, M{"role": role, "content": content})
+		conversation = conversation || (m["role"] != "system" && m["role"] != "developer")
 	}
 	return out, nil
+}
+
+func chatMessage(m M, instructions *instructionContext, tools *toolCatalog, conversation bool) (M, error) {
+	role := str(m["role"])
+	if role == "system" || role == "developer" {
+		return instructions.message(m, conversation)
+	}
+	if role == "tool" {
+		content, e := toolResultContent(m["content"])
+		if e != nil {
+			return nil, e
+		}
+		return M{"role": "user", "content": []any{M{"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": content}}}, nil
+	}
+	if role != "user" && role != "assistant" {
+		return nil, invalid("不支持消息角色 " + role)
+	}
+	content, e := blocks(m["content"])
+	if e != nil {
+		return nil, e
+	}
+	if truth(m["reasoning_content"]) {
+		content = append([]any{M{"type": "thinking", "thinking": m["reasoning_content"], "signature": ""}}, content...)
+	}
+	for _, v := range arr(m["tool_calls"]) {
+		call := obj(v)
+		kind := str(fallback(call["type"], "function"))
+		f := obj(call[kind])
+		input, e := historyToolInput(kind, f)
+		if e != nil {
+			return nil, e
+		}
+		content = append(content, M{"type": "tool_use", "id": call["id"], "name": tools.historyName(f), "input": input})
+	}
+	return M{"role": role, "content": content}, nil
+}
+
+func historyToolInput(kind string, call M) (any, error) {
+	switch kind {
+	case "custom":
+		text, ok := call["input"].(string)
+		if !ok {
+			return nil, invalid("历史 custom 工具的 input 必须为字符串")
+		}
+		return M{"input": text}, nil
+	case "function":
+		if input := parse(fallback(call["arguments"], "{}"), nil); input != nil {
+			return input, nil
+		}
+		return nil, invalid("历史工具参数不是有效 JSON")
+	default:
+		return nil, invalid("不支持的历史工具调用类型 " + kind)
+	}
 }
 func responseMessages(input any, instructions *instructionContext, tools *toolCatalog) ([]any, error) {
 	if s, ok := input.(string); ok {
@@ -172,18 +180,13 @@ func responseMessages(input any, instructions *instructionContext, tools *toolCa
 		m := obj(v)
 		switch str(m["type"]) {
 		case "function_call", "custom_tool_call":
-			var value any
+			kind := "function"
 			if str(m["type"]) == "custom_tool_call" {
-				input, ok := m["input"].(string)
-				if !ok {
-					return nil, invalid("custom_tool_call 的 input 必须为字符串")
-				}
-				value = M{"input": input}
-			} else {
-				value = parse(fallback(m["arguments"], "{}"), nil)
-				if value == nil {
-					return nil, invalid("历史工具参数不是有效 JSON")
-				}
+				kind = "custom"
+			}
+			value, e := historyToolInput(kind, m)
+			if e != nil {
+				return nil, e
 			}
 			out = append(out, M{"role": "assistant", "content": []any{M{"type": "tool_use", "id": m["call_id"], "name": tools.historyName(m), "input": value}}})
 		case "function_call_output", "custom_tool_call_output":
@@ -201,22 +204,13 @@ func responseMessages(input any, instructions *instructionContext, tools *toolCa
 				out = append(out, M{"role": "assistant", "content": []any{M{"type": "thinking", "thinking": text, "signature": ""}}})
 			}
 		case "", "message":
-			role := str(m["role"])
-			if role == "system" || role == "developer" {
-				message, e := instructions.message(m, conversation)
-				if e != nil {
-					return nil, e
-				}
-				if message != nil {
-					out = append(out, message)
-				}
-				continue
-			}
-			messages, e := chatMessages([]any{m}, instructions, tools)
+			message, e := chatMessage(m, instructions, tools, conversation)
 			if e != nil {
 				return nil, e
 			}
-			out = append(out, messages...)
+			if message != nil {
+				out = append(out, message)
+			}
 		default:
 			return nil, invalid("当前 HTTP 协议转换不支持 Responses 输入 " + str(m["type"]))
 		}

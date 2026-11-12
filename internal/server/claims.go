@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,7 +52,7 @@ func (a *App) preview(ctx context.Context, r M, dailyOnly bool) (M, error) {
 }
 
 func (a *App) billingPreview(ctx context.Context, r M) (M, error) {
-	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/preview?app_version="+url.QueryEscape(str(a.config()["app_version"]))+"&platform="+url.QueryEscape(platform()), str(a.tokens(str(r["id"]))["zcode_jwt"]), nil, M{"X-Device-Mid": r["device_mid"]}, a.jar(str(r["id"])))
+	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/preview?app_version="+url.QueryEscape(str(a.configValue("app_version")))+"&platform="+url.QueryEscape(platform()), str(a.tokens(str(r["id"]))["zcode_jwt"]), nil, M{"X-Device-Mid": r["device_mid"]}, a.jar(str(r["id"])))
 	if e != nil {
 		return nil, e
 	}
@@ -142,13 +144,13 @@ func (a *App) incentives(ctx context.Context, r M) (M, error) {
 	return M{"active": str(obj(d["gameplay"])["status"]) == "online", "ends_at": obj(d["gameplay"])["ends_at"], "tasks": tasks, "rewards": rewards}, nil
 }
 func (a *App) discover(ctx context.Context, id string, dailyOnly bool) M {
-	accounts := a.rows("SELECT * FROM accounts ORDER BY created_at")
+	query := "SELECT * FROM accounts"
+	args := []any{}
 	if id != "" {
-		accounts = []any{}
-		if r := a.account(id); r != nil {
-			accounts = append(accounts, r)
-		}
+		query += " WHERE id=?"
+		args = append(args, id)
 	}
+	accounts := a.rows(query+" ORDER BY created_at", args...)
 	previews := []any{}
 	checked := 0
 	for _, v := range accounts {
@@ -156,7 +158,7 @@ func (a *App) discover(ctx context.Context, id string, dailyOnly bool) M {
 			break
 		}
 		r := obj(v)
-		if !truth(a.tokens(str(r["id"]))["zcode_jwt"]) {
+		if a.accountTokens(r)["zcode_jwt"] == "" {
 			continue
 		}
 		checked++
@@ -203,15 +205,14 @@ func dailyFreePlans(plans []any) []any {
 }
 func (a *App) claim(ctx context.Context, id, plan, trigger string, verification M) (result M, err error) {
 	// Serialize all cards for one account, including manual and batch requests.
-	lock := id
 	a.mu.Lock()
-	if a.claimLocks[lock] {
+	if a.claimLocks[id] {
 		a.mu.Unlock()
 		return M{"ok": false, "code": "in_progress", "message": "该奖励正在领取，请稍候"}, nil
 	}
-	a.claimLocks[lock] = true
+	a.claimLocks[id] = true
 	a.mu.Unlock()
-	defer func() { a.mu.Lock(); delete(a.claimLocks, lock); a.mu.Unlock() }()
+	defer func() { a.mu.Lock(); delete(a.claimLocks, id); a.mu.Unlock() }()
 	r := a.account(id)
 	if r == nil {
 		return nil, fmt.Errorf("账号不存在")
@@ -223,30 +224,48 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if e := validateClaimVerification(verification); e != nil {
 		return nil, e
 	}
+	if due, scheduled := ctx.Value(scheduledClaimContextKey{}).(int64); scheduled {
+		// Check under the same account lock used by manual claims, closing the
+		// race between recovery's preview and a user finishing verification.
+		if recorded, e := a.recordedClaim(id, plan, due); e != nil || recorded != nil {
+			return recorded, e
+		}
+	}
+	diagnostic := M{"stage": "route", "sdk_attempted": false, "sdk_executed": false, "sdk_initialized": false, "ticket_attached": false, "browser_ticket": str(verification["captcha_verify_param"]) != "", "claim_request_started": false, "http_status": 0, "initial_http_status": 0}
+	ctx = context.WithValue(ctx, claimCaptchaDiagnosticKey{}, diagnostic)
+	var requestSent atomic.Bool
 	requestContext := ctx
 	defer func() {
-		if err == nil {
-			return
+		diagnostic["claim_request_sent"] = requestSent.Load()
+		if err != nil {
+			failure := transportFailure(context.WithoutCancel(ctx), err)
+			if failure.Code == "network" {
+				failure.Code, failure.Message = "claim_request_failed", "领取请求失败，请刷新领取状态后重试"
+			}
+			var known *Failure
+			if errors.As(err, &known) {
+				failure = classify(known)
+			}
+			if requestContext.Err() != nil {
+				failure = &Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
+			}
+			_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger) VALUES(?,?,?,?,?,?,?)", id, nowMS(), plan, 0, failure.Code, conciseFailureMessage(failure), trigger)
+			result = merge(result, M{"ok": false, "code": failure.Code, "message": conciseFailureMessage(failure), "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "verification": diagnostic})
+			err = failure
 		}
-		failure := transportFailure(context.WithoutCancel(ctx), err)
-		if failure.Code == "network" {
-			failure.Code, failure.Message = "claim_request_failed", "领取请求失败，请刷新领取状态后重试"
+		if !truth(result["ok"]) {
+			diagnostic["failure_stage"] = diagnostic["stage"]
 		}
-		var known *Failure
-		if errors.As(err, &known) {
-			failure = classify(known)
-		}
-		if requestContext.Err() != nil {
-			failure = &Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
-		}
-		_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger) VALUES(?,?,?,?,?,?,?)", id, nowMS(), plan, 0, failure.Code, conciseFailureMessage(failure), trigger)
-		err = failure
+		diagnostic["retry_after_ms"] = result["retry_after_ms"]
+		diagnostic["requires_verification"] = truth(result["requires_verification"])
+		a.audit("system", "claim", M{"account": id, "plan_id": plan, "ok": truth(result["ok"]), "code": result["code"], "verification": diagnostic}, "")
 	}()
 	ctx, release, e := a.claimVerificationContext(ctx, r, plan, token, verification)
 	if e != nil {
 		return nil, e
 	}
 	defer release()
+	diagnostic["stage"] = "admission"
 	ctx, finish, gateFailure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, r, a.origin, true))
 	if gateFailure != nil {
 		return nil, gateFailure
@@ -272,15 +291,19 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		headers["X-Aliyun-Captcha-Verify-Region"] = verification["captcha_region"]
 	}
 	var verificationFailure *Failure
-	sdkAttempted := false
 	// Every claim without a browser ticket resolves verification first. The
 	// trigger and legacy auto_verify flag must not permit unverified probes.
 	if str(verification["captcha_verify_param"]) == "" {
+		diagnostic["stage"] = "scene"
 		var scene M
 		scene, verificationFailure = a.captchaScene(ctx, r)
 		if verificationFailure == nil && truth(scene["enabled"]) {
-			sdkAttempted = true
-			sdkVerification, verificationFailure = a.captchaHeaders(ctx, r, captchaPurposeClaim, true)
+			diagnostic["sdk_attempted"], diagnostic["stage"] = true, "sdk"
+			purpose := captchaPurposeClaim
+			if trigger == "scheduled" {
+				purpose = captchaPurposeScheduledClaim
+			}
+			sdkVerification, verificationFailure = a.captchaHeaders(ctx, r, purpose, true)
 		}
 		a.prepareProxyFailover(ctx, verificationFailure)
 		if verificationFailure == nil {
@@ -294,7 +317,14 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		}
 	}
 	res := apiResult{}
+	diagnostic["ticket_attached"] = str(headers["X-Aliyun-Captcha-Verify-Param"]) != ""
 	if verificationFailure == nil {
+		diagnostic["stage"], diagnostic["claim_request_started"] = "claim_request", true
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				requestSent.Store(true)
+			}
+		}})
 		res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, M{"plan_id": plan}, headers, a.jar(id))
 		if e != nil {
 			return nil, e
@@ -336,7 +366,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	} else if requiresVerification {
 		failure.Kind, failure.Retryable = "risk", false
 		message = "请完成浏览器安全验证后领取（" + str(code) + "）"
-		if sdkAttempted {
+		if truth(diagnostic["sdk_attempted"]) {
 			message = "服务器验证后仍需安全验证，请在浏览器完成（" + str(code) + "）"
 		}
 	} else if failure != nil {
@@ -344,13 +374,13 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	}
 	end := secondsMS(p["ends_at"])
 	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger) VALUES(?,?,?,?,?,?,?,?,?)", id, nowMS(), plan, integer(ok), code, message, p["user_plan_id"], end, trigger)
-	diagnostic := M{"sdk_attempted": sdkAttempted, "ticket_attached": str(headers["X-Aliyun-Captcha-Verify-Param"]) != "", "browser_ticket": str(verification["captcha_verify_param"]) != "", "initial_http_status": res.Status, "http_status": res.Status, "requires_verification": requiresVerification}
+	diagnostic["initial_http_status"], diagnostic["http_status"], diagnostic["requires_verification"] = res.Status, res.Status, requiresVerification
 	if verificationFailure != nil {
 		diagnostic["sdk_error"] = verificationFailure.Code
 	}
-	a.audit("system", "claim", M{"account": id, "plan_id": plan, "ok": ok, "code": code, "verification": diagnostic}, "")
 	if ok {
 		a.acceptCaptchaVerification(ctx, &sdkVerification)
+		a.invalidateBalance(id)
 		a.scheduleNext(id, 0)
 	}
 	var resultPlan any
@@ -371,35 +401,12 @@ func (a *App) autoClaim(ctx context.Context, dry bool) (M, error) {
 }
 
 func (a *App) autoClaimScope(ctx context.Context, dry bool, scheduledAt time.Time) (result M, err error) {
-	lock := "__auto"
-	a.mu.Lock()
-	if a.claimLocks[lock] {
-		a.mu.Unlock()
+	if !a.claimBatchMu.TryLock() {
 		return M{"checked": 0, "claimed": 0, "results": []any{}, "in_progress": true}, nil
 	}
-	a.claimLocks[lock] = true
-	a.mu.Unlock()
-	defer func() { a.mu.Lock(); delete(a.claimLocks, lock); a.mu.Unlock() }()
-	scheduled := !scheduledAt.IsZero()
-	if scheduled {
-		last := obj(a.setting("daily_claim_last_run", M{}))
-		if claimRunRecorded(last, scheduledAt) {
-			return M{"skipped": true}, nil
-		}
-		state := M{"day": scheduledAt.In(claimTimezone).Format("2006-01-02"), "scheduled_at": scheduledAt.UnixMilli(), "started_at": nowMS(), "status": "running"}
-		// Persist before contacting the upstream: a restart must not replay claims.
-		if err := a.setSetting("daily_claim_last_run", state); err != nil {
-			return nil, err
-		}
-		defer func() {
-			state["status"], state["finished_at"] = "completed", nowMS()
-			if ctx.Err() != nil {
-				state["status"] = "interrupted"
-			}
-			state["checked"], state["claimed"] = result["checked"], result["claimed"]
-			state["results"] = arr(result["results"])
-			_ = a.setSetting("daily_claim_last_run", state)
-		}()
+	defer a.claimBatchMu.Unlock()
+	if !scheduledAt.IsZero() {
+		return a.runScheduledClaims(ctx, scheduledAt)
 	}
 	checked, claimed := 0, 0
 	results := []any{}
@@ -413,7 +420,7 @@ func (a *App) autoClaimScope(ctx context.Context, dry bool, scheduledAt time.Tim
 			continue
 		}
 		checked++
-		p, e := a.preview(ctx, r, scheduled)
+		p, e := a.preview(ctx, r, false)
 		if e != nil {
 			results = append(results, M{"account": id, "error": e.Error()})
 			continue
@@ -427,11 +434,7 @@ func (a *App) autoClaimScope(ctx context.Context, dry bool, scheduledAt time.Tim
 				results = append(results, M{"account": id, "plan_id": plan, "would_claim": true})
 				continue
 			}
-			trigger := "auto"
-			if scheduled {
-				trigger = "scheduled"
-			}
-			res, e := a.claim(ctx, id, plan, trigger, nil)
+			res, e := a.claim(ctx, id, plan, "auto", nil)
 			if e != nil {
 				results = append(results, M{"account": id, "plan_id": plan, "error": e.Error()})
 				break
@@ -446,4 +449,12 @@ func (a *App) autoClaimScope(ctx context.Context, dry bool, scheduledAt time.Tim
 		}
 	}
 	return M{"checked": checked, "claimed": claimed, "results": results}, nil
+}
+
+func (a *App) recordedClaim(id, plan string, since int64) (M, error) {
+	rows, err := query(a.db, "SELECT trigger FROM claim_log WHERE account_id=? AND plan_id=? AND ok=1 AND ts>=? ORDER BY ts DESC LIMIT 1", id, plan, since)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return M{"ok": true, "already_claimed": true, "external_claim": obj(rows[0])["trigger"] != "scheduled", "message": "已确认领取成功"}, nil
 }

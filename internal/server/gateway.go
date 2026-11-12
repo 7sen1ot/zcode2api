@@ -125,7 +125,7 @@ func (a *App) models(k M) []any {
 			ids[lower(id)] = str(id)
 		}
 	}
-	aliases := obj(a.config()["aliases"])
+	aliases := obj(a.configValue("aliases"))
 	if len(accounts) > 0 && len(ids) == 0 {
 		for _, id := range aliases {
 			ids[lower(id)] = str(id)
@@ -211,7 +211,7 @@ func (a *App) affinity(r *http.Request, b, k M) (string, float64) {
 		}
 	}
 	if session != "" && len(session) <= 1024 {
-		return str(k["id"]) + ":" + hash(session)[:24], math.Max(0, num(a.config()["conversation_affinity_minutes"]))
+		return str(k["id"]) + ":" + hash(session)[:24], math.Max(0, num(a.configValue("conversation_affinity_minutes")))
 	}
 	return str(k["id"]), num(k["sticky_minutes"])
 }
@@ -283,7 +283,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 		if affinity == "" {
 			affinity = str(k["id"]) + ":responses:" + hash(id)[:24]
 		}
-		sticky = math.Max(0, num(a.config()["conversation_affinity_minutes"]))
+		sticky = math.Max(0, num(a.configValue("conversation_affinity_minutes")))
 	}
 	o := inferOptions{Key: k, Body: payload, Upstream: upstream, Tools: tools, Protocol: protocol, Model: model, Level: level, ID: id, IP: a.ip(r), Affinity: affinity, Sticky: sticky, Stream: truth(body["stream"]), Timing: newTiming()}
 	ctx, cancel := context.WithCancel(r.Context())

@@ -48,29 +48,15 @@ func (a *App) managedMihomoPath() string {
 }
 
 func (a *App) resolveMihomo(configured string) (string, error) {
-	binary := configured
-	if binary == "" {
-		binary = "mihomo"
+	if configured == "" || configured == "mihomo" {
+		// Portable deployments may place Mihomo beside config.json.
+		return resolveExecutable(a.root, "mihomo", a.managedMihomoPath(), filepath.Join(a.root, "mihomo"))
 	}
-	if !filepath.IsAbs(binary) && strings.ContainsAny(binary, "/\\") {
-		binary = filepath.Join(a.root, binary)
-	}
-	resolved, err := exec.LookPath(binary)
-	if err != nil && (configured == "" || configured == "mihomo") {
-		resolved, err = exec.LookPath(a.managedMihomoPath())
-		if err != nil {
-			// Portable deployments may place Mihomo beside config.json.
-			resolved, err = exec.LookPath(filepath.Join(a.root, "mihomo"))
-		}
-	}
-	if err != nil {
-		return "", err
-	}
-	return filepath.Abs(resolved)
+	return resolveExecutable(a.root, configured)
 }
 
 func (a *App) mihomoStatus() M {
-	return a.mihomoStatusForPath(str(obj(a.config()["outbound_proxy"])["mihomo_path"]))
+	return a.mihomoStatusForPath(str(obj(a.configValue("outbound_proxy"))["mihomo_path"]))
 }
 
 func (a *App) mihomoStatusForPath(configured string) M {

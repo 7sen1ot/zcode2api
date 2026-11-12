@@ -33,7 +33,7 @@ func (a *App) password(v any) bool {
 	if !ok || s == "" {
 		return false
 	}
-	x, y := hash(s), hash(str(a.config()["admin_password"]))
+	x, y := hash(s), hash(str(a.configValue("admin_password")))
 	return subtle.ConstantTimeCompare([]byte(x), []byte(y)) == 1
 }
 func ipAllowed(ip string, patterns []any) bool {
@@ -115,7 +115,7 @@ func (a *App) modelAllowed(k M, model string) bool {
 func (a *App) resolveModel(s string) string {
 	s = strings.TrimSpace(s)
 	s = modelSuffix.ReplaceAllString(s, "")
-	for alias, v := range obj(a.config()["aliases"]) {
+	for alias, v := range obj(a.configValue("aliases")) {
 		if strings.EqualFold(alias, s) {
 			return str(v)
 		}
@@ -172,7 +172,7 @@ func (a *App) effectiveEffort(b, k M) string {
 	if v := str(k["default_level"]); validLevel(v) {
 		return v
 	}
-	v := str(a.config()["default_reasoning_level"])
+	v := str(a.configValue("default_reasoning_level"))
 	if validLevel(v) {
 		return v
 	}

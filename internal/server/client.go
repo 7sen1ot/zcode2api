@@ -19,6 +19,7 @@ type diskJar struct {
 	mu      sync.Mutex
 	path    string
 	cookies map[string]string
+	dirty   bool
 }
 
 func (a *App) jar(id string) *diskJar {
@@ -52,15 +53,20 @@ func (j *diskJar) capture(res *http.Response) {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	now := time.Now()
 	for _, c := range cookies {
-		if c.MaxAge < 0 || (!c.Expires.IsZero() && c.Expires.Before(time.Now())) {
+		old, exists := j.cookies[c.Name]
+		if c.MaxAge < 0 || (!c.Expires.IsZero() && c.Expires.Before(now)) {
+			j.dirty = j.dirty || exists
 			delete(j.cookies, c.Name)
 		} else {
+			j.dirty = j.dirty || !exists || old != c.Value
 			j.cookies[c.Name] = c.Value
 		}
 	}
-	_ = os.MkdirAll(filepath.Dir(j.path), 0700)
-	_ = os.WriteFile(j.path, []byte(js(j.cookies)), 0600)
+	if j.dirty && os.MkdirAll(filepath.Dir(j.path), 0700) == nil {
+		j.dirty = os.WriteFile(j.path, []byte(js(j.cookies)), 0600) != nil
+	}
 }
 func platform() string {
 	p := runtime.GOOS
@@ -173,9 +179,9 @@ func (a *App) api(ctx context.Context, account M, method, path, token string, bo
 	if e != nil {
 		return apiResult{}, e
 	}
-	cfg := a.config()
-	req.Header.Set("User-Agent", "ZCode/"+str(cfg["app_version"]))
-	req.Header.Set("X-ZCode-App-Version", str(cfg["app_version"]))
+	version := str(a.configValue("app_version"))
+	req.Header.Set("User-Agent", "ZCode/"+version)
+	req.Header.Set("X-ZCode-App-Version", version)
 	req.Header.Set("X-Platform", platform())
 	req.Header.Set("X-Client-Language", "zh-CN")
 	if token != "" {
