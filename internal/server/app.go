@@ -345,6 +345,20 @@ func (a *App) scheduleNext(id string, delay time.Duration) {
 	}
 	a.mu.Unlock()
 }
+
+// Operations stop when either their caller or the service is canceled; zero disables the timeout.
+func (a *App) operationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
+	stop := context.AfterFunc(a.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
 func pause(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(max(d, time.Millisecond))
 	defer t.Stop()

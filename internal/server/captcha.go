@@ -51,7 +51,6 @@ func (a *App) captchaSceneKey(ctx context.Context) string {
 	return a.origin + "|" + str(a.configValue("app_version")) + "|" + selectedProxy(ctx)
 }
 
-// captchaSlot lazily creates the single verification slot shared by every exit.
 func (a *App) captchaSlot() chan struct{} {
 	a.captcha.mu.Lock()
 	defer a.captcha.mu.Unlock()
@@ -77,10 +76,8 @@ func (a *App) captchaHeaders(parent context.Context, account M, purpose string, 
 		return verification, asProxyFailure(err)
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(parent, ms(fallback(options["timeout_ms"], 30000))+3*time.Second)
+	ctx, cancel := a.operationContext(parent, ms(fallback(options["timeout_ms"], 30000))+3*time.Second)
 	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
 	if ctx.Err() != nil {
 		return verification, &Failure{Kind: "server", Code: "captcha_timeout", Message: "上游安全验证已取消或超时"}
 	}
@@ -122,7 +119,6 @@ func (a *App) captchaHeaders(parent context.Context, account M, purpose string, 
 	}
 }
 
-// attachCaptchaTicket marks the ticket consumed and carries it on the request.
 func (a *App) attachCaptchaTicket(ctx context.Context, verification *captchaVerification, pool *captchaTicketPool, ticket captchaTicket) *Failure {
 	if ticket.scope != pool.scope || !a.captchaScopeCurrent(ctx, ticket.scope) {
 		return captchaScopeChanged()
@@ -160,8 +156,7 @@ func (a *App) captchaRuntimeParameters(ctx context.Context, options, scene M, sc
 	return parameters, pool
 }
 
-// mintCaptchaTicket runs the verification SDK once on the pinned exit. The
-// caller holds the captcha slot.
+// The caller holds the captcha slot and pins the exit for this SDK execution.
 func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M, scope captchaTicketScope) (ticket captchaTicket, failure *Failure) {
 	diagnostic, _ := ctx.Value(claimCaptchaDiagnosticKey{}).(M)
 	if diagnostic != nil {
@@ -192,9 +187,7 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M
 		}
 	}
 	result, err := run(ctx, parameters)
-	// Preserve bounded SDK-managed session data, not result.param. The
-	// pool already isolates credentials, purpose, scene and pinned exit, and
-	// drops this state together with a changed or invalidated scope.
+	// Only bounded SDK session data is reusable; the scoped pool discards it on invalidation.
 	if state := obj(result["state"]); ctx.Err() == nil && len(state) > 0 && len(js(state)) <= 16<<10 && a.captchaScopeCurrent(ctx, scope) {
 		a.captcha.mu.Lock()
 		if a.captcha.pools[scope.key()] == pool {
@@ -214,11 +207,7 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account M, options, scene M
 		if result["runtime"] == "native_browser" {
 			diagnostic["runtime"] = "native_browser"
 		}
-		for _, key := range []string{"sdk_error_code", "sdk_load_ms", "sdk_init_ms", "sdk_ready_wait_ms", "sdk_prepared_age_ms", "sdk_verify_ms", "request_id", "browser_version", "browser_visibility", "session_reused"} {
-			if value, present := result[key]; present {
-				diagnostic[key] = value
-			}
-		}
+		copyFields(diagnostic, result, "sdk_error_code", "sdk_load_ms", "sdk_init_ms", "sdk_ready_wait_ms", "sdk_prepared_age_ms", "sdk_verify_ms", "request_id", "browser_version", "browser_visibility", "session_reused")
 	}
 	if ctx.Err() != nil {
 		return captchaTicket{}, &Failure{Kind: "server", Code: "captcha_timeout", Message: "SDK 验证已取消或超时"}
@@ -343,8 +332,6 @@ func (a *App) captchaScene(ctx context.Context, account M) (M, *Failure) {
 	}
 }
 
-// refreshCaptchaScene renews a still-valid scene in the background so the next
-// request never pays the configuration round trip.
 func (a *App) refreshCaptchaScene(key, proxyURL string) {
 	a.captcha.mu.Lock()
 	entry, exists := a.captcha.scenes[key]
@@ -377,8 +364,7 @@ func (a *App) refreshCaptchaScene(key, proxyURL string) {
 			return
 		}
 		a.captcha.mu.Lock()
-		// Identity, rather than presence, prevents a stale task overwriting a
-		// replacement entry created after invalidation.
+		// Identity prevents a stale refresh from overwriting a replacement after invalidation.
 		if current := a.captcha.scenes[key]; ctx.Err() == nil && current.Generation == entry.Generation {
 			if js(scene) != js(current.Value) {
 				a.captcha.generation++
@@ -409,8 +395,7 @@ func (a *App) fetchCaptchaScene(ctx context.Context, account M) (M, *Failure) {
 	}
 	if !response.OK {
 		failure := apiResponseFailure(response)
-		// Configuration requests carry no account token. Their refusals cannot
-		// establish account risk, even when they reuse a business error code.
+		// Anonymous config refusals cannot establish account risk, even with business error codes.
 		if failure.Kind == "account_risk" {
 			failure.Kind, failure.Code, failure.Message = "risk", "captcha_config_risk_blocked", "SDK 配置请求被风控拦截"
 		}
@@ -493,7 +478,6 @@ func (a *App) prepareCaptchaChallenge(ctx context.Context) {
 	}
 }
 
-// invalidateCaptchaScene drops one exit's cached scene and prefetched tickets.
 func (a *App) invalidateCaptchaScene(key string) {
 	a.captcha.mu.Lock()
 	defer a.captcha.mu.Unlock()
@@ -557,9 +541,7 @@ func validateCaptchaOptions(value any) error {
 				return fmt.Errorf("http.captcha.timeout_ms 须为 5000 到 120000 的整数")
 			}
 		case "ticket_ttl_ms":
-			// Aliyun rejects a V3 parameter submitted more than 90 seconds after
-			// the traceless check (F019), which caps any prefetch window.
-			if !integerInRange(value, 0, 0) && !integerInRange(value, 30000, 90000) {
+			if !integerInRange(value, 0, 0) && !integerInRange(value, 30000, float64(maxCaptchaTicketTTL.Milliseconds())) {
 				return fmt.Errorf("http.captcha.ticket_ttl_ms 须为 0（关闭）或 30000 到 90000 的整数")
 			}
 		default:

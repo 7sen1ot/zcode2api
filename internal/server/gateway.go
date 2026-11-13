@@ -286,10 +286,8 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k M,
 		sticky = math.Max(0, num(a.configValue("conversation_affinity_minutes")))
 	}
 	o := inferOptions{Key: k, Body: payload, Upstream: upstream, Tools: tools, Protocol: protocol, Model: model, Level: level, ID: id, IP: a.ip(r), Affinity: affinity, Sticky: sticky, Stream: truth(body["stream"]), Timing: newTiming()}
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := a.operationContext(r.Context(), 0)
 	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
 	w.Header().Set("X-Inference-Driver", "http")
 	var stream *protocolStream
 	if o.Stream {

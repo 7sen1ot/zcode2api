@@ -77,8 +77,7 @@ function installCanvasWebGL(window) {
   });
 }
 
-// Shared by jsdom and Chromium. Preparing an instance must never mint a ticket;
-// scheduled claims keep the prepared page alive until the actual claim is due.
+// Shared by jsdom and Chromium; preparation keeps the instance alive without minting a ticket.
 async function verifyInWindow(config, outcome) {
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const key = JSON.stringify([config.sceneId, config.region, config.prefix, config.sessionKey]);
@@ -124,8 +123,7 @@ async function verifyInWindow(config, outcome) {
     const code = String(error?.code || '');
     finish({ ok: false, code: 'captcha_sdk_error', sdk_error_code: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) ? code : '', message: '验证码 SDK 初始化失败' });
   };
-  // Real pages may have unrelated analytics/application errors. Their SDK
-  // reports initialization errors through onError; do not fail on page noise.
+  // Real pages report SDK failures through onError; unrelated page errors must not abort verification.
   if (!config.reuse) {
     window.addEventListener('error', failed);
     window.addEventListener('unhandledrejection', failed);
@@ -177,9 +175,7 @@ async function verifyInWindow(config, outcome) {
           finish({ ok: false, code: 'captcha_interaction_required', message: '当前验证场景需要人工交互' });
           return;
         }
-        // getInstance confirms initialization, but device collection and async
-        // resources can still be settling. Slow initialization must not erase
-        // the SDK's preparation interval before verification.
+        // Device collection continues after getInstance; always allow its full preparation interval.
         progress.stage = 'sdk_ready';
         readyAt = performance.now();
         pause(config.delayMs).then(() => {
@@ -227,8 +223,7 @@ function captchaSessionState(dom) {
     }
     const cookieJar = dom.cookieJar.serializeSync();
     const state = { cookieJar, localStorage };
-    // Leave room for the fresh ticket in the bounded process output. State
-    // stays in the account's memory pool; it is never written to disk/logs.
+    // Leave output space for the ticket; session state stays only in the account's memory pool.
     if (Buffer.byteLength(JSON.stringify(state), 'utf8') <= (16 << 10)) return state;
   } catch {}
 }
@@ -345,8 +340,7 @@ function captchaOutcome(value, region) {
 
 
 if (require.main === module) {
-  // SDK requests may leave Node handles alive even after window.close(). A
-  // completed result must reach Go immediately, while the ticket is fresh.
+  // SDK handles can outlive window.close(); deliver the ticket to Go before it expires.
   const output = (result, status = 0) => {
     process.stdout.write(JSON.stringify(result) + '\n', () => process.exit(status));
   };

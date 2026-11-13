@@ -100,6 +100,11 @@ function toast(msg, type = '') {
   }, 2500);
 }
 
+async function copyText(text, success = '已复制', failure = '复制失败，请手动复制') {
+  try { await navigator.clipboard.writeText(text); toast(success, 'ok'); }
+  catch { toast(failure, 'err'); }
+}
+
 let composing = false;
 let imeGuardUntil = 0;
 const safariImeGuard = /^((?!chrome|chromium|crios|android|edg).)*safari/i.test(navigator.userAgent);
@@ -869,9 +874,7 @@ async function onAccountAction(e) {
   if (!btn || btn.disabled) return;
   const id = btn.dataset.id;
   if (btn.dataset.act === 'copy') {
-    try { await navigator.clipboard.writeText(id); toast('账号 ID 已复制', 'ok'); }
-    catch { toast('复制失败，请手动选择账号 ID', 'err'); }
-    return;
+    return copyText(id, '账号 ID 已复制', '复制失败，请手动选择账号 ID');
   }
 
   if (btn.dataset.act === 'detail') {
@@ -979,9 +982,7 @@ function addAccountModal(target = null) {
         <button class="btn" id="oauth-checknow" style="height:26px;padding:0 10px;font-size:12px">我已完成登录，立即检查</button>
       </div>`;
     $('#oauth-open', box).addEventListener('click', () => window.open(r.authorize_url, '_blank', 'noopener'));
-    $('#oauth-copy', box).addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(r.authorize_url); toast('授权链接已复制', 'ok'); } catch { toast('复制失败，请从授权按钮的标签页地址栏手动复制', 'err'); }
-    });
+    $('#oauth-copy', box).addEventListener('click', () => copyText(r.authorize_url, '授权链接已复制', '复制失败，请从授权按钮的标签页地址栏手动复制'));
     $('#oauth-checknow', box).addEventListener('click', () => check());
     const setStage = (text, busy = true) => {
       const el = $('#oauth-status', box);
@@ -1272,12 +1273,7 @@ async function pageKeys(main) {
       }, '保存失败：'));
     }
   });
-  $('#copy-gw').addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(`http://127.0.0.1:${RUNTIME?.gateway_port}/v1`);
-      toast('网关地址已复制', 'ok');
-    } catch { toast('复制失败，请手动复制', 'err'); }
-  });
+  $('#copy-gw').addEventListener('click', () => copyText(`http://127.0.0.1:${RUNTIME?.gateway_port}/v1`, '网关地址已复制'));
   $('#add-key').addEventListener('click', () => {
     const form = h(`<form class="dialog-form"><p class="dialog-intro">为使用网关的客户端创建独立密钥，方便管理用量与访问权限。</p><label class="dialog-field">密钥名称<input name="name" maxlength="80" placeholder="例如：Claude Code" required></label><p class="dialog-error error" role="alert"></p><div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button><button type="submit" class="btn primary">创建密钥</button></div></form>`);
     const m = modal('新建密钥', form);
@@ -1286,10 +1282,7 @@ async function pageKeys(main) {
       m.close(() => {
         const result = h(`<div class="secret-result"><p class="dialog-intro">密钥只显示一次，请立即复制并妥善保存。</p><pre class="log">${esc(r.secret)}</pre><div class="modal-actions"><button type="button" class="btn primary" data-copy>复制密钥</button></div></div>`);
         modal('密钥已创建', result);
-        $('[data-copy]', result).addEventListener('click', async () => {
-          try { await navigator.clipboard.writeText(r.secret); toast('已复制', 'ok'); }
-          catch { toast('复制失败，请手动选择并复制密钥', 'err'); }
-        });
+        $('[data-copy]', result).addEventListener('click', () => copyText(r.secret, '已复制', '复制失败，请手动选择并复制密钥'));
       });
     });
   });
@@ -1434,9 +1427,17 @@ async function pageSettings(main) {
     const checked = s.zcode_version_status?.checked_at;
     versionSync.title = s.zcode_version_status?.error || (checked ? '最近检查：' + new Date(checked).toLocaleString() + '\n下次检查：' + new Date(Number(checked) + (Number(s.zcode_version_check_interval_sec) || 432000) * 1000).toLocaleString() : '查询 ZCode 官方稳定版清单');
   };
-  const ids = ['s-poll', 's-jitter', 's-conc', 's-level', 's-ver', 's-http-version', 's-zcode-version-auto', 's-zcode-version-interval', 's-zcode-version-unit', 's-aliases', 's-retry', 's-http', 's-captcha-mode', 's-captcha-timeout', 's-captcha-ttl', 's-captcha-canvas', 's-captcha-node', 's-captcha-jsdom', 's-claim-runtime', 's-playwright-path', 's-browser-path', 's-proxy-enabled', 's-proxy-source', 's-proxy-urls', 's-proxy-subscription', 's-proxy-node', 's-proxy-mihomo', 's-proxy-refresh'];
-  const values = () => Object.fromEntries(ids.map(id => [id, $('#' + id).type === 'checkbox' ? $('#' + id).checked : $('#' + id).value]));
-  const apply = data => ids.forEach(id => { if (Object.hasOwn(data, id)) { const input = $('#' + id); if (input.type === 'checkbox') input.checked = !!data[id]; else input.value = data[id]; syncSelect(input); } });
+  const captchaFields = { mode: 's-captcha-mode', claim_runtime: 's-claim-runtime', playwright_path: 's-playwright-path', browser_path: 's-browser-path', timeout_ms: 's-captcha-timeout', simulate_canvas_webgl: 's-captcha-canvas', node_path: 's-captcha-node', jsdom_path: 's-captcha-jsdom', ticket_ttl_ms: 's-captcha-ttl' };
+  const ids = ['s-poll', 's-jitter', 's-conc', 's-level', 's-ver', 's-http-version', 's-zcode-version-auto', 's-zcode-version-interval', 's-zcode-version-unit', 's-aliases', 's-retry', 's-http', ...Object.values(captchaFields), 's-proxy-enabled', 's-proxy-source', 's-proxy-urls', 's-proxy-subscription', 's-proxy-node', 's-proxy-mihomo', 's-proxy-refresh'];
+  const fields = ids.map(id => $('#' + id));
+  const values = () => Object.fromEntries(fields.map(input => [input.id, input.type === 'checkbox' ? input.checked : input.value]));
+  const apply = data => fields.forEach(input => { if (Object.hasOwn(data, input.id)) { if (input.type === 'checkbox') input.checked = !!data[input.id]; else input.value = data[input.id]; syncSelect(input); } });
+  const captchaValues = data => Object.fromEntries(Object.entries(captchaFields).map(([key, id]) => {
+    let value = data[id];
+    if (key.endsWith('_path')) value = value.trim() || (key === 'node_path' ? 'node' : '');
+    else if (key.endsWith('_ms')) value = Number(value);
+    return [key, value];
+  }));
   let fingerprint = JSON.stringify(values()), savedAt = '';
   const draftKey = 'z2a_settings_draft';
   const updateDirty = () => {
@@ -1475,7 +1476,7 @@ async function pageSettings(main) {
           draft['s-http-version'] = String(oldHttp.client_version); delete oldHttp.client_version; draft['s-http'] = JSON.stringify(oldHttp, null, 2);
         }
         if (oldHttp?.captcha) {
-          for (const [field, id] of Object.entries({ mode: 's-captcha-mode', claim_runtime: 's-claim-runtime', playwright_path: 's-playwright-path', browser_path: 's-browser-path', timeout_ms: 's-captcha-timeout', simulate_canvas_webgl: 's-captcha-canvas', node_path: 's-captcha-node', jsdom_path: 's-captcha-jsdom', ticket_ttl_ms: 's-captcha-ttl' })) {
+          for (const [field, id] of Object.entries(captchaFields)) {
             if (Object.hasOwn(oldHttp.captcha, field) && !Object.hasOwn(draft, id)) draft[id] = oldHttp.captcha[field];
           }
           delete oldHttp.captcha; draft['s-http'] = JSON.stringify(oldHttp, null, 2);
@@ -1504,7 +1505,8 @@ async function pageSettings(main) {
   const runtimeFields = { node: $('#s-node-status'), jsdom: $('#s-jsdom-status'), playwright: $('#s-playwright-status'), browser: $('#s-browser-status') };
   const browserInstall = $('#s-browser-install');
   const claimBrowserStatus = $('#s-claim-browser-status');
-  const captchaRuntimePaths = () => ({ node_path: $('#s-captcha-node').value.trim() || 'node', jsdom_path: $('#s-captcha-jsdom').value.trim(), playwright_path: $('#s-playwright-path').value.trim(), browser_path: $('#s-browser-path').value.trim() });
+  const captchaPathIDs = Object.entries(captchaFields).filter(([key]) => key.endsWith('_path')).map(([, id]) => id);
+  const captchaRuntimePaths = () => Object.fromEntries(Object.entries(captchaValues(values())).filter(([key]) => key.endsWith('_path')));
   let captchaRuntimeRequest = 0, captchaRuntimeTimer, browserInstalling = false, lastRuntime = null;
   const runtimePending = () => {
     browserInstall.disabled = true; lastRuntime = null;
@@ -1636,7 +1638,7 @@ async function pageSettings(main) {
       clearTimeout(mihomoTimer); mihomoRequest++;
       if (!mihomoInstalling) { mihomoButton.disabled = true; mihomoNote.textContent = '正在检测 Mihomo 是否存在…'; mihomoTimer = setTimeout(checkMihomo, 250); }
     }
-    if (['s-captcha-node', 's-captcha-jsdom', 's-playwright-path', 's-browser-path'].includes(e.target.id)) {
+    if (captchaPathIDs.includes(e.target.id)) {
       clearTimeout(captchaRuntimeTimer); captchaRuntimeRequest++; runtimePending(); captchaRuntimeTimer = setTimeout(checkCaptchaRuntime, 250);
     }
     validateJSON(); syncNetworkFields(); updateDirty(); if (e.target.id.startsWith('s-proxy-')) $('#s-proxy-result').classList.add('hidden');
@@ -1644,7 +1646,7 @@ async function pageSettings(main) {
   form.addEventListener('change', e => { if (ids.includes(e.target.id)) {
     if (e.target.id === 's-proxy-source') { resetProxyNodeSelection(); $('#s-proxy-result').classList.add('hidden'); if ($('#s-proxy-source').value === 'subscription') void checkMihomo(); }
     if (e.target.id === 's-proxy-mihomo') void checkMihomo();
-    if (['s-captcha-node', 's-captcha-jsdom', 's-playwright-path', 's-browser-path', 's-claim-runtime'].includes(e.target.id)) void checkCaptchaRuntime();
+    if (captchaPathIDs.includes(e.target.id) || e.target.id === captchaFields.claim_runtime) void checkCaptchaRuntime();
     syncNetworkFields(); updateDirty();
   } });
   $('#s-mihomo-install').addEventListener('click', async () => {
@@ -1706,7 +1708,7 @@ async function pageSettings(main) {
       const response = await api('/api/settings', { method: 'PUT', body: {
         poll_interval_sec: Number(submitted['s-poll']), poll_jitter_sec: Number(submitted['s-jitter']), poll_concurrency: Number(submitted['s-conc']),
         default_reasoning_level: submitted['s-level'], app_version: submitted['s-ver'], zcode_version_auto_update: submitted['s-zcode-version-auto'], zcode_version_check_interval_sec: Math.round(Number(submitted['s-zcode-version-interval']) * Number(submitted['s-zcode-version-unit'])),
-        inference_driver: 'http', http: { ...JSON.parse(submitted['s-http']), client_version: submitted['s-http-version'], captcha: { mode: submitted['s-captcha-mode'], claim_runtime: submitted['s-claim-runtime'], playwright_path: submitted['s-playwright-path'].trim(), browser_path: submitted['s-browser-path'].trim(), node_path: submitted['s-captcha-node'].trim() || 'node', jsdom_path: submitted['s-captcha-jsdom'].trim(), simulate_canvas_webgl: submitted['s-captcha-canvas'], timeout_ms: Number(submitted['s-captcha-timeout']), ticket_ttl_ms: Number(submitted['s-captcha-ttl']) } }, outbound_proxy: outboundValues(submitted), aliases: JSON.parse(submitted['s-aliases']), retry: JSON.parse(submitted['s-retry']),
+        inference_driver: 'http', http: { ...JSON.parse(submitted['s-http']), client_version: submitted['s-http-version'], captcha: captchaValues(submitted) }, outbound_proxy: outboundValues(submitted), aliases: JSON.parse(submitted['s-aliases']), retry: JSON.parse(submitted['s-retry']),
       } });
       if (response.ok === false) throw new Error(response.error || '保存失败');
       s.zcode_version_auto_update = submitted['s-zcode-version-auto'];
@@ -1747,9 +1749,9 @@ async function boot() {
     if (!period || Date.now() - lastRefreshAt < period) return;
     const main = $('#main');
     if (document.querySelector('.modal-bg') || main.dataset.loading === '1' || openSelect) return;
-    if (currentPage === 'accounts' && (main.contains(document.activeElement) || main.querySelector('details[open]') || openSelect)) return;
+    if (currentPage === 'accounts' && (main.contains(document.activeElement) || main.querySelector('details[open]'))) return;
     if (currentPage === 'dashboard' && (main.querySelector('.dashboard-chart:hover') || main.contains(document.activeElement) || activeHint)) return;
-    if (currentPage === 'logs' && (!Z2ALogs.canAutoRefresh(main) || openSelect || activeHint)) return;
+    if (currentPage === 'logs' && (!Z2ALogs.canAutoRefresh(main) || activeHint)) return;
     render({ swap: true, live: currentPage === 'logs' }).catch(() => {});
   }, 1000);
 }

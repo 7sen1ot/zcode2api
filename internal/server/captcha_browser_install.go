@@ -37,10 +37,8 @@ func (a *App) installClaimBrowser(parent context.Context, options M, downloadBro
 		return nil, fmt.Errorf("浏览器运行时正在安装")
 	}
 	defer a.claimBrowser.installMu.Unlock()
-	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	ctx, cancel := a.operationContext(parent, 10*time.Minute)
 	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
 	status := a.captchaRuntimeStatus(ctx, options)
 	if !truth(obj(status["node"])["available"]) {
 		return nil, fmt.Errorf("请先配置可用的 Node.js 18 或以上版本")

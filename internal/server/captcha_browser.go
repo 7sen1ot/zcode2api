@@ -108,8 +108,7 @@ func (a *App) browserHelper() (string, error) {
 	return a.writeCaptchaRuntime("captcha_browser.cjs", captchaBrowserRuntime)
 }
 
-// Each worker's slot serializes its requests and replies. Separate workers
-// never share a process, reply channel, SDK instance or browser profile.
+// Worker slots serialize requests; each worker has its own process, SDK and browser profile.
 func (a *App) runBrowserCaptcha(ctx context.Context, options, parameters M) (result M, err error) {
 	manager := a.claimBrowserForContext(ctx)
 	manager.mu.Lock()
@@ -285,19 +284,14 @@ func (a *App) stopClaimBrowserLocked(manager *claimBrowserManager) {
 }
 
 func (a *App) closeClaimBrowser() {
-	a.claimBrowser.mu.Lock()
-	a.claimBrowser.window = time.Time{}
-	a.stopClaimBrowserLocked(&a.claimBrowser)
-	a.claimBrowser.mu.Unlock()
+	managers := []*claimBrowserManager{&a.claimBrowser}
 	for i := range a.manualClaimBrowsers {
-		manager := &a.manualClaimBrowsers[i]
-		manager.mu.Lock()
-		manager.window = time.Time{}
-		a.stopClaimBrowserLocked(manager)
-		manager.mu.Unlock()
+		managers = append(managers, &a.manualClaimBrowsers[i])
 	}
 	for i := range a.scheduledClaimBrowsers {
-		manager := &a.scheduledClaimBrowsers[i]
+		managers = append(managers, &a.scheduledClaimBrowsers[i])
+	}
+	for _, manager := range managers {
 		manager.mu.Lock()
 		manager.window = time.Time{}
 		a.stopClaimBrowserLocked(manager)

@@ -16,18 +16,6 @@ type claimCaptchaSession struct {
 	release                  func()
 }
 
-func validClaimCaptchaSessionID(value string) bool {
-	if len(value) != 64 {
-		return false
-	}
-	for _, character := range value {
-		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return false
-		}
-	}
-	return true
-}
-
 func claimCaptchaSessionInvalid() *Failure {
 	return &Failure{Kind: "risk", Code: "captcha_session_invalid", Message: "领取验证会话已失效或与当前账号、计划不匹配，请重新验证"}
 }
@@ -67,7 +55,7 @@ func (a *App) newClaimCaptchaSession(ctx context.Context, scope captchaTicketSco
 }
 
 func (a *App) cancelClaimVerification(token string) {
-	if !validClaimCaptchaSessionID(token) {
+	if !hexIDPattern.MatchString(token) {
 		return
 	}
 	key := hash(token)

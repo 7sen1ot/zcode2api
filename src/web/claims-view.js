@@ -113,8 +113,7 @@ async function requestClaimCaptcha(config, label, { isActive = () => true, refre
       try { instance?.destroy?.(); } catch { }
       instance = null;
       mount.replaceChildren();
-      // Replacing the trigger also removes listeners belonging to an old SDK
-      // instance, so retrying initialization cannot submit twice.
+      // Replacing the trigger removes old SDK listeners, preventing duplicate submissions.
       const button = startButton.cloneNode(false);
       startButton.replaceWith(button);
       startButton = button;
@@ -280,8 +279,7 @@ function normalizeDailyTime(value, fallback) {
 function formatTimeDraft(digits) {
   return digits.length <= 2 ? digits : `${digits.slice(0, 2)}:${digits.slice(2)}`;
 }
-// Editable HH:MM field with a lightweight dropdown picker, replacing the native
-// time input whose segmented editor and wheel popup behave inconsistently.
+// A custom HH:MM picker avoids platform differences in native time inputs.
 function setupTimeField(main, hooks) {
   const field = $('#claims-time-field', main);
   const input = $('#claims-time', main);
@@ -421,9 +419,9 @@ async function pageClaims(main) {
   }
   function paint() {
     const ready = previews.filter(preview => claimablePlans(preview).length);
-    const pages = Math.max(1, Math.ceil(ready.length / pageSize));
-    page = Math.min(page, pages);
-    content.innerHTML = ready.length ? ready.slice((page - 1) * pageSize, page * pageSize).map(preview => claimAccountMarkup(preview, accountFor(preview.account_id))).join('') : '<div class="daily-claim-empty">' + icon('gift', 28) + '<p>暂无可领取的每日免费卡</p></div>';
+    const pagination = UI.paginate(ready, page, pageSize), { items, pages } = pagination;
+    page = pagination.page;
+    content.innerHTML = items.length ? items.map(preview => claimAccountMarkup(preview, accountFor(preview.account_id))).join('') : '<div class="daily-claim-empty">' + icon('gift', 28) + '<p>暂无可领取的每日免费卡</p></div>';
     const failures = previews.filter(preview => preview.error);
     const notices = [];
     if (failures.length) notices.push(`<span>${failures.length} 个账号查询失败</span>${infoTip(failures.map(preview => `${accountFor(preview.account_id).platform_name || '账号'}：${preview.error}`).join('\n'), '账号查询失败')}`);

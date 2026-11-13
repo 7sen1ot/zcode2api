@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-var proxyNodeIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
-
 func proxyDefaults() M {
 	return M{"enabled": false, "rotation_enabled": false, "rotation_interval_sec": 0, "source": "manual", "urls": []any{}, "subscription_url": "", "subscription_filter": "", "preferred_node": "", "mihomo_path": "mihomo", "refresh_interval_sec": 3600}
 }
@@ -65,7 +63,7 @@ func validateOutboundProxyFields(value any) error {
 			}
 		case "preferred_node":
 			identity, ok := value.(string)
-			if !ok || identity != "" && !proxyNodeIDPattern.MatchString(identity) {
+			if !ok || identity != "" && !hexIDPattern.MatchString(identity) {
 				return fmt.Errorf("指定代理节点标识无效，请重新选择")
 			}
 		case "mihomo_path":
@@ -237,9 +235,7 @@ func (a *App) pinOutboundProxy(parent context.Context, account M) (context.Conte
 	return a.pinOutboundProxyMode(parent, account, false)
 }
 
-// pinClaimOutboundProxy rotates to the next pool exit per claim so each card is
-// issued from a different IP while the whole claim (scene, SDK ticket, POST)
-// stays pinned to one exit for ticket binding.
+// Rotate per claim, keeping scene lookup, SDK verification and submission on the same exit.
 func (a *App) pinClaimOutboundProxy(parent context.Context, account M) (context.Context, func(), error) {
 	return a.pinOutboundProxyMode(parent, account, true)
 }
@@ -248,16 +244,14 @@ func (a *App) pinOutboundProxyMode(parent context.Context, account M, rotatePerC
 	if _, present := parent.Value(proxyContextKey{}).(proxyRoute); present {
 		return parent, func() {}, nil
 	}
-	ctx, cancel := context.WithCancel(parent)
-	stop := context.AfterFunc(a.ctx, cancel)
-	cleanup := func() { stop(); cancel() }
+	ctx, cleanup := a.operationContext(parent, 0)
 	address := str(account["proxy_url"])
 	if address != "" {
 		if !validProxy(address) {
 			cleanup()
 			return parent, func() {}, proxyFailure("proxy_config_invalid", "账号代理地址无效")
 		}
-		return context.WithValue(ctx, proxyContextKey{}, proxyRoute{address}), cleanup, nil
+		return pinnedProxyContext(ctx, address), cleanup, nil
 	}
 	options := obj(a.configValue("outbound_proxy"))
 	if err := validateOutboundProxy(options); err != nil {
@@ -266,7 +260,7 @@ func (a *App) pinOutboundProxyMode(parent context.Context, account M, rotatePerC
 	}
 	options = merge(proxyDefaults(), options)
 	if !truth(options["enabled"]) {
-		return context.WithValue(ctx, proxyContextKey{}, proxyRoute{}), cleanup, nil
+		return pinnedProxyContext(ctx, ""), cleanup, nil
 	}
 	var endpoints []proxyEndpoint
 	var runtime *managedProxyRuntime
@@ -308,7 +302,7 @@ func (a *App) pinOutboundProxyMode(parent context.Context, account M, rotatePerC
 		return parent, func() {}, proxyFailure("proxy_pool_exhausted", "无可用代理节点，请检查代理配置")
 	}
 	ctx = context.WithValue(ctx, proxySelectionKey{}, proxySelection{generation, endpoints[index].identity()})
-	return context.WithValue(ctx, proxyContextKey{}, proxyRoute{endpoints[index].URL}), release, nil
+	return pinnedProxyContext(ctx, endpoints[index].URL), release, nil
 }
 
 func (manager *outboundProxyManager) selectEndpoint(options M, endpoints []proxyEndpoint) (int, uint64) {
@@ -390,23 +384,11 @@ func (a *App) markProxyRoute(ctx context.Context, blocked bool, retryAfter time.
 	now := time.Now()
 	reason := "代理连接失败"
 	if blocked {
-		// Escalate repeated blocks without shortening upstream Retry-After.
 		reason = "上游安全网关拦截"
-		base := max(10*time.Minute, retryAfter)
-		previous := a.proxies.blocked[selection.identity]
-		if previous.After(now) {
-			base = max(retryAfter, min(2*time.Hour, max(base, previous.Sub(now)*2)))
-		}
-		a.proxies.blocked[selection.identity] = maxTime(previous, now.Add(base))
+		a.proxies.blocked[selection.identity] = proxyCooldownUntil(a.proxies.blocked[selection.identity], now, 10*time.Minute, 2*time.Hour, retryAfter)
 	} else {
-		// Connection failures also escalate (30s -> 1m -> 2m, capped at 5m).
-		base := max(30*time.Second, retryAfter)
-		previous := a.proxies.retryAt[selection.identity]
-		if previous.After(now) {
-			base = max(retryAfter, min(5*time.Minute, max(base, previous.Sub(now)*2)))
-		}
 		a.proxies.unavailable[selection.identity] = true
-		a.proxies.retryAt[selection.identity] = maxTime(previous, now.Add(base))
+		a.proxies.retryAt[selection.identity] = proxyCooldownUntil(a.proxies.retryAt[selection.identity], now, 30*time.Second, 5*time.Minute, retryAfter)
 	}
 	a.persistProxyStateLocked()
 	previous := a.proxies.selected
@@ -428,6 +410,15 @@ func (a *App) markProxyRoute(ctx context.Context, blocked bool, retryAfter time.
 	return index >= 0
 }
 
+// Escalate repeated failures without shortening an existing cooldown or Retry-After.
+func proxyCooldownUntil(previous, now time.Time, minimum, maximum, retryAfter time.Duration) time.Time {
+	delay := max(minimum, retryAfter)
+	if previous.After(now) {
+		delay = max(retryAfter, min(maximum, max(delay, previous.Sub(now)*2)))
+	}
+	return maxTime(previous, now.Add(delay))
+}
+
 // Account refusals, ticket and runtime failures do not identify a broken exit.
 func proxyExitFailure(failure *Failure) bool {
 	switch failure.Code {
@@ -437,9 +428,7 @@ func proxyExitFailure(failure *Failure) bool {
 	return false
 }
 
-// persistProxyStateLocked writes cooldowns to SQLite so a restart does not
-// forget WAF blocks and re-walk dead exits. Call with proxies.mu held; the
-// writes are serialized and joined by App.Close.
+// Persist cooldowns across restarts. Hold proxies.mu; App.Close joins these serialized writes.
 func (a *App) persistProxyStateLocked() {
 	if a.proxies.persistQueued {
 		return
@@ -490,7 +479,6 @@ func (a *App) writeProxyStateLocked() error {
 	return tx.Commit()
 }
 
-// restoreProxyState reloads persisted cooldowns after startup.
 func (a *App) restoreProxyState() {
 	now := time.Now()
 	a.proxies.mu.Lock()

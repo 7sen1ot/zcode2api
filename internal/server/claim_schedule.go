@@ -13,7 +13,6 @@ var claimTimezone = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 const defaultDailyClaimTime = "19:02"
 
-// dailyClaimClock parses a "HH:MM" claim time, falling back to the default.
 func dailyClaimClock(value string) (int, int) {
 	hh, mm, found := strings.Cut(strings.TrimSpace(value), ":")
 	h, e1 := strconv.Atoi(hh)
@@ -88,7 +87,6 @@ func (a *App) dailyClaimSchedule() M {
 	return M{"enabled": enabled, "time": at, "timezone": "Asia/Shanghai", "next_run_at": next, "last_run": last, "browser_window": browserWindow, "next_retry_at": obj(last)["next_retry_at"], "retry_deadline": obj(last)["retry_deadline"], "pending": obj(last)["pending"], "pending_manual": obj(last)["pending_manual"], "failed": obj(last)["failed"]}
 }
 
-// rescheduleClaims wakes the worker after its time or enabled state changes.
 func (a *App) rescheduleClaims() {
 	a.mu.Lock()
 	cancel := a.claimScheduleCancel

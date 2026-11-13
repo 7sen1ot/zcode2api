@@ -167,10 +167,8 @@ func (a *App) testOutboundProxies(parent context.Context, options M) (M, error) 
 		return nil, err
 	}
 	options = merge(proxyDefaults(), options)
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	ctx, cancel := a.operationContext(parent, 45*time.Second)
 	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
 	endpoints := []proxyEndpoint{{URL: "", Name: "直连"}}
 	if truth(options["enabled"]) {
 		endpoints = nil

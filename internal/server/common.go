@@ -9,6 +9,7 @@ import (
 	"io"
 	"maps"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ import (
 
 type M = map[string]any
 
+var hexIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
 func wake(ch chan<- struct{}) {
 	select {
 	case ch <- struct{}{}:
@@ -27,8 +30,7 @@ func wake(ch chan<- struct{}) {
 	}
 }
 
-// Keep batch concurrency bounded even when the input contains many accounts.
-// Each callback handles cancellation according to its operation's semantics.
+// Callbacks handle cancellation; concurrency stays bounded regardless of count.
 func parallelFor(count, concurrency int, work func(int)) {
 	var next atomic.Int64
 	var workers sync.WaitGroup
@@ -178,6 +180,13 @@ func merge(a, b M) M {
 	maps.Copy(c, a)
 	maps.Copy(c, b)
 	return c
+}
+func copyFields(dst, src M, keys ...string) {
+	for _, key := range keys {
+		if value, present := src[key]; present {
+			dst[key] = value
+		}
+	}
 }
 func nowMS() int64         { return time.Now().UnixMilli() }
 func hash(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }

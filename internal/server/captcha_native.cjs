@@ -7,9 +7,8 @@ const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
 const { captchaExpression } = require('./captcha.cjs');
 
-// The SDK runs in an ordinary, service-owned browser without a debugging
-// connection. A private loopback channel carries only SDK commands/results;
-// account credentials and billing requests never enter this page.
+// A service-owned browser runs the SDK without a debugger. Its private loopback channel
+// carries SDK commands/results only; account credentials and billing requests stay in Go.
 class NativeClaimBrowser {
   constructor(executable) {
     this.executable = executable;
@@ -59,7 +58,7 @@ class NativeClaimBrowser {
             result = job.expression ? await (0, eval)(job.expression) : { ok: true };
             result = { ...window.__captchaProgress, ...result, runtime: 'native_browser', browser_version: navigator.userAgent.match(/(?:Chrome|Edg)\\/([0-9.]+)/)?.[1] || '', browser_visibility: document.visibilityState };
           } catch { result = { ok: false, code: 'captcha_runtime_error', stage: 'sdk_init' }; }
-          if ((!job.prepare && !job.warm) || !result.ok) window.__disposeCaptcha?.();
+          if (!job.warm || !result.ok) window.__disposeCaptcha?.();
           await fetch(root + '/result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: job.id, result }) });
         } catch { await new Promise(resolve => setTimeout(resolve, 500)); }
       }
@@ -118,7 +117,7 @@ class NativeClaimBrowser {
     clearTimeout(this.pollTimer);
     this.job.sent = true;
     response.setHeader('Content-Type', 'application/json');
-    response.end(JSON.stringify({ id: this.job.id, expression: this.job.expression, prepare: this.job.prepare, warm: this.job.warm }));
+    response.end(JSON.stringify({ id: this.job.id, expression: this.job.expression, warm: this.job.warm }));
   }
 
   finish(result) {
@@ -126,14 +125,11 @@ class NativeClaimBrowser {
     if (!job) return;
     this.job = null;
     clearTimeout(job.timer);
-    if (!job.warm || !result.ok) this.preparedKey = job.prepare && result.ok ? job.sessionKey : null;
-    job.resolve({ ...result, session_reused: job.reused });
+    job.resolve({ ...result, session_reused: false });
   }
 
   async run(config) {
-    // Warm the browser process, not the SDK instance. An instance initialized
-    // minutes before a claim can be rejected even though no ticket was minted.
-    // Each claim initializes and verifies its own fresh instance below.
+    // Native claims need a fresh SDK instance; only the browser process is warmed.
     if (config.action === 'prepare') return { ok: true, preparation_skipped: true, runtime: 'native_browser' };
     await this.open(config);
     if (this.job) return { ok: false, code: 'captcha_capacity_exceeded' };
@@ -141,19 +137,16 @@ class NativeClaimBrowser {
     return new Promise(resolve => {
       const job = this.job = {
         id: crypto.randomBytes(16).toString('hex'), resolve, sent: false,
-        prepare: config.action === 'prepare', warm: config.action === 'warm', sessionKey: config.session_key,
-        reused: !!this.preparedKey && this.preparedKey === config.session_key,
-        // A hidden native page needs time to finish the SDK's asynchronous
-        // device collection before verification, including between accounts.
+        warm: config.action === 'warm',
+        // Hidden pages need time for asynchronous device collection before verification.
         expression: config.action === 'warm' ? '' : captchaExpression(config, 7000),
       };
       job.timer = setTimeout(async () => {
         if (this.job !== job) return;
         this.job = null;
-        // Finish closing before accepting another job on the same profile.
-        // This also cancels late SDK callbacks and pending tickets.
+        // Cancel late SDK callbacks before accepting another job on this profile.
         await this.close();
-        resolve({ ok: false, code: 'captcha_timeout', runtime: 'native_browser', session_reused: job.reused });
+        resolve({ ok: false, code: 'captcha_timeout', runtime: 'native_browser', session_reused: false });
       }, timeout);
       this.dispatch();
     });
@@ -161,7 +154,6 @@ class NativeClaimBrowser {
 
   async close() {
     this.finish({ ok: false, code: 'captcha_canceled' });
-    this.preparedKey = null;
     clearTimeout(this.pollTimer);
     this.poll?.end(); this.poll = null;
     this.server?.closeAllConnections(); this.server?.close(); this.server = null;

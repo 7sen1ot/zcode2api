@@ -12,8 +12,7 @@ function executable(file) {
 
 function playwright(config) {
   const names = ['playwright-core', 'playwright'];
-  // An explicit location is authoritative. Never silently replace a broken
-  // configured driver with a different version from another installation.
+  // An explicit driver path must not fall back to another installation.
   const roots = config.playwright_path ? [path.resolve(config.root, config.playwright_path)] : [
     config.driver_path, config.root, path.join(config.root, 'captcha_node'), path.dirname(process.execPath),
     ...require('node:module').globalPaths,
@@ -101,8 +100,7 @@ async function verify(browser, sessions, config) {
   const deadline = Date.now() + timeout;
   const origin = new URL(config.origin).origin;
   if (!origin.startsWith('https://')) return { ok: false, code: 'captcha_origin_invalid' };
-  // This key is supplied by Go and binds credentials, purpose, scene and exit.
-  // Never share a page or SDK instance between different accounts or routes.
+  // Go binds this page's key to credentials, purpose, scene and exit.
   const key = /^[a-f0-9]{64}$/.test(config.session_key || '') ? config.session_key : '';
   const identity = JSON.stringify([origin, config.proxy_url || '', config.scene_id, config.region, config.prefix]);
   const options = { serviceWorkers: 'block', storageState: config.state?.browserStorage };
@@ -122,8 +120,7 @@ async function verify(browser, sessions, config) {
       const context = await browser.newContext(options);
       session = { context, identity, lastUsed: Date.now(), resourceStatus: 0, retryAfter: '', networkFailed: false };
       if (key) sessions.set(key, session);
-      // Browser pages only prepare verification. The Go claim path remains the
-      // sole owner of the billing mutation and its one-use ticket handling.
+      // Only Go may submit claims and consume tickets; browser pages handle verification.
       await context.route(/\/api\/v1\/zcode-plan\/billing\/claim(?:[?#]|$)/, route => route.abort('blockedbyclient'));
       session.page = await context.newPage();
       session.page.on('response', response => {
@@ -170,8 +167,7 @@ async function verify(browser, sessions, config) {
     const storage = await context.storageState();
     const state = Buffer.byteLength(JSON.stringify(storage)) <= (16 << 10) ? { browserStorage: storage } : undefined;
     const { resourceStatus, retryAfter, networkFailed } = session;
-    // Abort a timed-out initialization as well as its late callbacks before
-    // another request can initialize a second SDK instance on the same page.
+    // Cancel late callbacks before another request can initialize an SDK on this page.
     if (result.code === 'captcha_timeout') await closeSession(sessions, key);
     if (!result.ok && ['captcha_sdk_error', 'captcha_timeout'].includes(result.code)) {
       if (resourceStatus) return { ...progress, ok: false, code: resourceStatus === 407 ? 'proxy_auth_failed' : 'captcha_resource_http_error', status: resourceStatus, retry_after: retryAfter, state };
@@ -183,8 +179,7 @@ async function verify(browser, sessions, config) {
     return { ok: false, code: session?.resourceStatus === 407 ? 'proxy_auth_failed' : session?.networkFailed ? 'captcha_network_error' : error?.name === 'TimeoutError' ? 'captcha_timeout' : 'captcha_runtime_error', stage: 'browser_context', runtime: 'browser' };
   } finally {
     clearTimeout(timer);
-    // Prepared instances stay alive. Finished instances are disposed so a
-    // second card always gets a fresh ticket while retaining the same page.
+    // Keep prepared instances; dispose finished ones so each card gets a fresh ticket.
     if (!keepPrepared) await session?.page?.evaluate(() => window.__disposeCaptcha?.()).catch(() => {});
     if (!key) await session?.context.close().catch(() => {});
   }

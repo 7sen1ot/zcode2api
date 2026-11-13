@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// Aliyun rejects a V3 verification parameter submitted more than 90 seconds
-// after the traceless check (F019), which caps any prefetch window.
+// Aliyun rejects V3 tickets over 90 seconds old (F019).
 const (
 	maxCaptchaTicketTTL = 90 * time.Second
 	// Leave time for the business request to reach the verifier.
@@ -62,9 +61,7 @@ func (a *App) releaseCaptchaSlot() {
 	a.captcha.mu.Unlock()
 }
 
-// Retain the existing subscription runtime rather than selecting a new exit.
-// Otherwise a settings/subscription refresh can stop its local proxy while a
-// background verification is still using it.
+// Retain the current runtime so subscription refreshes cannot stop a proxy still in use.
 func (a *App) retainCaptchaProxy(proxyURL string) (func(), bool) {
 	a.proxies.mu.Lock()
 	defer a.proxies.mu.Unlock()
@@ -85,14 +82,12 @@ func (a *App) retainCaptchaProxy(proxyURL string) (func(), bool) {
 	return func() {}, true
 }
 
-// pinnedProxyContext fixes a context to one recorded exit, mirroring what the
-// original request pinned, so background work cannot drift to another proxy.
+// Background work must use the original request's exit.
 func pinnedProxyContext(parent context.Context, proxyURL string) context.Context {
 	return context.WithValue(parent, proxyContextKey{}, proxyRoute{URL: proxyURL})
 }
 
-// captchaTicketTTL returns the prefetch window; an explicit 0 disables the
-// ticket pool, an absent setting keeps the default.
+// An explicit 0 disables prefetch; an absent setting keeps the default.
 func captchaTicketTTL(options M) time.Duration {
 	raw, present := options["ticket_ttl_ms"]
 	if !present {
@@ -102,11 +97,7 @@ func captchaTicketTTL(options M) time.Duration {
 	if value <= 0 {
 		return 0
 	}
-	ttl := time.Duration(value) * time.Millisecond
-	if ttl < 30*time.Second {
-		ttl = 30 * time.Second
-	}
-	return min(ttl, maxCaptchaTicketTTL)
+	return min(max(time.Duration(value)*time.Millisecond, 30*time.Second), maxCaptchaTicketTTL)
 }
 
 const (
@@ -332,9 +323,7 @@ func (a *App) captchaPrefetchBlocked(scope captchaTicketScope) bool {
 
 func (a *App) scheduleTicketRenewal(pool *captchaTicketPool, proxyURL string) {
 	options := obj(a.configValue("http", "captcha"))
-	// Claim workers mint tickets on demand. Background renewal would bypass
-	// their concurrency bound and race a new manual claim for the same account.
-	// Inference keeps its existing prefetch and foreground-priority queue.
+	// Claims mint on demand: prefetch would bypass worker limits and race another claim.
 	if pool.scope.purpose != captchaPurposeInference {
 		return
 	}

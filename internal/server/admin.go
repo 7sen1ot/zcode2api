@@ -114,11 +114,9 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 	case "GET /api/accounts":
 		return arr(a.summary(ctx)["accounts"]), 200, nil
 	case "POST /api/accounts/import-local":
-		v, e := a.importLocal(ctx, b)
-		return wrap(v, e)
+		return wrap(a.importLocal(ctx, b))
 	case "POST /api/accounts/import-cookie":
-		v, e := a.importCookie(ctx, b, nil)
-		return wrap(v, e)
+		return wrap(a.importCookie(ctx, b, nil))
 	case "POST /api/accounts/export":
 		return a.exportAccounts(b)
 	case "POST /api/accounts/import":
@@ -134,8 +132,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 				return adminError(400, "账号不存在或授权平台不匹配")
 			}
 		}
-		v, e := a.startOAuth(ctx, provider, str(b["account_id"]), true)
-		return wrap(v, e)
+		return wrap(a.startOAuth(ctx, provider, str(b["account_id"]), true))
 	case "GET /api/accounts/oauth/pending":
 		return a.pendingFlows(), 200, nil
 	case "GET /api/accounts/oauth/watch":
@@ -219,8 +216,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		}
 		return wrap(v, e)
 	case "POST /api/claims/auto-run":
-		v, e := a.autoClaim(ctx, truth(b["dry_run"]))
-		return wrap(v, e)
+		return wrap(a.autoClaim(ctx, truth(b["dry_run"])))
 	case "GET /api/claims/history":
 		return a.rows("SELECT c.*,a.label account_label FROM claim_log c LEFT JOIN accounts a ON a.id=c.account_id ORDER BY c.ts DESC LIMIT ?", limitQuery(r, 100, 500)), 200, nil
 	case "GET /api/usage/stats":
@@ -256,8 +252,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		if !truth(b["name"]) {
 			return adminError(400, "缺少 name")
 		}
-		v, e := a.createKey(b)
-		return wrap(v, e)
+		return wrap(a.createKey(b))
 	case "GET /api/groups":
 		return a.groups(), 200, nil
 	case "POST /api/groups":
@@ -481,11 +476,7 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 				return ok, 200, nil
 			case "PATCH":
 				fields := M{}
-				for _, k := range []string{"label", "group_id", "proxy_url"} {
-					if v, exists := b[k]; exists {
-						fields[k] = v
-					}
-				}
+				copyFields(fields, b, "label", "group_id", "proxy_url")
 				if v, exists := fields["label"]; exists {
 					s := []rune(str(v))
 					fields["label"] = string(s[:min(len(s), 60)])
@@ -509,14 +500,11 @@ func (a *App) adminRoute(r *http.Request, b M) (any, int, error) {
 		if len(parts) == 2 && method == "POST" {
 			switch parts[1] {
 			case "verify":
-				v, e := a.verify(ctx, account)
-				return wrap(v, e)
+				return wrap(a.verify(ctx, account))
 			case "reauth":
-				v, e := a.startOAuth(ctx, str(account["family"]), id, true)
-				return wrap(v, e)
+				return wrap(a.startOAuth(ctx, str(account["family"]), id, true))
 			case "refresh-cookie":
-				v, e := a.importCookie(ctx, b, account)
-				return wrap(v, e)
+				return wrap(a.importCookie(ctx, b, account))
 			}
 		}
 	}
@@ -636,6 +624,14 @@ func validateSettings(b M) error {
 	}
 	return nil
 }
+func percentiles(values []float64) M {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Float64s(values)
+	return M{"p50": values[len(values)/2], "p95": values[min(len(values)-1, int(float64(len(values))*0.95))]}
+}
+
 func (a *App) usageStats(r *http.Request) M {
 	hours := num(r.URL.Query().Get("hours"))
 	if hours <= 0 {
@@ -654,11 +650,7 @@ func (a *App) usageStats(r *http.Request) M {
 	for _, v := range a.rows("SELECT ttft_ms FROM usage_log WHERE ts>=? AND status='success' AND ttft_ms IS NOT NULL", since) {
 		ttfts = append(ttfts, num(obj(v)["ttft_ms"]))
 	}
-	sort.Float64s(ttfts)
-	var ttft any
-	if len(ttfts) > 0 {
-		ttft = M{"p50": ttfts[len(ttfts)/2], "p95": ttfts[min(len(ttfts)-1, int(float64(len(ttfts))*0.95))]}
-	}
+	ttft := percentiles(ttfts)
 	return M{"hours": hours, "time_unit": unit, "range_start": since, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": byHour, "byModel": a.rows("SELECT model,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok FROM usage_log WHERE ts>=? GROUP BY model ORDER BY reqs DESC", since), "byKey": a.rows("SELECT k.name,u.key_id,COUNT(*) reqs,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id WHERE u.ts>=? GROUP BY u.key_id ORDER BY reqs DESC", since), "byAccount": a.rows("SELECT a.label,u.account_id,COUNT(*) reqs,SUM(CASE WHEN u.status='success' THEN 1 ELSE 0 END) ok,SUM(CASE WHEN u.status='busy' THEN 1 ELSE 0 END) busy,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN accounts a ON a.id=u.account_id WHERE u.ts>=? GROUP BY u.account_id ORDER BY reqs DESC", since), "byStatus": a.rows("SELECT status,COUNT(*) n FROM usage_log WHERE ts>=? GROUP BY status", since), "ttft": ttft}
 }
 func (a *App) performance(limit int) M {
@@ -676,14 +668,13 @@ func (a *App) performance(limit int) M {
 				xs = append(xs, num(m[stage]))
 			}
 		}
-		sort.Float64s(xs)
-		m := M{"samples": len(xs), "avg": nil, "p50": nil, "p95": nil}
+		m := merge(M{"samples": len(xs), "avg": nil, "p50": nil, "p95": nil}, percentiles(xs))
 		if len(xs) > 0 {
 			sum := float64(0)
 			for _, v := range xs {
 				sum += v
 			}
-			m["avg"], m["p50"], m["p95"] = int(sum/float64(len(xs))+0.5), xs[len(xs)/2], xs[min(len(xs)-1, int(float64(len(xs))*0.95))]
+			m["avg"] = int(sum/float64(len(xs)) + 0.5)
 		}
 		metrics[stage] = m
 	}

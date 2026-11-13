@@ -60,10 +60,8 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options M) M {
 		return result
 	}
 	node["installed"], node["path"], node["message"] = true, binary, "Node.js 无法运行"
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	ctx, cancel := a.operationContext(parent, 5*time.Second)
 	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
 	helper, err := a.browserHelper()
 	if err != nil {
 		node["message"] = "无法准备运行时检测脚本"

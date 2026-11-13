@@ -17,8 +17,6 @@ func (a *App) claimVerification(ctx context.Context, id, plan string) (M, error)
 	if account == nil {
 		return nil, fmt.Errorf("账号不存在")
 	}
-	// Rotate to the next pool exit per claim so each card is issued from a
-	// different IP; the session pins every later request of this claim to it.
 	ctx, release, err := a.pinClaimOutboundProxy(ctx, account)
 	if err != nil {
 		return nil, err
@@ -71,7 +69,7 @@ func validateClaimVerification(value M) error {
 	if !ok || !validCaptchaParam(ticket) || (region != "cn" && region != "sgp") {
 		return fmt.Errorf("领取验证票据或地域无效，请重新完成安全验证")
 	}
-	if token, ok := session.(string); !ok || !validClaimCaptchaSessionID(token) {
+	if token, ok := session.(string); !ok || !hexIDPattern.MatchString(token) {
 		return fmt.Errorf("领取验证票据缺少有效会话，请重新完成安全验证")
 	}
 	return nil

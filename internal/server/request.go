@@ -265,11 +265,7 @@ func buildRequest(body M, protocol, model, level string, catalog *toolCatalog, i
 			return nil, e
 		}
 		request = M{"messages": conversationMessages(messages), "max_tokens": first(body["max_completion_tokens"], body["max_tokens"], body["max_output_tokens"], 128000)}
-		for _, k := range []string{"temperature", "top_p", "top_k", "metadata", "thinking"} {
-			if v, ok := body[k]; ok {
-				request[k] = v
-			}
-		}
+		copyFields(request, body, "temperature", "top_p", "top_k", "metadata", "thinking")
 		if stop, ok := body["stop"]; ok {
 			if s, ok := stop.(string); ok {
 				stop = []any{s}

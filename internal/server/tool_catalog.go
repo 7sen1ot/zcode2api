@@ -33,10 +33,7 @@ func upstreamToolName(namespace, name string) string {
 	}
 	// Keep the mapping stable across requests, including history without definitions.
 	value := "ns_" + hash(namespace + "\x00" + name)[:16] + "_" + name
-	if len(value) > 128 {
-		value = value[:128]
-	}
-	return value
+	return value[:min(len(value), 128)]
 }
 
 func newToolCatalog(ctx context.Context, root string, value any, protocol string) (*toolCatalog, error) {

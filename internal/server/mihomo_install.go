@@ -82,10 +82,8 @@ func (a *App) installMihomo(parent context.Context) (M, error) {
 		return nil, fmt.Errorf("Mihomo 正在安装，请稍后检查安装状态")
 	}
 	defer a.mihomoInstallMu.Unlock()
-	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
+	ctx, cancel := a.operationContext(parent, 3*time.Minute)
 	defer cancel()
-	stop := context.AfterFunc(a.ctx, cancel)
-	defer stop()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()
