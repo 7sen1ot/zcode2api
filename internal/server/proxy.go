@@ -507,7 +507,7 @@ type proxyDialError struct{ error }
 func (e *proxyDialError) Unwrap() error { return e.error }
 
 func transportFailure(ctx context.Context, err error) *Failure {
-	f := &Failure{Kind: "network", Code: "network", Message: "上游连接失败", Retryable: true}
+	f := &Failure{Kind: "network", Code: "network", Message: "上游连接失败", Retryable: true, Detail: M{"message": boundedFailureText(err.Error())}}
 	address := selectedProxy(ctx)
 	if address == "" || ctx.Err() != nil {
 		return f

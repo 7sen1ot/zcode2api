@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
   status TEXT NOT NULL,
   error_code TEXT,
   error_message TEXT,
+  error_detail TEXT, -- 原始错误、上游响应与追踪信息 JSON
   ttft_ms INTEGER,
   total_ms INTEGER,
   tokens_in INTEGER, tokens_out INTEGER, tokens_reasoning INTEGER,

@@ -765,6 +765,12 @@ main[data-page="logs"] { gap: 18px; }
 .cache-detail-wide { grid-column: 1 / -1; }
 .cache-detail-wide dd { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 12px; font-weight: 400; }
 .cache-detail-error { margin: 18px 0 0; color: var(--destructive); font-size: 12px; overflow-wrap: anywhere; }
+.request-error-message, .request-error-response pre { margin: 10px 0 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--muted); font: 12px/1.65 ui-monospace, 'Cascadia Code', Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.request-error-response { margin-top: 16px; }
+.request-error-response summary { width: fit-content; cursor: pointer; color: var(--muted-fg); font-size: 12px; }
+.request-error-response summary:hover { color: var(--foreground); }
+.request-error-response summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 2px; }
+.request-error-response pre { max-height: 320px; overflow: auto; overscroll-behavior: contain; }
 .cache-breakdown { display: flex; height: 8px; overflow: hidden; border-radius: 8px; background: var(--muted); }
 .cache-breakdown > span { min-width: 1px; }
 .cache-breakdown .ordinary, .cache-breakdown-legend .ordinary { background: #9ca3af; }

@@ -55,6 +55,16 @@ func (a *App) invalidateBalance(id string) {
 	a.invalidateBalanceLocked(id)
 }
 
+func (a *App) markQuotaExhausted(id string) {
+	a.balances.applyMu.Lock()
+	defer a.balances.applyMu.Unlock()
+	// A balance query started before this refusal must not unblock the account.
+	a.invalidateBalanceLocked(id)
+	a.mu.Lock()
+	a.state(id).QuotaExhausted = true
+	a.mu.Unlock()
+}
+
 // The caller holds applyMu across any credential/status update as well, so an
 // earlier response cannot reactivate an account between the update and eviction.
 func (a *App) invalidateBalanceLocked(id string) {

@@ -65,6 +65,7 @@ type Event struct {
 }
 type Result struct {
 	Text, Reasoning, FinishReason, SessionID string
+	TraceID                                  string
 	Native, Usage                            M
 	Calls                                    []any
 	Attempts                                 int
@@ -154,15 +155,33 @@ func requestMetadataUserID(deviceMid, session string) string {
 
 func providerFailure(v M, status int, retry string) *Failure {
 	e := obj(v["error"])
-	return &Failure{Status: status, Code: str(first(e["code"], v["code"], e["type"], "upstream_http_error")), Message: str(first(e["message"], v["msg"], v["message"], fmt.Sprintf("上游 HTTP %d", status))), RetryAfter: retryAfter(retry, time.Now())}
+	f := &Failure{Status: status, RetryAfter: retryAfter(retry, time.Now())}
+	for _, value := range []any{e["code"], v["code"], e["type"], "upstream_http_error"} {
+		if code := strings.TrimSpace(str(value)); code != "" {
+			f.Code = code
+			break
+		}
+	}
+	for _, value := range []any{e["message"], e["msg"], v["msg"], v["message"], fmt.Sprintf("上游 HTTP %d", status)} {
+		if message := strings.TrimSpace(str(value)); message != "" {
+			f.Message = message
+			break
+		}
+	}
+	f.Detail = failureDetail(f)
+	return f
 }
 
 func upstreamHTTPFailure(res *http.Response, body []byte) *Failure {
-	if res.StatusCode == http.StatusProxyAuthRequired {
-		return &Failure{Status: res.StatusCode, Kind: "network", Code: "proxy_auth_failed", Message: "代理鉴权失败", Retryable: true}
-	}
 	v := obj(parse(string(body), nil))
 	f := providerFailure(v, res.StatusCode, res.Header.Get("Retry-After"))
+	f.Detail["body"] = failureBody(string(body))
+	f.Detail["http_status"] = res.StatusCode
+	f.Detail["response_headers"] = failureResponseHeaders(res.Header)
+	if res.StatusCode == http.StatusProxyAuthRequired {
+		f.Kind, f.Code, f.Message, f.Retryable = "network", "proxy_auth_failed", "代理鉴权失败", true
+		return f
+	}
 	if len(v) > 0 {
 		return f
 	}
@@ -233,9 +252,31 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		}
 	}
 	committed := false
+	var res *http.Response
+	requestDetail := M{}
+	var requestSecrets []string
 	defer func() {
 		if failure == nil {
 			return
+		}
+		failure.Detail = failureDetail(failure)
+		for key, value := range requestDetail {
+			failure.Detail[key] = value
+		}
+		if res != nil {
+			failure.Detail["http_status"] = res.StatusCode
+			failure.Detail["response_headers"] = failureResponseHeaders(res.Header)
+		}
+		// Upstream errors occasionally echo a credential in free-form text.
+		for _, key := range []string{"message", "body"} {
+			if value, ok := failure.Detail[key].(string); ok {
+				for _, secret := range requestSecrets {
+					if secret != "" {
+						value = strings.ReplaceAll(value, secret, "[REDACTED]")
+					}
+				}
+				failure.Detail[key] = value
+			}
 		}
 		defer func() { failure.Message = conciseFailureMessage(failure) }()
 		failure.Committed = committed
@@ -282,7 +323,6 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	if e != nil {
 		return nil, &Failure{Kind: "invalid", Message: e.Error()}
 	}
-	var res *http.Response
 	for verificationAttempt := 0; ; verificationAttempt++ {
 		var f *Failure
 		verification, f = a.captchaHeaders(ctx, account, captchaPurposeInference, verificationAttempt > 0)
@@ -301,6 +341,9 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		for key, values := range verification.Headers {
 			req.Header[key] = values
 		}
+		requestDetail = M{"request_id": req.Header.Get("X-Request-Id"), "trace_id": req.Header.Get("X-Zcode-Trace-Id"), "query_id": req.Header.Get("X-Query-Id"), "session_id": session}
+		requestSecrets = append(requestSecrets, token, req.Header.Get("X-Aliyun-Captcha-Verify-Param"))
+		r.TraceID = req.Header.Get("X-Zcode-Trace-Id")
 		res, e = client.Do(req)
 		if e != nil {
 			return nil, transportFailure(ctx, e)
@@ -317,10 +360,14 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		b, readError := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		if readError != nil {
+			failure := transportFailure(ctx, readError)
+			failure.Detail = failureDetail(failure)
+			failure.Detail["body"] = failureBody(string(b))
 			if res.StatusCode == http.StatusTooManyRequests {
-				return nil, &Failure{Kind: "rate_limit", Code: "rate_limit_error", Status: res.StatusCode, Message: "请求频率受限", Retryable: true, RetryAfter: retryAfter(res.Header.Get("Retry-After"), time.Now())}
+				failure.Kind, failure.Code, failure.Status, failure.Message = "rate_limit", "rate_limit_error", res.StatusCode, "请求频率受限"
+				failure.RetryAfter = retryAfter(res.Header.Get("Retry-After"), time.Now())
 			}
-			return nil, transportFailure(ctx, readError)
+			return nil, failure
 		}
 		failure := upstreamHTTPFailure(res, b)
 		captchaMode := str(fallback(obj(a.configValue("http", "captcha"))["mode"], "off"))
@@ -342,7 +389,12 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 	}
 	defer res.Body.Close()
 	if !strings.Contains(res.Header.Get("Content-Type"), "text/event-stream") {
-		return nil, &Failure{Status: 502, Message: "上游未返回 SSE 响应"}
+		body, readError := io.ReadAll(io.LimitReader(res.Body, failureBodyLimit+1))
+		detail := M{"body": failureBody(string(body))}
+		if readError != nil {
+			detail["read_error"] = boundedFailureText(readError.Error())
+		}
+		return nil, &Failure{Status: 502, Code: "upstream_invalid_content_type", Message: "上游未返回 SSE 响应", Detail: detail}
 	}
 	content := map[int]M{}
 	buffers := map[int]*contentBuffer{}
@@ -373,12 +425,14 @@ func (a *App) inferHTTP(parent context.Context, account M, o inferOptions) (resu
 		v := parse(f.Data, nil)
 		event, ok := v.(map[string]any)
 		if !ok {
-			return providerFailure(M{"message": "上游 SSE JSON 无效"}, 502, "")
+			return &Failure{Status: 502, Code: "upstream_invalid_sse_json", Message: "上游 SSE JSON 无效", Detail: M{"body": failureBody(f.Data)}}
 		}
 		typ := str(event["type"])
 		idx := int(integer(event["index"]))
 		if typ == "error" {
-			return providerFailure(event, 502, "")
+			failure := providerFailure(event, 502, "")
+			failure.Detail["body"] = failureBody(f.Data)
+			return failure
 		}
 		if typ == "message_start" {
 			r.Native = clone(obj(event["message"]))

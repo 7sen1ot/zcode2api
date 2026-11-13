@@ -123,11 +123,12 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (M, bool, 
 				}
 			}
 			data := balanceData(r)
-			balances := liveBalances(data, now)
-			for _, v := range balances {
-				c.remaining += num(obj(v)["remaining_units"])
+			if _, known := data["balances"].([]any); !known {
+				c.skip = "quota_unknown"
+				continue
 			}
-			if len(arr(data["balances"])) > 0 && (len(balances) == 0 || c.remaining <= 0) {
+			c.remaining = remainingBalance(data, now)
+			if !(c.remaining > 0) {
 				c.skip = "quota_remaining=0"
 			}
 		}
@@ -141,6 +142,9 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (M, bool, 
 		for _, c := range p.accounts {
 			reason := c.skip
 			id := str(c.row["id"])
+			if reason == "" && a.state(id).QuotaExhausted {
+				reason = "quota_remaining=0"
+			}
 			if reason == "" && a.state(id).Cooldown > now {
 				reason = "cooldown"
 			}

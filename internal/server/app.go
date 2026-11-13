@@ -23,6 +23,7 @@ type accountState struct {
 	BusyGeneration  int64
 	BusyProbe       bool
 	BusyBackoffStep int
+	QuotaExhausted  bool
 }
 type stickyEntry struct {
 	Account string

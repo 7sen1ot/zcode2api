@@ -7,7 +7,9 @@ globalThis.Z2ALogs = (() => {
   let closeActiveDetails = null;
   function closeDetails(restoreFocus = false) { closeActiveDetails?.(restoreFocus); }
   function errorText(row) {
-    const message = String(row.error_message ?? '').trim();
+    const summary = String(row.error_message ?? '').trim();
+    const detail = String(row.error_detail?.message ?? '').trim();
+    const message = detail && detail !== summary ? [summary, detail].filter(Boolean).join('：') : summary || detail;
     // Display the stored error code rather than deriving one from the status.
     const code = String(row.error_code ?? '').trim();
     if (!code) return message || '—';
@@ -20,7 +22,7 @@ globalThis.Z2ALogs = (() => {
     } catch { return null; }
   }
   function skipLabel(reason) {
-    const labels = { excluded_for_request: '本次请求已排除', card_expiring: '额度卡即将到期', family_filter: '平台不匹配', model_not_available: '模型不可用', 'quota_remaining=0': '账号额度不足', cooldown: '账号冷却中', upstream_busy: '账号并发已满' };
+    const labels = { excluded_for_request: '本次请求已排除', card_expiring: '额度卡即将到期', family_filter: '平台不匹配', model_not_available: '模型不可用', quota_unknown: '余额待确认', 'quota_remaining=0': '账号额度不足', cooldown: '账号冷却中', upstream_busy: '账号并发已满' };
     if (labels[reason]) return labels[reason];
     if (String(reason).startsWith('status=')) {
       const status = String(reason).slice(7);
@@ -155,7 +157,7 @@ globalThis.Z2ALogs = (() => {
         return rate == null ? '—' : rate.toFixed(1) + '%';
       };
       const details = (row, index) => {
-        const available = row.request_id || row.trace_id || row.error_code || row.error_message || ['tokens_in', 'tokens_out', 'cache_read', 'cache_write', 'ttft_ms'].some(field => row[field] != null);
+        const available = row.request_id || row.trace_id || row.error_code || row.error_message || row.error_detail || ['tokens_in', 'tokens_out', 'cache_read', 'cache_write', 'ttft_ms'].some(field => row[field] != null);
         return `<button type="button" class="cache-open" ${available ? `data-cache-detail="${index}"` : 'disabled'} aria-label="${esc('查看 ' + (row.request_id || row.model || '请求') + ' 的详情')}">详情</button>`;
       };
       const cacheCell = (row, index) => `<span class="log-cache-inline"><span class="log-cache-percent">${cacheRate(row)}</span>${details(row, index)}</span>`;

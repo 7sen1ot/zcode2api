@@ -229,6 +229,7 @@ type Failure struct {
 	Retryable, Committed bool
 	ProxyFailover        bool
 	VerifyCode           string
+	Detail               M
 	RetryAfter           time.Duration
 	Attempts             int
 	cooldownRecorded     bool

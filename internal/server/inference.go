@@ -150,7 +150,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 			f = &Failure{Kind: "exhausted", Code: "no_account", Message: "所有账号不可用（到期/冷却/额度/模型不符）"}
 		}
 		if ctx.Err() != nil {
-			f = &Failure{Kind: "canceled", Code: "canceled", Message: "客户端已断开"}
+			f = &Failure{Kind: "canceled", Code: "canceled", Message: "客户端已断开", Detail: failureDetail(f)}
 		}
 		f.Attempts = attempts
 		if len(throttled) > 0 && (f.Kind == "busy" || f.Kind == "rate_limit" || f.Kind == "overload") {
@@ -267,6 +267,10 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 		o.OnAdmitted = func() { a.admitAccount(account) }
 		attemptStart := time.Now()
 		result, f := a.inferHTTP(ctx, account, o)
+		if f != nil && classify(f).Kind == "quota" {
+			// Publish exhaustion before releasing the slot and waking queued requests.
+			a.markQuotaExhausted(id)
+		}
 		a.finishAccountAttempt(account, f, true, p)
 		if f == nil {
 			a.mu.Lock()
@@ -371,12 +375,12 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*Result, *Failure) {
 }
 func (a *App) logUsage(o inferOptions, r *Result, f *Failure, account M, attempts int, rotated []any) {
 	status := "success"
-	var code, message any
+	var code, message, detail any
 	u := M{}
-	trace := o.ID
+	trace := ""
 	if r != nil {
 		u = r.Usage
-		trace = r.SessionID
+		trace = r.TraceID
 	}
 	if f != nil {
 		status = "failed"
@@ -386,8 +390,11 @@ func (a *App) logUsage(o inferOptions, r *Result, f *Failure, account M, attempt
 		if f.Kind == "busy" {
 			status = "busy"
 		}
-		code, message = f.Code, conciseFailureMessage(f)
+		code, message = fallback(f.Code, f.Kind), conciseFailureMessage(f)
+		diagnostic := failureDetail(f)
+		detail = js(diagnostic)
+		trace = str(diagnostic["trace_id"])
 	}
 	timings := o.Timing.snapshot()
-	_ = a.exec("INSERT INTO usage_log(request_id,ts,key_id,client_ip,account_id,family,model,reasoning_level,stream,attempt_count,rotated_accounts,status,error_code,error_message,ttft_ms,total_ms,tokens_in,tokens_out,tokens_reasoning,cache_read,cache_write,prompt_hash,timings,trace_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", o.ID, nowMS(), o.Key["id"], o.IP, account["id"], account["family"], o.Model, nullable(o.Level), integer(o.Stream), attempts, js(rotated), status, code, message, timings["ttft_ms"], timings["total_ms"], u["inputTokens"], u["outputTokens"], u["reasoningTokens"], u["cacheReadTokens"], u["cacheWriteTokens"], hash(js(o.Body))[:12], js(timings), trace)
+	_ = a.exec("INSERT INTO usage_log(request_id,ts,key_id,client_ip,account_id,family,model,reasoning_level,stream,attempt_count,rotated_accounts,status,error_code,error_message,ttft_ms,total_ms,tokens_in,tokens_out,tokens_reasoning,cache_read,cache_write,prompt_hash,timings,trace_id,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", o.ID, nowMS(), o.Key["id"], o.IP, account["id"], account["family"], o.Model, nullable(o.Level), integer(o.Stream), attempts, js(rotated), status, code, message, timings["ttft_ms"], timings["total_ms"], u["inputTokens"], u["outputTokens"], u["reasoningTokens"], u["cacheReadTokens"], u["cacheWriteTokens"], hash(js(o.Body))[:12], js(timings), nullable(trace), detail)
 }

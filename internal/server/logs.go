@@ -13,7 +13,11 @@ func publicUsageLogs(rows []any) []any {
 	for _, v := range rows {
 		m := obj(v)
 		m["timings"] = parse(m["timings"], nil)
+		m["error_detail"] = parse(m["error_detail"], nil)
 		if str(m["error_message"]) != "" {
+			if m["error_detail"] == nil {
+				m["error_detail"] = M{"message": m["error_message"]}
+			}
 			m["error_message"] = conciseFailureMessage(&Failure{Code: str(m["error_code"]), Message: str(m["error_message"])})
 		}
 	}
@@ -179,7 +183,7 @@ func (a *App) pagedLogs(r *http.Request, kind string) (any, int, error) {
 		if len([]rune(term)) > 200 {
 			return bad(fmt.Errorf("搜索内容最多 200 个字符"))
 		}
-		fields := []string{"u.request_id", "u.trace_id", "u.model", "u.account_id", "a.label", "u.key_id", "k.name", "u.client_ip", "u.error_code", "u.error_message", "u.status"}
+		fields := []string{"u.request_id", "u.trace_id", "u.model", "u.account_id", "a.label", "u.key_id", "k.name", "u.client_ip", "u.error_code", "u.error_message", "u.error_detail", "u.status"}
 		if kind == "sched" {
 			fields = []string{"s.request_id", "s.picked", "a.label", "s.policy", "s.candidates", "s.chain"}
 		}

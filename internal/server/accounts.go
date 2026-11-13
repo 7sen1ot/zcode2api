@@ -204,6 +204,9 @@ func secondsMS(v any) any {
 	return integer(v) * 1000
 }
 func (a *App) applyBalance(r, b M, snapshot bool) {
+	if !truth(b["ok"]) {
+		return
+	}
 	id := str(r["id"])
 	a.balances.applyMu.Lock()
 	defer a.balances.applyMu.Unlock()
@@ -244,7 +247,11 @@ func (a *App) applyBalance(r, b M, snapshot bool) {
 	a.mu.Lock()
 	if s := a.states[id]; s != nil {
 		s.Cooldown = 0
+		if remainingBalance(balancePayload(b["raw"]), nowMS()) > 0 {
+			s.QuotaExhausted = false
+		}
 	}
+	a.notifyAvailableLocked()
 	a.mu.Unlock()
 	if snapshot {
 		if err := a.saveBalanceSnapshot(id, arr(b["balances"])); err != nil {
@@ -426,6 +433,14 @@ func liveBalances(data M, now int64) []any {
 		out = append(out, b)
 	}
 	return out
+}
+
+func remainingBalance(data M, now int64) float64 {
+	remaining := float64(0)
+	for _, value := range liveBalances(data, now) {
+		remaining += num(obj(value)["remaining_units"])
+	}
+	return remaining
 }
 func (a *App) summary(ctx context.Context) M {
 	out := M{"accounts": []any{}, "totalRemaining": 0, "totalUsed": 0, "totalGranted": 0, "totalPending": 0, "activeCount": 0, "count": 0}
