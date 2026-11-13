@@ -65,7 +65,10 @@ func testAccount(t *testing.T, a *App, identity string) M {
 	t.Helper()
 	account, err := a.insertAccount(M{"family": "zai", "customer_id": identity, "device_mid": identity, "status": "active"}, M{"zcode_jwt": testJWT(js(M{"user_id": identity}))})
 	testMust(t, err)
-	return account
+	// Scheduling requires a known positive balance, even for active test accounts.
+	balance := M{"code": 0, "data": M{"balances": []any{M{"total_units": 1000, "used_units": 0, "remaining_units": 1000}}}}
+	testMust(t, a.updateAccount(str(account["id"]), M{"last_balance": balance}))
+	return a.account(str(account["id"]))
 }
 
 func orderedInferenceAccounts(t *testing.T, a *App, identities ...string) {
