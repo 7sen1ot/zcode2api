@@ -37,6 +37,8 @@ const fmtPlanRemaining = (ms) => {
 };
 
 const ICONS = {
+  check: '<path d="m5 12 4 4L19 6"/>',
+  copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7h.01"/>',
   dashboard: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/>',
@@ -53,13 +55,10 @@ const ICONS = {
   import: '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/>',
   export: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
-  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42m0-14.14-1.42 1.42m-11.3 11.3-1.42 1.42"/>',
-  moon: '<path d="M20.99 12.92a9 9 0 1 1-9.91-9.91c.4-.04.62.43.38.74a6.5 6.5 0 0 0 8.79 8.79c.31-.24.78-.02.74.38"/>',
   'chevron-left': '<path d="m15 18-6-6 6-6"/>',
   'chevron-right': '<path d="m9 18 6-6-6-6"/>',
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
-  gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
   layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
   timer: '<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>',
   plug: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
@@ -114,25 +113,19 @@ async function api(path, { token = TOKEN, body, method = 'GET', reauthenticate =
       saveToken('');
       showLogin();
     }
-    throw Object.assign(new Error(data.error || data.msg || `HTTP ${res.status}`), { status: res.status, code: data.code });
+    throw Object.assign(new Error(data.error || data.msg || `HTTP ${res.status}`), { status: res.status, code: data.code, error_reason: data.error_reason, error_detail: data.error_detail, http_status: data.http_status });
   }
   return data;
 }
 
 function toast(msg, type = '') {
-  const t = h(`<div class="toast" role="status">${icon(type === 'ok' ? 'shield' : 'zap', 14)}${esc(msg)}</div>`);
-  document.body.appendChild(t);
-  setTimeout(() => {
-    t.classList.add('out');
-    t.addEventListener('transitionend', () => t.remove(), { once: true });
-    setTimeout(() => t.remove(), 400);
-  }, 2500);
+  Z2AEffects.toast(msg, type);
 }
 
-async function copyText(text, success = '已复制', failure = '复制失败，请手动复制') {
+async function copyText(text, success = '已复制', failure = '复制失败，请手动复制', button = null) {
   try {
     await navigator.clipboard.writeText(text);
-    toast(success, 'ok');
+    if (!Z2AEffects.copyFeedback(button, success)) toast(success, 'ok');
     return true;
   } catch {
     if (failure) toast(failure, 'err');
@@ -201,18 +194,17 @@ document.addEventListener('click', async (e) => {
     saveToken(''); showLogin();
     return;
   }
-  if (e.target.closest('#theme-btn')) {
-    setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark');
-  }
 });
 
+const themeToggle = createPixelThemeToggle($('#theme-btn'), {
+  checked: !document.documentElement.classList.contains('dark'),
+  onChange: checked => setTheme(checked ? 'light' : 'dark'),
+});
 function applyThemeBtn() {
   const button = $('#theme-btn');
   const dark = document.documentElement.classList.contains('dark');
-  button.innerHTML = icon(dark ? 'moon' : 'sun', 17);
-  const label = dark ? '切换为浅色主题' : '切换为深色主题';
-  button.setAttribute('aria-label', label);
-  button.title = label;
+  themeToggle.setChecked(!dark);
+  button.title = dark ? '切换为浅色主题' : '切换为深色主题';
 }
 function setTheme(mode) {
   if (mode === 'system') localStorage.removeItem('z2a_theme');
@@ -229,8 +221,6 @@ applyThemeBtn();
 function routeValues() {
   if (currentPage === 'dashboard') return {
     hours: window._dashboardHours && window._dashboardHours !== 'all' ? window._dashboardHours : '',
-    days: window._dashboardDays === 30 ? 30 : '',
-    chart: window._dashboardChart === 'daily' ? 'daily' : '',
   };
   if (currentPage === 'accounts') { const f = window._accFilter || {}; return { q: f.q, status: f.status === 'all' ? '' : f.status, sort: f.sort === 'default' ? '' : f.sort, page: f.page > 1 ? f.page : '', size: f.size && f.size !== 25 ? f.size : '' }; }
   if (currentPage === 'usage') { const f = window._usageDetail || {}; return { hours: window._usageHours || 24, tab: f.tab || 'model', page: f.pages?.[f.tab] || 1 }; }
@@ -252,10 +242,8 @@ function restoreRoute(route) {
   settingsSection = currentPage === 'settings' ? readSettingsSection(q.section) : '';
   if (currentPage === 'dashboard') {
     window._dashboardHours = valid(q.hours, ['all', '24', '168', '720'], 'all');
-    window._dashboardDays = Number(valid(q.days, ['7', '30'], '7'));
-    window._dashboardChart = valid(q.chart, ['cache', 'daily'], 'cache');
   }
-  if (currentPage === 'accounts') window._accFilter = { q: (q.q || '').slice(0, 200), status: valid(q.status, ['active', 'needs_relogin', 'cooldown', 'expired', 'web_only'], 'all'), sort: valid(q.sort, ['remaining', 'expiring'], 'default'), page, size: Number(valid(q.size, ['25', '50', '100'], '25')) };
+  if (currentPage === 'accounts') window._accFilter = { q: (q.q || '').slice(0, 200), status: valid(q.status, ['active', 'needs_relogin', 'cooldown', 'expired'], 'all'), sort: valid(q.sort, ['remaining', 'expiring'], 'default'), page, size: Number(valid(q.size, ['25', '50', '100'], '25')) };
   if (currentPage === 'usage') { window._usageHours = Number(valid(q.hours, ['24', '168', '720'], '24')); const tab = valid(q.tab, ['model', 'key', 'account', 'status'], 'model'); window._usageDetail = { tab, pages: { [tab]: page } }; }
   if (currentPage === 'logs') Z2ALogs.restoreRoute(q);
 }
@@ -337,11 +325,16 @@ async function renderPage(opts = {}) {
   const refreshStartedAt = Date.now();
   const main = $('#main');
   const page = currentPage;
+  const previousMinHeight = main.style.minHeight;
+  const preserveHeight = main.dataset.page === page && main.hasChildNodes();
+  // Chart measurement forces layout during a rebuild. Keep the document from
+  // shrinking in that interval, which would clamp the browser's scroll offset.
+  if (preserveHeight) main.style.minHeight = `${main.getBoundingClientRect().height}px`;
   if (openSelection && main.contains(openSelection.wrapper)) openSelection.close();
   if (activeHint && main.contains(activeHint)) closeHint();
   main.querySelector('.page-error')?.remove();
   const previous = main.dataset.page === page ? [...main.childNodes] : [];
-  if (!previous.length) main.innerHTML = `${pagehead(PAGES.find(p => p[0] === page)?.[1] || '控制台', '正在加载…')}<div class="page-skeleton" aria-hidden="true"><div class="skeleton-block"></div><div class="skeleton-block"></div><div class="skeleton-block"></div></div>`;
+  if (!previous.length) main.innerHTML = `${pagehead(PAGES.find(p => p[0] === page)?.[1] || '控制台')}<span class="visually-hidden" role="status">正在加载…</span>${Z2AEffects.skeleton(page)}`;
   main.dataset.loading = '1';
   main.setAttribute('aria-busy', 'true');
   main.classList.toggle('no-anim', !!opts.swap);
@@ -357,6 +350,8 @@ async function renderPage(opts = {}) {
     enhanceSelects(main);
     enhanceTables(main);
     enhanceHints(main);
+    main.querySelectorAll('.section-tabs').forEach(Z2AEffects.tabs);
+    if (!previous.length) Z2AEffects.reveal(main);
     main.dataset.page = page;
     if (page === currentPage) syncRoute();
   } catch (e) {
@@ -368,6 +363,7 @@ async function renderPage(opts = {}) {
     main.prepend(notice);
     $('[data-retry-page]', notice).addEventListener('click', () => render({ swap: true }));
   } finally {
+    if (preserveHeight) main.style.minHeight = previousMinHeight;
     lastRefreshAt = refreshStartedAt;
     delete main.dataset.loading;
     main.setAttribute('aria-busy', 'false');
@@ -691,10 +687,10 @@ function enhanceHints(root) {
   });
 }
 
-function statcard(label, value, { tone = 'neutral', hint = '', icon: ic = '', description = '' } = {}) {
-  return `<div class="statcard">
-    <div class="head"><span class="t">${esc(label)}${description ? infoTip(description, label) : ''}</span>${ic ? `<span class="ico tone-${tone}">${icon(ic, 13)}</span>` : ''}</div>
-    <div class="stat tone-${tone}">${value}</div>
+function statcard(label, value, { tone = 'neutral', hint = '', icon: ic = '', ratio = null } = {}) {
+  return `<div class="statcard${ratio !== null ? ' statcard-ratio' : ''}">
+    <div class="head"><span class="t">${esc(label)}</span>${ic ? `<span class="ico tone-${tone}">${icon(ic, 13)}</span>` : ''}</div>
+    <div class="stat-value-row"><div class="stat tone-${tone}">${value}</div>${ratio !== null ? `<svg class="metric-ring" viewBox="0 0 48 48" aria-hidden="true"><circle class="metric-ring-track" cx="24" cy="24" r="19"/><circle class="metric-ring-value${ratio > 0 ? '' : ' is-empty'}" cx="24" cy="24" r="19" pathLength="100" stroke-dasharray="${Math.max(0, Math.min(100, ratio))} 100"/></svg>` : ''}</div>
     ${hint ? `<div class="d">${esc(hint)}</div>` : ''}
   </div>`;
 }
@@ -745,77 +741,41 @@ function accountNameMarkup(a, action = 'detail') {
 
 async function pageDashboard(main) {
   const hours = window._dashboardHours || 'all';
-  const days = window._dashboardDays || 7;
-  const d = await api('/api/dashboard?' + new URLSearchParams({ hours, days }));
-  if (hours !== (window._dashboardHours || 'all') || days !== (window._dashboardDays || 7)) return;
+  const d = await api('/api/dashboard?' + new URLSearchParams({ hours }));
+  if (currentPage !== 'dashboard' || hours !== (window._dashboardHours || 'all')) return;
   const usage = d.usage_period || d.usage_total || {};
-  const fp = JSON.stringify([d.summary, d.busy_24h, d.cache_24h, d.cache_trend_24h?.byHour, d.daily_usage?.byHour, d.daily_usage?.byModel, usage, hours, days, Math.floor(Date.now() / 60000)]);
+  const fp = JSON.stringify([d.summary, d.busy_24h, d.cache_24h, d.cache_trend_24h?.byHour, usage, hours, Math.floor(Date.now() / 60000)]);
   if (main.dataset.fp === fp) return;
   main.dataset.fp = fp;
   const cached = Number(d.cache_24h?.cached_tokens) || 0, cacheInput = Number(d.cache_24h?.input_tokens) || 0;
   const cacheRate = cacheInput > 0 ? (cached / cacheInput * 100).toFixed(1) + '%' : '—';
   const busyPct = d.busy_24h.total ? (d.busy_24h.busy / d.busy_24h.total * 100).toFixed(1) + '%' : '—';
+  const input = Math.max(0, Number(usage.input_tokens) || 0), output = Math.max(0, Number(usage.output_tokens) || 0);
+  const tokenTotal = input + output, inputPercent = tokenTotal ? input / tokenTotal * 100 : 0;
   main.innerHTML = `
     ${pagehead('仪表盘', '', `<span class="updated-at">${icon('refresh', 13)}${new Date().toLocaleTimeString('zh-CN', { hour12: false })}</span>`)}
     <section class="dashboard-overview" aria-label="额度与账号池概览">
       <div class="quota-hero">
-        <div class="dashboard-usage-heading"><span class="eyebrow">总使用额度 ${infoTip('网关调用的输入与输出 Token 合计，按所选时间范围统计。', '使用额度')}</span><select id="dashboard-hours" class="round" aria-label="用量统计时间范围"><option value="all">全部时间</option><option value="24">近 24 小时</option><option value="168">近 7 天</option><option value="720">近 30 天</option></select></div>
+        <div class="dashboard-usage-heading"><span class="eyebrow">Token 用量</span><select id="dashboard-hours" class="round" aria-label="用量统计时间范围"><option value="all">全部时间</option><option value="24">近 24 小时</option><option value="168">近 7 天</option><option value="720">近 30 天</option></select></div>
         <div class="hero-number">${fmtInt(usage.total_tokens)}</div>
-        <div class="dashboard-usage-breakdown"><div><span>输入</span><strong>${fmtInt(usage.input_tokens)}</strong></div><div><span>输出</span><strong>${fmtInt(usage.output_tokens)}</strong></div></div>
+        <div class="token-composition${tokenTotal ? '' : ' is-empty'}" role="img" aria-label="输入 ${fmtInt(input)} Token，输出 ${fmtInt(output)} Token"><span class="token-composition-input" style="width:${inputPercent}%" title="输入 ${fmtInt(input)} Token · ${inputPercent.toFixed(1)}%"></span><span class="token-composition-output" style="width:${tokenTotal ? 100 - inputPercent : 0}%" title="输出 ${fmtInt(output)} Token · ${(tokenTotal ? 100 - inputPercent : 0).toFixed(1)}%"></span></div>
+        <div class="dashboard-usage-breakdown"><div data-token-part="input"><span><i class="token-input-dot" aria-hidden="true"></i>输入</span><strong>${fmtInt(input)}</strong></div><div data-token-part="output"><span><i class="token-output-dot" aria-hidden="true"></i>输出</span><strong>${fmtInt(output)}</strong></div></div>
       </div>
       <div class="pool-health">
         <div class="section-heading"><h2>账号池状态</h2><span class="badge ${d.summary.activeCount ? 'ok' : 'err'}">${d.summary.activeCount ? '有可用账号' : '无可用账号'}</span></div>
         <div class="health-number">${d.summary.activeCount}<small>/ ${d.summary.count} 个账号可用</small></div>
+        <div class="pool-availability" role="img" aria-label="${d.summary.activeCount} / ${d.summary.count} 个账号可用"><span style="width:${d.summary.count ? Math.max(0, Math.min(100, d.summary.activeCount / d.summary.count * 100)) : 0}%"></span></div>
         <button type="button" class="text-action" data-open-page="accounts">管理账号 ${icon('users', 14)}</button>
       </div>
     </section>
     <section class="dashboard-secondary" aria-label="额度与账号指标">
-      ${statcard('剩余额度', `<span title="${esc(fmtInt(d.summary.totalRemaining))} Token">${fmtQuota(d.summary.totalRemaining)}<small> Token</small></span>`, { icon: 'layers', description: '账号上游有效额度的剩余余额合计。' })}
-      ${statcard('24 小时缓存命中率', cacheRate, { icon: 'layers', hint: `${fmtQuota(cached)} / ${fmtQuota(cacheInput)} 输入 Token`, description: '近 24 小时缓存读取 Token ÷ 输入 Token；输入已包含缓存读取，不含缓存写入。' })}
-      ${statcard('24 小时忙碌率', busyPct, { tone: Number.parseFloat(busyPct) >= 30 ? 'warning' : 'neutral', icon: 'gauge', hint: `${fmtInt(d.busy_24h.busy)} / ${fmtInt(d.busy_24h.total)} 次网关请求` })}
+      ${statcard('剩余额度', `<span title="${esc(fmtInt(d.summary.totalRemaining))} Token">${fmtQuota(d.summary.totalRemaining)}<small> Token</small></span>`, { icon: 'layers' })}
+      ${statcard('24 小时缓存命中率', cacheRate, { ratio: cacheInput > 0 ? cached / cacheInput * 100 : 0, hint: `${fmtQuota(cached)} / ${fmtQuota(cacheInput)} 输入 Token` })}
+      ${statcard('24 小时忙碌率', busyPct, { ratio: d.busy_24h.total ? d.busy_24h.busy / d.busy_24h.total * 100 : 0, tone: Number.parseFloat(busyPct) >= 30 ? 'warning' : 'neutral', hint: `${fmtInt(d.busy_24h.busy)} / ${fmtInt(d.busy_24h.total)} 次网关请求` })}
     </section>
-    <section class="dashboard-chart-card" aria-labelledby="dashboard-trend-title">
-      <header class="dashboard-chart-heading">
-        <div class="dashboard-chart-title"><h2 id="dashboard-trend-title">趋势</h2><span id="dashboard-cache-tip">${infoTip('按服务本地整点汇总：缓存读取 Token ÷ 输入 Token。总 Token 为输入与输出之和。首尾为部分小时；无输入的时段不标注命中率。', '缓存趋势')}</span></div>
-        <select id="dashboard-trend-mode" class="round" aria-label="趋势图">
-          <option value="cache">近 24 小时缓存命中率</option>
-          <option value="7">每日 Token 用量 · 近 7 天</option>
-          <option value="30">每日 Token 用量 · 近 30 天</option>
-        </select>
-      </header>
-      <div id="dashboard-trend"></div>
-    </section>`;
+    <section id="dashboard-trend" class="combo-chart-card"></section>`;
 
-  const trendMode = $('#dashboard-trend-mode', main);
-  const trend = $('#dashboard-trend', main), cacheTip = $('#dashboard-cache-tip', main);
-  trendMode.value = window._dashboardChart === 'daily' ? String(days) : 'cache';
-  const paintTrend = () => {
-    const cache = trendMode.value === 'cache';
-    cacheTip.hidden = !cache;
-    trend.removeAttribute('aria-busy');
-    const chart = h('<div class="dashboard-chart"></div>');
-    trend.replaceChildren(chart);
-    if (cache) renderCacheTrendChart(chart, d.cache_trend_24h);
-    else renderDailyTokenChart(chart, d.daily_usage);
-  };
-  paintTrend();
-  trendMode.addEventListener('change', () => {
-    const cache = trendMode.value === 'cache';
-    window._dashboardChart = cache ? 'cache' : 'daily';
-    if (!cache) window._dashboardDays = Number(trendMode.value);
-    syncRoute();
-    if (cache || window._dashboardDays === days) {
-      paintTrend();
-      return;
-    }
-    cacheTip.hidden = true;
-    trend.setAttribute('aria-busy', 'true');
-    void render({ swap: true }).finally(() => {
-      if (!trend.isConnected || !trend.hasAttribute('aria-busy')) return;
-      trend.replaceChildren();
-      trend.removeAttribute('aria-busy');
-    });
-  });
+  renderTokenCacheChart($('#dashboard-trend', main), d.cache_trend_24h, { showTotals: false });
   const range = $('#dashboard-hours', main);
   range.value = hours;
   range.addEventListener('change', () => {
@@ -886,7 +846,7 @@ function renderAccPage(accounts, groups) {
     <select id="acc-sort" class="round" aria-label="账号排序"><option value="default">默认顺序</option><option value="remaining">可用额度优先</option><option value="expiring">最近到期优先</option></select>
     <span id="acc-match-count" class="result-count" aria-live="polite"></span>
   </div>
-  <nav class="status-pills account-filters" id="acc-status" aria-label="按账号状态筛选">${pill('all', '全部')}${pill('active', '可用')}${pill('needs_relogin', '需处理')}${pill('cooldown', '冷却中')}${pill('expired', '已过期')}${pill('web_only', '仅网页')}</nav>
+  <nav class="status-pills account-filters" id="acc-status" aria-label="按账号状态筛选">${pill('all', '全部')}${pill('active', '可用')}${pill('needs_relogin', '需处理')}${pill('cooldown', '冷却中')}${pill('expired', '已过期')}</nav>
   <section><div id="acc-table"></div></section>`;
   $('#add-btn').addEventListener('click', () => addAccountModal());
   $('#accounts-import').addEventListener('click', () => importAccountsModal(groups));
@@ -1050,7 +1010,7 @@ async function onAccountAction(e) {
   if (!btn || btn.disabled) return;
   const id = btn.dataset.id;
   if (btn.dataset.act === 'copy') {
-    return copyText(id, '账号 ID 已复制', '复制失败，请手动选择账号 ID');
+    return copyText(id, '账号 ID 已复制', '复制失败，请手动选择账号 ID', btn);
   }
 
   if (btn.dataset.act === 'detail') {
@@ -1201,13 +1161,13 @@ function addAccountModal(target = null) {
         <button class="btn primary" id="oauth-open">${icon('plug', 14)}打开授权页面</button>
         <button class="btn" id="oauth-copy">复制链接</button>
       </div>
-      <p class="muted" style="margin:0 0 12px;font-size:12px">登录成功后自动添加账号。链接有效期 <b id="oauth-expire" class="mono">${expiresAt ? fmtDur(expiresAt - Date.now()) : '—'}</b></p>
+      <p class="muted" style="margin:0 0 12px;font-size:var(--font-size-caption)">登录成功后自动添加账号。链接有效期 <b id="oauth-expire" class="mono">${expiresAt ? fmtDur(expiresAt - Date.now()) : '—'}</b></p>
       <div class="row" style="gap:10px;align-items:center">
         <span class="muted" id="oauth-status" style="display:inline-flex;align-items:center;gap:6px"><span class="spinner"></span>等待授权…</span>
-        <button class="btn" id="oauth-checknow" style="height:26px;padding:0 10px;font-size:12px">我已完成登录，立即检查</button>
+        <button class="btn" id="oauth-checknow" style="height:26px;padding:0 10px;font-size:var(--font-size-caption)">我已完成登录，立即检查</button>
       </div>`;
     $('#oauth-open', box).addEventListener('click', () => window.open(r.authorize_url, '_blank', 'noopener'));
-    $('#oauth-copy', box).addEventListener('click', () => copyText(r.authorize_url, '授权链接已复制', '复制失败，请从授权按钮的标签页地址栏手动复制'));
+    $('#oauth-copy', box).addEventListener('click', event => copyText(r.authorize_url, '授权链接已复制', '复制失败，请从授权按钮的标签页地址栏手动复制', event.currentTarget));
     $('#oauth-checknow', box).addEventListener('click', () => check());
     const setStage = (text, busy = true) => {
       const el = $('#oauth-status', box);
@@ -1242,7 +1202,7 @@ function addAccountModal(target = null) {
       box.innerHTML = `
         <div class="oauth-result ${x.verified ? 'ok' : 'warn'}">
           <p class="${x.verified ? 'ok-text' : 'warn-text'}" style="margin:0 0 4px;font-weight:600">${x.updated ? '账号凭据已更新' : '账号已加入账号库'}${x.verified ? '，验证通过' : x.status === 'disabled' ? '，保持停用' : '，待验证'}</p>
-          <p class="muted" style="margin:0 0 10px;font-size:12px">${x.updated ? '已有账号的凭据已更新' : '新账号已建档并开始额度轮询'}${x.verified ? '，balance 验证通过' : `，原因：${esc(String(x.reason || x.status || '未知'))}`}</p>
+          <p class="muted" style="margin:0 0 10px;font-size:var(--font-size-caption)">${x.updated ? '已有账号的凭据已更新' : '新账号已建档并开始额度轮询'}${x.verified ? '，balance 验证通过' : `，原因：${esc(String(x.reason || x.status || '未知'))}`}</p>
           <div class="row" style="gap:8px">
             <button class="btn primary" id="oauth-done">完成</button>
             ${!x.updated && accId ? '<button class="btn" id="oauth-view">查看账号</button>' : ''}
@@ -1328,66 +1288,32 @@ function policyLabel(policy) {
   return ({ balanced: '均衡调度', expiring_first: '临期优先', remaining_desc: '剩余额度优先' })[policy] || policy || '未指定';
 }
 
-function renderUsageChart(root, stats) {
-  const timeline = UI.usageTimeline(stats), rows = timeline.rows;
-  let selected = rows.findLastIndex(row => row.reqs > 0);
-  if (selected < 0) selected = rows.length - 1;
-  const renderChart = () => {
-    const failed = window._trendMetric === 'failed';
-    const value = row => failed ? Math.max(0, row.reqs - row.ok) : row.reqs;
-    const max = Math.max(1, ...rows.map(value));
-    const offset = Math.abs(timeline.offset), zone = `UTC${timeline.offset >= 0 ? '+' : '−'}${String(Math.floor(offset / 60)).padStart(2, '0')}:${String(offset % 60).padStart(2, '0')}`;
-    const dateLabel = row => row.bucket.slice(5).replace('T', ' ').replace(':00:00', ':00');
-    const description = row => `${dateLabel(row)}${row.partial ? '（部分时段）' : ''} · ${fmtInt(row.reqs)} 次请求 · ${fmtInt(Math.max(0, row.reqs - row.ok))} 次未成功 · ${fmtQuota(row.tokens)} Token`;
-    const header = `<div class="usage-chart-head"><div><h3>${failed ? '未成功请求' : '请求量'}</h3><p>按${stats.time_unit === 'day' ? '天' : '小时'}统计 · ${zone}</p></div><label class="chart-metric">指标<select id="trend-metric" aria-label="趋势指标"><option value="requests">请求量</option><option value="failed">未成功请求</option></select></label></div>`;
-    root.innerHTML = `${header}
-      <div class="chart-frame"><div class="chart-scale" aria-hidden="true"><span>${fmtInt(max)}</span><span>${fmtInt(Math.round(max / 2))}</span><span>0</span></div><div class="chart-plot" style="--chart-count:${rows.length}" role="group" aria-label="连续时间轴上的${failed ? '未成功请求量' : '请求量'}">${rows.map((row, i) => `<button type="button" class="chart-column${i === selected ? ' selected' : ''}${failed ? ' failed' : ''}" data-trend-index="${i}" tabindex="${i === selected ? '0' : '-1'}" aria-label="${esc(description(row))}" aria-pressed="${i === selected}"><span class="chart-bar" style="height:${value(row) / max * 100}%"></span><span class="chart-dot"></span></button>`).join('')}</div></div>
-      <div class="chart-axis" aria-hidden="true"><span>${dateLabel(rows[0])}</span><span>${dateLabel(rows[Math.floor(rows.length / 2)])}</span><span>${dateLabel(rows.at(-1))}</span></div>
-      <p class="chart-selection" role="status" aria-live="polite">${description(rows[selected])}</p><p class="quiet-message">${rows.some(row => row.reqs) ? '' : '所选范围内暂无请求。'}无记录的时段按 0 次展示；范围首尾可能仅包含部分时段。悬停、聚焦或点击柱形查看详情。</p>`;
-    $('#trend-metric', root).value = failed ? 'failed' : 'requests';
-    $('#trend-metric', root).addEventListener('change', e => { window._trendMetric = e.target.value; renderChart(); enhanceSelects(root); $('#trend-metric', root)?.parentElement.querySelector('.select-trigger')?.focus(); });
-    const show = event => {
-      const button = event.target.closest('[data-trend-index]');
-      if (!button) return;
-      selected = Number(button.dataset.trendIndex);
-      root.querySelectorAll('[data-trend-index]').forEach((b, i) => { b.classList.toggle('selected', i === selected); b.setAttribute('aria-pressed', String(i === selected)); b.tabIndex = i === selected ? 0 : -1; });
-      $('.chart-selection', root).textContent = description(rows[selected]);
-    };
-    root.onmouseover = show; root.onfocusin = show; root.onclick = show;
-    root.onkeydown = event => {
-      if (!event.target.matches('[data-trend-index]') || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-      event.preventDefault();
-      const index = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, selected + (event.key === 'ArrowRight' ? 1 : -1)));
-      root.querySelector(`[data-trend-index="${index}"]`)?.focus();
-    };
-  };
-  renderChart();
-}
-
 async function pageUsage(main) {
-  const s = await api('/api/usage/stats?hours=' + (window._usageHours || 24));
-  const sum = (field) => s.byHour.reduce((total, row) => total + (Number(row[field]) || 0), 0);
+  const hours = window._usageHours || 24;
+  const s = await api('/api/usage/stats?hours=' + hours);
+  if (currentPage !== 'usage' || hours !== (window._usageHours || 24)) return;
+  const sum = (field) => (s.byHour || []).reduce((total, row) => total + (Number(row[field]) || 0), 0);
   const requests = sum('reqs'), success = sum('ok'), input = sum('tin'), output = sum('tout');
   const categories = {
-    model: { label: '模型', columns: ['模型', '请求数', 'Token 用量'], rows: s.byModel.map((r) => `<tr><td>${esc(r.model || '未知')}</td><td>${fmtInt(r.reqs)}</td><td class="mono">${fmtInt((r.tin || 0) + (r.tout || 0))}</td></tr>`) },
-    key: { label: '密钥', columns: ['密钥', '请求数', 'Token 用量'], rows: s.byKey.map((r) => `<tr><td>${esc(r.name || r.key_id || '匿名')}</td><td>${fmtInt(r.reqs)}</td><td class="mono">${fmtInt(r.tokens || 0)}</td></tr>`) },
-    account: { label: '账号', columns: ['账号', '请求数', '成功', '忙碌', 'Token 用量'], rows: s.byAccount.map((r) => `<tr><td>${esc(r.label || r.account_id || '未分配')}</td><td>${fmtInt(r.reqs)}</td><td>${fmtInt(r.ok || 0)}</td><td>${fmtInt(r.busy || 0)}</td><td class="mono">${fmtInt(r.tokens || 0)}</td></tr>`) },
-    status: { label: '状态', columns: ['状态', '次数'], rows: s.byStatus.map((r) => `<tr><td>${esc(({ success: '成功', busy: '忙碌', error: '失败' })[r.status] || r.status || '未知')}</td><td>${fmtInt(r.n)}</td></tr>`) },
+    model: { label: '模型', columns: ['模型', '请求数', 'Token 用量'], rows: (s.byModel || []).map((r) => `<tr><td>${esc(r.model || '未知')}</td><td>${fmtInt(r.reqs)}</td><td class="mono">${fmtInt((r.tin || 0) + (r.tout || 0))}</td></tr>`) },
+    key: { label: '密钥', columns: ['密钥', '请求数', 'Token 用量'], rows: (s.byKey || []).map((r) => `<tr><td>${esc(r.name || r.key_id || '匿名')}</td><td>${fmtInt(r.reqs)}</td><td class="mono">${fmtInt(r.tokens || 0)}</td></tr>`) },
+    account: { label: '账号', columns: ['账号', '请求数', '成功', '忙碌', 'Token 用量'], rows: (s.byAccount || []).map((r) => `<tr><td>${esc(r.label || r.account_id || '未分配')}</td><td>${fmtInt(r.reqs)}</td><td>${fmtInt(r.ok || 0)}</td><td>${fmtInt(r.busy || 0)}</td><td class="mono">${fmtInt(r.tokens || 0)}</td></tr>`) },
+    status: { label: '状态', columns: ['状态', '次数'], rows: (s.byStatus || []).map((r) => `<tr><td>${esc(({ success: '成功', busy: '忙碌', error: '失败' })[r.status] || r.status || '未知')}</td><td>${fmtInt(r.n)}</td></tr>`) },
   };
   const detailState = window._usageDetail || (window._usageDetail = { tab: 'model', pages: {} });
   if (!categories[detailState.tab]) detailState.tab = 'model';
   main.innerHTML = `
-  ${pagehead('用量统计', '统计本项目网关的请求记录，不包含客户端直接发起的请求。',
-    `<select id="u-hours" class="round" aria-label="统计时间范围"><option value="24">近 24 小时</option><option value="168">近 7 天</option><option value="720">近 30 天</option></select><button class="btn" id="usage-refresh">${icon('refresh', 14)}刷新</button>`)}
+  ${pagehead('用量统计', '',
+    `<button class="btn" id="usage-refresh">${icon('refresh', 14)}刷新</button>`)}
   <section><div class="cards multicol usage-summary">
     ${statcard('请求数', fmtInt(requests), { tone: 'neutral', icon: 'activity' })}
     ${statcard('成功率', requests ? `${(success / requests * 100).toFixed(1)}%` : '—', { tone: 'success', icon: 'shield', hint: `${fmtInt(success)} 次成功` })}
     ${statcard('Token 用量', fmtInt(input + output), { tone: 'neutral', icon: 'zap', hint: `输入 ${fmtInt(input)} · 输出 ${fmtInt(output)}` })}
     ${statcard('首 Token 时间 P50 / P95', s.ttft ? `${fmtInt(s.ttft.p50)}<small> / ${fmtInt(s.ttft.p95)} ms</small>` : '—', { icon: 'timer', hint: '仅统计成功请求' })}
   </div></section>
-  <section><h2>${icon('trending', 15)}请求趋势</h2><div id="usage-chart" class="usage-chart"></div></section>
+  <section id="usage-chart" class="combo-chart-card"></section>
   <section><h2>${icon('layers', 15)} 用量明细</h2><div id="usage-detail"></div></section>`;
-  renderUsageChart($('#usage-chart', main), s);
+  renderTokenCacheChart($('#usage-chart', main), s, { rangeId: 'u-hours' });
   const detail = $('#usage-detail', main);
   const renderDetail = (focusTab = false) => {
     const { tab, pages } = detailState;
@@ -1395,12 +1321,20 @@ async function pageUsage(main) {
     const pagination = UI.paginate(current.rows, pages[tab], 10);
     const { total, page, pages: pageCount, items: rows } = pagination;
     pages[tab] = page;
-    detail.innerHTML = `<nav class="section-tabs usage-tabs" role="tablist" aria-label="用量明细分类">${Object.entries(categories).map(([id, group]) => `<button type="button" class="tab${id === tab ? ' active' : ''}" role="tab" id="usage-tab-${id}" aria-selected="${id === tab}" aria-controls="usage-detail-panel" tabindex="${id === tab ? '0' : '-1'}" data-usage-tab="${id}">${group.label}<span class="cnt">${fmtInt(group.rows.length)}</span></button>`).join('')}</nav>
-      <div class="usage-panel" role="tabpanel" id="usage-detail-panel" aria-labelledby="usage-tab-${tab}">
+    if (!detail.firstElementChild) detail.innerHTML = `<nav class="section-tabs usage-tabs" role="tablist" aria-label="用量明细分类">${Object.entries(categories).map(([id, group]) => `<button type="button" class="tab" role="tab" id="usage-tab-${id}" aria-selected="false" aria-controls="usage-detail-panel" tabindex="-1" data-usage-tab="${id}">${group.label}<span class="cnt">${fmtInt(group.rows.length)}</span></button>`).join('')}</nav><div class="usage-panel"></div>`;
+    detail.querySelectorAll('[data-usage-tab]').forEach(button => {
+      const selected = button.dataset.usageTab === tab;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-selected', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    detail.querySelector('.usage-panel').outerHTML = `<div class="usage-panel" role="tabpanel" id="usage-detail-panel" aria-labelledby="usage-tab-${tab}">
         ${rows.length ? `<div class="tablecard"><table class="table-metrics"><thead><tr>${current.columns.map((col) => `<th>${col}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>` : '<p class="usage-empty">所选分类暂无数据</p>'}
         <div class="pager usage-pager" aria-label="用量明细分页"><button type="button" data-usage-page="prev" aria-label="上一页" ${page === 1 ? 'disabled' : ''}>‹</button>${UI.pageNumbers(page, pageCount).map((n) => n === '…' ? '<span aria-hidden="true">…</span>' : `<button type="button" data-usage-page="${n}" aria-label="第 ${n} 页" ${n === page ? 'class="cur" aria-current="page"' : ''}>${n}</button>`).join('')}<button type="button" data-usage-page="next" aria-label="下一页" ${page === pageCount ? 'disabled' : ''}>›</button><span class="pinfo">共 ${fmtInt(total)} 条</span></div>
       </div>`;
     enhanceTables(detail);
+    Z2AEffects.tabs(detail.querySelector('.usage-tabs'));
+    if (focusTab) Z2AEffects.reveal(detail.querySelector('.usage-panel'));
     syncRoute();
     if (focusTab) detail.querySelector(`[data-usage-tab="${tab}"]`)?.focus();
   };
@@ -1424,7 +1358,18 @@ async function pageUsage(main) {
   });
   renderDetail();
   $('#u-hours').value = String(window._usageHours || 24);
-  $('#u-hours').addEventListener('change', (e) => { window._usageHours = Number(e.target.value); detailState.pages = {}; render(); });
+  $('#u-hours').addEventListener('change', event => {
+    const range = event.target, requested = Number(range.value), previousPages = detailState.pages;
+    window._usageHours = requested;
+    detailState.pages = {};
+    void render({ swap: true }).finally(() => {
+      if (!range.isConnected || window._usageHours !== requested) return;
+      window._usageHours = hours;
+      detailState.pages = previousPages;
+      range.value = String(hours);
+      syncSelect(range); syncRoute();
+    });
+  });
   $('#usage-refresh').addEventListener('click', () => render());
 }
 
@@ -1441,7 +1386,7 @@ function showKeySecret(title, secret, notice = '请复制并妥善保存完整�
     if (keySecretDialog === dialog) keySecretDialog = null;
   });
   keySecretDialog = dialog;
-  $('[data-copy]', result).addEventListener('click', () => copyText(value.textContent, '密钥已复制', '复制失败，请手动选择并复制密钥'));
+  $('[data-copy]', result).addEventListener('click', event => copyText(value.textContent, '密钥已复制', '复制失败，请手动选择并复制密钥', event.currentTarget));
 }
 
 function finishKeyChange(dialog, title, secret, token, notice) {
@@ -1596,7 +1541,7 @@ function offerKeyRotation(key, message, token) {
   }, result => finishKeyChange(dialog, '密钥已轮换', result.secret, token, '请保存新密钥，并更新客户端配置。'));
 }
 
-async function copyKey(key) {
+async function copyKey(key, button) {
   const token = TOKEN;
   let result;
   try {
@@ -1608,7 +1553,7 @@ async function copyKey(key) {
   }
   if (token !== TOKEN) return;
   if (!result.secret) throw new Error('服务端未返回完整密钥');
-  if (!await copyText(result.secret, '密钥已复制', '') && token === TOKEN) {
+  if (!await copyText(result.secret, '密钥已复制', '', button) && token === TOKEN) {
     showKeySecret('复制密钥', result.secret, '自动复制失败，请选择并手动复制完整密钥。');
   }
 }
@@ -1619,18 +1564,18 @@ async function pageKeys(main) {
   main.innerHTML = `
   ${pagehead('API 密钥', '',
     `<button class="btn primary" id="add-key">${icon('plus', 14)}新建密钥</button>`)}
-  <div class="integration-note"><div class="example-line"><code>Authorization: Bearer &lt;密钥&gt;</code> → <code>POST http://127.0.0.1:${RUNTIME?.gateway_port || 6780}/v1/chat/completions</code>（OpenAI）或 <code>/v1/messages</code>（Anthropic）<button type="button" class="text-action" id="copy-gw">复制网关地址</button></div></div>
+  <div class="gateway-integration"><div class="copy-field"><code>http://127.0.0.1:${RUNTIME?.gateway_port || 6780}/v1</code><button type="button" class="btn" id="copy-gw" aria-label="复制网关地址" title="复制网关地址">${icon('copy', 15)}复制</button></div>${infoTip('使用 Authorization: Bearer <密钥>。OpenAI 请求路径为 /v1/chat/completions，Anthropic 为 /v1/messages。', '网关接入')}</div>
   <section style="animation-delay:50ms"><div id="key-table" class="fade-up"></div></section>`;
   $('#key-table').innerHTML = keys.length ? `<div class="tablecard"><table>
     <tr><th>名称</th><th>尾号</th><th class="align-right">配额</th><th class="align-right">已用</th><th>分组链</th><th>默认档位</th><th>白名单</th><th>状态</th><th class="align-right">操作</th></tr>
     ${keys.map((k) => `<tr>
-      <td><b style="font-size:13px">${esc(k.name)}</b><br><span class="muted" style="font-size:11px">${fmtTime(k.created_at)}</span></td>
+      <td><b style="font-size:var(--font-size-dense)">${esc(k.name)}</b><br><span class="muted" style="font-size:var(--font-size-micro)">${fmtTime(k.created_at)}</span></td>
       <td class="mono">…${esc(k.key_tail)}</td>
       <td class="mono align-right">${k.quota_limit === null ? '不限' : fmtInt(k.quota_limit)}</td>
       <td class="mono align-right">${fmtInt(k.used_units)}</td>
-      <td style="font-size:12px">${esc(k.group_order ? groupChainLabel(k.group_order, groupsById) : '默认链')}</td>
+      <td style="font-size:var(--font-size-caption)">${esc(k.group_order ? groupChainLabel(k.group_order, groupsById) : '默认链')}</td>
       <td>${k.default_level ? `<span class="badge">${esc(({ low: '低', high: '高', max: '最高' })[k.default_level] || k.default_level)}</span>` : '<span class="muted">跟随全局</span>'}</td>
-      <td style="font-size:11px">${k.model_whitelist.length ? k.model_whitelist.map((m) => `<span class="badge sm">${esc(m)}</span>`).join(' ') : '全部模型'}${k.ip_whitelist.length ? '<br>IP: ' + esc(k.ip_whitelist.join(',')) : ''}</td>
+      <td style="font-size:var(--font-size-micro)">${k.model_whitelist.length ? k.model_whitelist.map((m) => `<span class="badge sm">${esc(m)}</span>`).join(' ') : '全部模型'}${k.ip_whitelist.length ? '<br>IP: ' + esc(k.ip_whitelist.join(',')) : ''}</td>
       <td>${k.enabled ? '<span class="ok-text">● 启用</span>' : '<span class="muted">禁用</span>'}</td>
       <td class="align-right"><div class="cell-inline cell-actions key-actions"><button type="button" class="btn" data-key-action="copy" data-id="${esc(k.id)}">复制密钥</button><button type="button" class="btn" data-key-action="edit" data-id="${esc(k.id)}">编辑</button><button type="button" class="btn danger" data-key-action="delete" data-id="${esc(k.id)}">删除</button></div></td></tr>`).join('')}
   </table></div>` : '<p class="muted">还没有密钥。</p>';
@@ -1642,7 +1587,7 @@ async function pageKeys(main) {
     if (button.dataset.keyAction === 'edit') {
       openKeyForm(groups, key);
     } else if (button.dataset.keyAction === 'copy') {
-      await buttonAction(button, () => copyKey(key), '复制失败：');
+      await buttonAction(button, () => copyKey(key, button), '复制失败：');
     } else {
       if (!await confirmAction('删除密钥', '确定删除该密钥？使用此密钥的客户端将无法继续访问。')) return;
       await buttonAction(button, async () => {
@@ -1652,31 +1597,30 @@ async function pageKeys(main) {
       }, '删除失败：');
     }
   });
-  $('#copy-gw').addEventListener('click', () => copyText(`http://127.0.0.1:${RUNTIME?.gateway_port}/v1`, '网关地址已复制'));
+  $('#copy-gw').addEventListener('click', event => copyText(`http://127.0.0.1:${RUNTIME?.gateway_port || 6780}/v1`, '网关地址已复制', '复制失败，请手动复制', event.currentTarget));
   $('#add-key').addEventListener('click', () => openKeyForm(groups));
 }
 
 const GROUP_ROLE_LABELS = { primary: '主力', backup: '备用' };
-const GROUP_ROUTE_HELP = '默认链依创建顺序取首个启用的主力组，再取首个启用的备用组。前一组无法接单时尝试下一组。指定分组时以密钥内的顺序为准。整条链无法接单时，请求可能排队或失败。';
 
 function openGroupForm(group) {
   const values = group ?? { role: 'primary', policy: 'balanced', urgent_window_min: 180, enabled: 1 };
-  const field = (name, label, help, control) => `<div class="dialog-field"><div class="field-label"><label for="group-${name}">${label}</label>${infoTip(help, label)}</div>${control}</div>`;
+  const field = (name, label, control) => `<div class="dialog-field"><div class="field-label"><label for="group-${name}">${label}</label></div>${control}</div>`;
   const select = (name, options) => `<select id="group-${name}" name="${name}" data-match-width>${options.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select>`;
   const form = h(`<form class="dialog-form group-form" autocomplete="off">
     <fieldset class="group-fields">
       <legend>基础信息</legend>
       <div class="dialog-grid">
         <label class="dialog-field group-field-wide">分组名称<input name="name" value="${esc(values.name)}" maxlength="80" placeholder="例如：推理主力" required></label>
-        ${field('role', '角色', GROUP_ROUTE_HELP, select('role', Object.entries(GROUP_ROLE_LABELS)))}
-        ${field('family_filter', '账号类型', '类型限制适用于账号加入和请求调度。国内账号包含 Z.ai 国内及旧 BigModel。', select('family_filter', [['', '全部类型'], ...Object.entries(ACCOUNT_FAMILY_LABELS)]))}
+        ${field('role', '角色', select('role', Object.entries(GROUP_ROLE_LABELS)))}
+        ${field('family_filter', '账号类型', select('family_filter', [['', '全部类型'], ...Object.entries(ACCOUNT_FAMILY_LABELS)]))}
       </div>
     </fieldset>
     <fieldset class="group-fields">
       <legend>调度配置</legend>
       <div class="dialog-grid">
-        ${field('policy', '调度策略', '组内先考虑黏住账号。均衡优先低并发和较久未使用的账号，剩余额度优先选择额度更多的账号，临期优先使用窗口内最早到期的账号。', select('policy', ['balanced', 'expiring_first', 'remaining_desc'].map(value => [value, policyLabel(value)])))}
-        ${field('urgent_window_min', '临期窗口（分钟）', '仅在临期优先策略下使用。填写 0 或留空时按 180 分钟计算。', `<input id="group-urgent_window_min" name="urgent_window_min" inputmode="numeric" value="${esc(values.urgent_window_min)}" placeholder="180">`)}
+        ${field('policy', '调度策略', select('policy', ['balanced', 'expiring_first', 'remaining_desc'].map(value => [value, policyLabel(value)])))}
+        ${field('urgent_window_min', '临期窗口（分钟）', `<input id="group-urgent_window_min" name="urgent_window_min" inputmode="numeric" value="${esc(values.urgent_window_min)}" placeholder="180">`)}
       </div>
     </fieldset>
     <label class="settings-check group-enabled"><span>启用分组</span><input name="enabled" type="checkbox" role="switch" ${Number(values.enabled) === 1 ? 'checked' : ''}></label>
@@ -1821,10 +1765,10 @@ async function pageGroups(main) {
   main.innerHTML = `
   ${pagehead('分组调度链', '',
     `<button type="button" class="btn" id="refresh-groups">${icon('refresh', 14)}刷新</button><button type="button" class="btn primary" id="add-group">${icon('plus', 14)}新建分组</button>`)}
-  <div class="group-default-chain"><span class="muted">默认链</span><strong>${esc(groupChainLabel(defaultChain, byId))}</strong>${infoTip(GROUP_ROUTE_HELP, '默认链')}</div>
+  <div class="group-default-chain"><span class="muted">默认链</span><strong>${esc(groupChainLabel(defaultChain, byId))}</strong></div>
   <section id="group-list" style="animation-delay:50ms">
   ${groups.length ? `<div class="tablecard group-table fade-up" tabindex="0" role="region" aria-label="分组列表"><table>
-    <thead><tr><th scope="col">名称</th><th scope="col">角色</th><th scope="col">账号类型</th><th scope="col">组内策略</th><th scope="col" class="align-right">活跃 / 关联 ${infoTip('活跃仅统计状态为活跃且符合分组类型的账号。实际能否接单还取决于模型、登录、额度、冷却和并发。', '账号数量')}</th><th scope="col" class="align-right">操作</th></tr></thead>
+    <thead><tr><th scope="col">名称</th><th scope="col">角色</th><th scope="col">账号类型</th><th scope="col">组内策略</th><th scope="col" class="align-right">活跃 / 关联</th><th scope="col" class="align-right">操作</th></tr></thead>
     <tbody>
     ${groups.map((g) => `<tr><td><div class="cell-name">${avatarMarkup(g.name, g.id)}<span class="nm"><b>${esc(g.name)}</b></span></div></td>
       <td><span class="badge ${Number(g.enabled) === 1 && g.role === 'primary' ? 'active' : ''}">${esc(GROUP_ROLE_LABELS[g.role] || g.role)}</span>${Number(g.enabled) === 1 ? '' : '<span class="group-row-meta muted">已停用</span>'}</td>
@@ -1899,7 +1843,7 @@ async function boot() {
     const main = $('#main');
     if (document.querySelector('.modal-bg') || main.dataset.loading === '1' || openSelection) return;
     if (currentPage === 'accounts' && (main.contains(document.activeElement) || main.querySelector('details[open]'))) return;
-    if (currentPage === 'dashboard' && (main.querySelector('.dashboard-chart:hover') || main.contains(document.activeElement) || activeHint)) return;
+    if (currentPage === 'dashboard' && (main.querySelector('.combo-chart-card:hover') || main.contains(document.activeElement) || activeHint)) return;
     if (currentPage === 'logs' && (!Z2ALogs.canAutoRefresh(main) || activeHint)) return;
     render({ swap: true, live: currentPage === 'logs' }).catch(() => {});
   }, 1000);

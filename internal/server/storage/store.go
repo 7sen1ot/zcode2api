@@ -21,7 +21,7 @@ func Open(data string) (*sql.DB, error) {
 		d.Close()
 		return nil, e
 	}
-	for table, cols := range map[string]map[string]string{"usage_log": {"timings": "TEXT", "trace_id": "TEXT", "error_detail": "TEXT"}, "keys": {"default_level": "TEXT", "secret_enc": "TEXT"}, "oauth_flows": {"poll_interval_sec": "INTEGER NOT NULL DEFAULT 3", "result_json": "TEXT", "updated_at": "INTEGER", "noticed_at": "INTEGER"}, "accounts": {"proxy_url": "TEXT"}} {
+	for table, cols := range map[string]map[string]string{"usage_log": {"timings": "TEXT", "trace_id": "TEXT", "error_detail": "TEXT"}, "claim_log": {"error_detail": "TEXT"}, "keys": {"default_level": "TEXT", "secret_enc": "TEXT"}, "oauth_flows": {"poll_interval_sec": "INTEGER NOT NULL DEFAULT 3", "result_json": "TEXT", "updated_at": "INTEGER", "noticed_at": "INTEGER"}, "accounts": {"proxy_url": "TEXT"}} {
 		rows, e := Query(d, "PRAGMA table_info("+table+")")
 		if e != nil {
 			d.Close()

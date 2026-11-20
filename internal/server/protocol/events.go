@@ -74,4 +74,5 @@ type Result struct {
 	Native, Usage                 shared.M
 	Calls                         []any
 	Attempts                      int
+	HTTPStatus                    int `json:"-"`
 }

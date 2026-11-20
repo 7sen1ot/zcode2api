@@ -100,14 +100,14 @@ func ConciseFailureMessage(f *Failure) string {
 	}
 	switch copy.Code {
 	case "3007":
-		if copy.Kind == "rate_limit" {
+		if copy.Kind == "rate_limit" || copy.Message == "请求频率受限（3007）" {
 			return "请求频率受限（3007）"
 		}
-		if copy.Kind == "risk" || ExplicitCaptchaChallenge(copy.Message) {
+		if copy.Kind == "risk" || ExplicitCaptchaChallenge(copy.Message) || copy.Message == "需要 SDK 验证（3007）" {
 			return "需要 SDK 验证（3007）"
 		}
 	case "captcha_resource_http_error":
-		if copy.Status == 429 {
+		if copy.Status == 429 || copy.Kind == "rate_limit" || copy.Message == "SDK 资源请求受限" {
 			return "SDK 资源请求受限"
 		}
 		return "SDK 资源请求失败"

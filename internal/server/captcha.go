@@ -192,6 +192,20 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account shared.M, options, 
 		}
 	}
 	result, err := run(ctx, parameters)
+	defer func() {
+		if failure == nil {
+			return
+		}
+		failure.Detail = fault.FailureDetail(failure)
+		for from, to := range map[string]string{"stage": "sdk_stage", "code": "sdk_code", "sdk_error_code": "sdk_error_code"} {
+			if value := shared.Str(result[from]); value != "" {
+				failure.Detail[to] = fault.BoundedFailureText(value)
+			}
+		}
+		if status := shared.Integer(result["status"]); status >= 100 && status <= 599 {
+			failure.Detail["sdk_http_status"] = status
+		}
+	}()
 	// Only bounded SDK session data is reusable; the scoped pool discards it on invalidation.
 	if state := shared.Obj(result["state"]); ctx.Err() == nil && len(state) > 0 && len(shared.JSON(state)) <= 16<<10 && a.captchaScopeCurrent(ctx, scope) {
 		a.captcha.mu.Lock()

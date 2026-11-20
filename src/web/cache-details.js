@@ -10,6 +10,7 @@ globalThis.Z2ACacheDetails = (() => {
   const percent = value => value == null ? '—' : Number(value).toFixed(2) + '%';
 
   function breakdown(row, helpers) {
+    if (row.status !== 'success') return '';
     const { esc, fmtInt } = helpers, u = usage(row);
     if (u.ordinary === null) return '';
     const segments = [['ordinary', '普通输入', u.ordinary], ['read', '缓存读取', u.read], ['write', '缓存写入', u.write]];
@@ -17,17 +18,33 @@ globalThis.Z2ACacheDetails = (() => {
   }
 
   function detailFields(row, helpers) {
-    const { esc, fmtInt } = helpers, u = usage(row);
-    const fields = [['总输入 Token', fmtInt(row.tokens_in)], ['普通输入', fmtInt(u.ordinary)], ['缓存读取', fmtInt(row.cache_read)], ['缓存写入', fmtInt(row.cache_write)], ['输出 Token', fmtInt(row.tokens_out)], ['命中率', percent(u.rate)], ['首 Token 时间', row.ttft_ms == null ? '—' : fmtInt(row.ttft_ms) + ' ms'], ['尝试次数', fmtInt(row.attempt_count)], ['密钥', row.key_name || row.key_id || '—'], ['账号', row.account_label || row.account_id || '—'], ['请求 ID', row.request_id], ['追踪 ID', row.trace_id || '—']];
+    const { esc, fmtInt } = helpers;
+    const fields = [];
+    if (row.status === 'success') {
+      const u = usage(row);
+      fields.push(
+        ['总输入 Token', fmtInt(row.tokens_in)],
+        ['普通输入', fmtInt(u.ordinary)],
+        ['缓存读取', fmtInt(row.cache_read)],
+        ['缓存写入', fmtInt(row.cache_write)],
+        ['输出 Token', fmtInt(row.tokens_out)],
+        ['命中率', percent(u.rate)],
+        ['首 Token 时间', row.ttft_ms == null ? '—' : fmtInt(row.ttft_ms) + ' ms'],
+        ['尝试次数', fmtInt(row.attempt_count)]
+      );
+    }
+    fields.push(['密钥', row.key_name || row.key_id || '—'], ['账号', row.account_label || row.account_id || '—'], ['请求 ID', row.request_id], ['追踪 ID', row.trace_id || '—']);
     const detail = row.error_detail || {};
-    for (const [label, value] of [['错误码', row.error_code], ['上游结束原因', detail.stop_reason], ['上游 HTTP 状态', detail.http_status], ['上游请求 ID', detail.request_id], ['ZCode 查询 ID', detail.query_id], ['ZCode 会话 ID', detail.session_id]]) {
+    const status = Number(detail.http_status), sdkStatus = Number(detail.sdk_http_status);
+    const httpStatus = status >= 100 && status <= 599 ? status : detail.local_cooldown ? '本地冷却拦截' : detail.upstream_response_received === false ? detail.upstream_attempted ? '未收到响应' : '未发起推理请求' : row.error_code ? '未记录' : null;
+    for (const [label, value] of [['错误码', row.error_code], ['上游业务码', detail.upstream_code !== row.error_code ? detail.upstream_code : null], ['SDK 错误码', detail.verify_code || detail.sdk_error_code || detail.sdk_code], ['SDK HTTP 状态', sdkStatus >= 100 && sdkStatus <= 599 ? sdkStatus : null], ['上游结束原因', detail.stop_reason], [detail.local_cooldown ? '上次上游 HTTP 状态' : '上游 HTTP 状态', httpStatus], ['上游请求 ID', detail.request_id], ['ZCode 查询 ID', detail.query_id], ['ZCode 会话 ID', detail.session_id]]) {
       if (value != null && value !== '') fields.push([label, value]);
     }
     return fields.map(([label, value]) => `<div${label.endsWith(' ID') ? ' class="cache-detail-wide"' : ''}><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join('');
   }
 
   function errorDetails(row, esc) {
-    const detail = row.error_detail || {}, summary = row.error_message || '';
+    const detail = row.error_detail || {}, summary = row.error_reason || row.error_message || '';
     const message = detail.message && detail.message !== summary ? `<pre class="request-error-message">${esc(detail.message)}</pre>` : '';
     let response = '';
     if (detail.body != null) {

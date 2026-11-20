@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="ZCode 多账号额度管理、网关密钥与请求用量控制台。">
-<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f7">
-<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#161719">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f7">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#121212">
 <title>zcode2api 控制台</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="preload" href="/inter-variable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/fonts.css">
 <link rel="stylesheet" href="/style.css">
 <script>
   (function () {
@@ -45,7 +47,18 @@
       </a>
       <div class="app-toolbar-actions">
         <span class="app-ports" id="ports-label" title="端口修改需编辑 config.json 后重启服务"></span>
-        <button type="button" class="toolbar-button" id="theme-btn" aria-label="切换亮/暗主题" title="切换亮/暗主题"></button>
+        <button type="button" class="theme-toggle" id="theme-btn" role="switch" aria-checked="true" aria-label="浅色主题" title="切换主题">
+          <span class="theme-toggle-track" aria-hidden="true">
+            <span class="theme-toggle-thumb">
+              <span class="theme-toggle-orbit"></span>
+              <canvas class="theme-toggle-pixels" width="48" height="48"></canvas>
+              <svg class="theme-toggle-fallback" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <g class="theme-toggle-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42m0-14.14-1.42 1.42m-11.3 11.3-1.42 1.42"/></g>
+                <path class="theme-toggle-moon" d="M20.99 12.92a9 9 0 1 1-9.91-9.91c.4-.04.62.43.38.74a6.5 6.5 0 0 0 8.79 8.79c.31-.24.78-.02.74.38"/>
+              </svg>
+            </span>
+          </span>
+        </button>
         <button type="button" class="toolbar-button" id="logout-btn">
           <svg class="lucide" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
           退出
@@ -57,12 +70,14 @@
   <nav id="nav" class="dock-wrap" aria-label="页面导航"></nav>
 </div>
 <script src="/ui-state.js"></script>
+<script src="/ui-effects.js"></script>
 <script src="/dashboard-charts.js"></script>
 <script src="/claims-view.js"></script>
 <script src="/cache-details.js"></script>
 <script src="/logs-view.js"></script>
 <script src="/update-view.js"></script>
 <script src="/settings-view.js"></script>
+<script src="/theme-toggle.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

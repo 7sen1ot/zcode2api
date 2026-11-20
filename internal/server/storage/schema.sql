@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS claim_log (
   message TEXT,
   user_plan_id TEXT,
   ends_at INTEGER,
-  trigger TEXT DEFAULT 'manual'
+  trigger TEXT DEFAULT 'manual',
+  error_detail TEXT
 );
 CREATE TABLE IF NOT EXISTS keys (
   id TEXT PRIMARY KEY,

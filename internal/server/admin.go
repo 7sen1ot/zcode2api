@@ -88,6 +88,7 @@ func (a *App) AdminHandler() http.Handler {
 			if errors.As(e, &failure) {
 				fault.Classify(failure)
 				body["error"], body["code"], body["failure_kind"] = fault.ConciseFailureMessage(failure), failure.Code, failure.Kind
+				body["error_reason"], body["error_detail"] = fault.FailureReason(failure), fault.FailureDetail(failure)
 				if failure.Kind == "rate_limit" {
 					status = http.StatusTooManyRequests
 				}
@@ -189,18 +190,7 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 			}
 		}
 		until := shared.NowMS()
-		days, err := logInteger(r, "days", 7)
-		if err != nil || (days != 7 && days != 30) {
-			return adminError(400, "日用量统计范围无效")
-		}
-		endTime := time.UnixMilli(until)
-		startDay := time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 0, 0, 0, 0, endTime.Location()).AddDate(0, 0, -int(days-1))
-		_, offset := endTime.Zone()
-		daily := a.rows("SELECT strftime('%Y-%m-%d',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", startDay.UnixMilli(), until)
-		if daily == nil {
-			daily = []any{}
-		}
-		dailyModels := a.rows("SELECT strftime('%Y-%m-%d',ts/1000,'unixepoch','localtime') bucket,COALESCE(NULLIF(model,''),'未知模型') model,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket,model ORDER BY bucket,model", startDay.UnixMilli(), until)
+		_, offset := time.UnixMilli(until).In(time.Local).Zone()
 		cacheTrend := a.rows("SELECT strftime('%Y-%m-%dT%H:00:00',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", until-86400000, until)
 		cache := shared.M{"cached_tokens": float64(0), "input_tokens": float64(0)}
 		for _, value := range cacheTrend {
@@ -219,7 +209,7 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		}
 		summary := a.summary(ctx)
 		groups := a.groups()
-		return shared.M{"summary": summary, "groups": groups, "busy_24h": busy, "cache_24h": cache, "cache_trend_24h": shared.M{"hours": 24, "time_unit": "hour", "range_start": until - 86400000, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": cacheTrend}, "daily_usage": shared.M{"hours": days * 24, "time_unit": "day", "range_start": startDay.UnixMilli(), "range_end": until, "utc_offset_minutes": offset / 60, "byHour": daily, "byModel": dailyModels}, "usage_total": usage, "usage_period": shared.Merge(period, shared.M{"hours": hours}), "default_chain": defaultGroupChain(groups)}, 200, nil
+		return shared.M{"summary": summary, "groups": groups, "busy_24h": busy, "cache_24h": cache, "cache_trend_24h": shared.M{"hours": 24, "time_unit": "hour", "range_start": until - 86400000, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": cacheTrend}, "usage_total": usage, "usage_period": shared.Merge(period, shared.M{"hours": hours}), "default_chain": defaultGroupChain(groups)}, 200, nil
 	case "GET /api/claims/discover":
 		return wrap(a.discover(ctx, r.URL.Query().Get("account_id"), r.URL.Query().Get("scope") == "daily"))
 	case "GET /api/claims/verification":
@@ -246,7 +236,15 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 	case "POST /api/claims/auto-run":
 		return wrap(a.autoClaim(ctx, shared.Truth(b["dry_run"])))
 	case "GET /api/claims/history":
-		return a.rows("SELECT c.*,a.label account_label FROM claim_log c LEFT JOIN accounts a ON a.id=c.account_id ORDER BY c.ts DESC LIMIT ?", limitQuery(r, 100, 500)), 200, nil
+		rows := a.rows("SELECT c.*,a.label account_label FROM claim_log c LEFT JOIN accounts a ON a.id=c.account_id ORDER BY c.ts DESC LIMIT ?", limitQuery(r, 100, 500))
+		for _, value := range rows {
+			row := shared.Obj(value)
+			row["error_detail"] = shared.Parse(row["error_detail"], nil)
+			if !shared.Truth(row["ok"]) {
+				row["error_reason"] = fault.FailureReason(loggedFailure(shared.Str(row["code"]), shared.Str(row["message"]), row["error_detail"]))
+			}
+		}
+		return rows, 200, nil
 	case "GET /api/usage/stats":
 		return a.usageStats(r), 200, nil
 	case "GET /api/usage/logs":
@@ -594,13 +592,13 @@ func (a *App) usageStats(r *http.Request) shared.M {
 	if hours > 24 {
 		unit, format = "day", "%Y-%m-%d"
 	}
-	byHour := a.rows("SELECT strftime('"+format+"',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(tokens_reasoning),0) treason,AVG(ttft_ms) avg_ttft FROM usage_log WHERE ts>=? GROUP BY bucket ORDER BY bucket", since)
+	byHour := a.rows("SELECT strftime('"+format+"',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_reasoning),0) treason,AVG(ttft_ms) avg_ttft FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", since, until)
 	ttfts := []float64{}
-	for _, v := range a.rows("SELECT ttft_ms FROM usage_log WHERE ts>=? AND status='success' AND ttft_ms IS NOT NULL", since) {
+	for _, v := range a.rows("SELECT ttft_ms FROM usage_log WHERE ts>=? AND ts<=? AND status='success' AND ttft_ms IS NOT NULL", since, until) {
 		ttfts = append(ttfts, shared.Num(shared.Obj(v)["ttft_ms"]))
 	}
 	ttft := percentiles(ttfts)
-	return shared.M{"hours": hours, "time_unit": unit, "range_start": since, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": byHour, "byModel": a.rows("SELECT model,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok FROM usage_log WHERE ts>=? GROUP BY model ORDER BY reqs DESC", since), "byKey": a.rows("SELECT k.name,u.key_id,COUNT(*) reqs,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id WHERE u.ts>=? GROUP BY u.key_id ORDER BY reqs DESC", since), "byAccount": a.rows("SELECT a.label,u.account_id,COUNT(*) reqs,SUM(CASE WHEN u.status='success' THEN 1 ELSE 0 END) ok,SUM(CASE WHEN u.status='busy' THEN 1 ELSE 0 END) busy,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN accounts a ON a.id=u.account_id WHERE u.ts>=? GROUP BY u.account_id ORDER BY reqs DESC", since), "byStatus": a.rows("SELECT status,COUNT(*) n FROM usage_log WHERE ts>=? GROUP BY status", since), "ttft": ttft}
+	return shared.M{"hours": hours, "time_unit": unit, "range_start": since, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": byHour, "byModel": a.rows("SELECT model,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok FROM usage_log WHERE ts>=? AND ts<=? GROUP BY model ORDER BY reqs DESC", since, until), "byKey": a.rows("SELECT k.name,u.key_id,COUNT(*) reqs,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id WHERE u.ts>=? AND u.ts<=? GROUP BY u.key_id ORDER BY reqs DESC", since, until), "byAccount": a.rows("SELECT a.label,u.account_id,COUNT(*) reqs,SUM(CASE WHEN u.status='success' THEN 1 ELSE 0 END) ok,SUM(CASE WHEN u.status='busy' THEN 1 ELSE 0 END) busy,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN accounts a ON a.id=u.account_id WHERE u.ts>=? AND u.ts<=? GROUP BY u.account_id ORDER BY reqs DESC", since, until), "byStatus": a.rows("SELECT status,COUNT(*) n FROM usage_log WHERE ts>=? AND ts<=? GROUP BY status", since, until), "ttft": ttft}
 }
 
 func (a *App) performance(limit int) shared.M {

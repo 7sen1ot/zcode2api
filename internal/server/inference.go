@@ -301,6 +301,11 @@ func (a *App) logUsage(o inferOptions, r *wire.Result, f *fault.Failure, account
 		}
 		if logCode != "" {
 			code, message = logCode, fault.ConciseFailureMessage(&fault.Failure{Code: logCode})
+			if r.HTTPStatus > 0 {
+				diagnostic := shared.Obj(shared.Parse(detail, nil))
+				diagnostic["http_status"], diagnostic["upstream_response_received"] = r.HTTPStatus, true
+				detail = shared.JSON(diagnostic)
+			}
 		}
 	}
 	if f != nil {
@@ -311,7 +316,7 @@ func (a *App) logUsage(o inferOptions, r *wire.Result, f *fault.Failure, account
 		if f.Kind == "busy" {
 			status = "busy"
 		}
-		code, message = shared.Fallback(f.Code, f.Kind), fault.ConciseFailureMessage(f)
+		code, message = shared.Fallback(f.Code, f.Kind), fault.FailureReason(f)
 		diagnostic := fault.FailureDetail(f)
 		detail = shared.JSON(diagnostic)
 		trace = shared.Str(diagnostic["trace_id"])

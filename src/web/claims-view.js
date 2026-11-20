@@ -30,9 +30,27 @@ function manualClaimResults() {
 }
 
 function claimResultMessage(result) {
-  const code = result.code ?? result.httpStatus;
-  const message = result.message || result.error || '领取失败';
-  return `${message}${code && !String(message).includes(String(code)) ? `（${code}）` : ''}`;
+  const code = String(result.code ?? '').trim();
+  let message = String(result.error_reason || result.message || result.error || '领取失败');
+  const detail = result.error_detail || result.verification?.upstream_error || {};
+  const status = Number(result.http_status || detail.http_status || result.verification?.http_status || result.httpStatus);
+  const sdkStatus = Number(detail.sdk_http_status);
+  const gatewayStatus = Number(result.gateway_status);
+  const identifiers = [];
+  if (Number.isInteger(status) && status >= 100 && status <= 599) identifiers.push(`${detail.local_cooldown ? '上次上游' : '上游'} HTTP ${status}`);
+  else if (Number.isInteger(sdkStatus) && sdkStatus >= 100 && sdkStatus <= 599) identifiers.push(`SDK HTTP ${sdkStatus}`);
+  else if (Number.isInteger(gatewayStatus) && gatewayStatus >= 100 && gatewayStatus <= 599) identifiers.push(`网关 HTTP ${gatewayStatus}`);
+  else if (detail.local_cooldown) identifiers.push('本地冷却拦截');
+  else if (detail.claim_request_sent === false || result.verification?.claim_request_sent === false) identifiers.push('未发起领卡请求');
+  else identifiers.push('HTTP 状态未记录');
+  const sdkCode = detail.verify_code || detail.sdk_error_code || detail.sdk_code;
+  if (sdkCode && sdkCode !== code) identifiers.push(`SDK ${sdkCode}`);
+  if (code) {
+    const suffix = `（${code}）`;
+    if (message.endsWith(suffix)) message = message.slice(0, -suffix.length).trim();
+    identifiers.push(code);
+  }
+  return `${message}${identifiers.length ? `（${identifiers.join(' · ')}）` : ''}`;
 }
 
 function loadClaimCaptchaScript() {
@@ -631,7 +649,7 @@ async function pageClaims(main) {
     } catch (error) {
       if (claimActive(entry)) {
         const requiresVerification = claimNeedsVerification(manualClaimResults().get(entry.key));
-        result = { ok: false, message: error.message, requires_verification: requiresVerification, manualVerificationFailed: !entry.batch };
+        result = { ok: false, code: error.code, message: error.message, error_reason: error.error_reason, error_detail: error.error_detail, http_status: error.http_status, gateway_status: error.status, requires_verification: requiresVerification, manualVerificationFailed: !entry.batch };
       }
     } finally {
       releaseConfig();

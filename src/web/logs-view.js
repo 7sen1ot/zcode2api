@@ -8,11 +8,27 @@ globalThis.Z2ALogs = (() => {
   function errorText(row) {
     const summary = String(row.error_message ?? '').trim();
     const detail = String(row.error_detail?.message ?? '').trim();
-    const message = detail && detail !== summary ? [summary, detail].filter(Boolean).join('：') : summary || detail;
-    // Display the stored error code rather than deriving one from the status.
+    let message = String(row.error_reason || summary || detail).trim();
     const code = String(row.error_code ?? '').trim();
-    if (!code) return message || '—';
-    return !message || message === code ? code : `${message}（${code}）`;
+    const upstreamCode = String(row.error_detail?.upstream_code ?? '').trim();
+    const status = Number(row.error_detail?.http_status);
+    const sdkStatus = Number(row.error_detail?.sdk_http_status);
+    const identifiers = [];
+    if (Number.isInteger(status) && status >= 100 && status <= 599) identifiers.push(`${row.error_detail?.local_cooldown ? '上次上游' : '上游'} HTTP ${status}`);
+    else if (Number.isInteger(sdkStatus) && sdkStatus >= 100 && sdkStatus <= 599) identifiers.push(`SDK HTTP ${sdkStatus}`);
+    else if (row.error_detail?.local_cooldown) identifiers.push('本地冷却拦截');
+    else if (row.error_detail?.upstream_response_received === false) identifiers.push(row.error_detail.upstream_attempted ? '未收到上游 HTTP 响应' : '未发起推理请求');
+    else if (code || message) identifiers.push('HTTP 状态未记录');
+    if (upstreamCode && upstreamCode !== code) identifiers.push(`上游码 ${upstreamCode}`);
+    const sdkCode = row.error_detail?.verify_code || row.error_detail?.sdk_error_code || row.error_detail?.sdk_code;
+    if (sdkCode && sdkCode !== code && sdkCode !== upstreamCode) identifiers.push(`SDK ${sdkCode}`);
+    if (code) {
+      const suffix = `（${code}）`;
+      if (message.endsWith(suffix)) message = message.slice(0, -suffix.length).trim();
+      identifiers.push(code);
+    }
+    if (!identifiers.length) return message || '—';
+    return message && message !== code ? `${message}（${identifiers.join(' · ')}）` : identifiers.join(' · ');
   }
   function routeValues() {
     const values = { page: logPage, ...logSnapshot };

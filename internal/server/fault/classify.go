@@ -61,7 +61,7 @@ func Classify(f *Failure) *Failure {
 		}
 	case "permission_error":
 		kind = "permission"
-	case "invalid_request_error", "3001", "3006":
+	case "invalid_request_error", "1210", "3001", "3006":
 		kind = "invalid"
 	case "500", "2007", "1120", "1230":
 		kind, retry = "server", true

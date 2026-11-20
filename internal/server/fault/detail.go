@@ -24,6 +24,9 @@ func FailureDetail(f *Failure) shared.M {
 	if f.Status > 0 {
 		detail["status"] = f.Status
 	}
+	if f.VerifyCode != "" {
+		detail["verify_code"] = f.VerifyCode
+	}
 	return detail
 }
 

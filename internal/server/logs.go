@@ -52,6 +52,24 @@ func (a *App) pruneUsageLogs() {
 	}
 }
 
+func loggedFailure(code, message string, rawDetail any) *fault.Failure {
+	detail := shared.Obj(rawDetail)
+	if value, ok := rawDetail.(string); ok {
+		detail = shared.Obj(shared.Parse(value, nil))
+	}
+	if original := shared.Str(detail["message"]); original != "" {
+		message = original
+	}
+	return &fault.Failure{
+		Code:       code,
+		Message:    message,
+		Kind:       shared.Str(detail["kind"]),
+		Status:     int(shared.Integer(shared.First(detail["http_status"], detail["status"]))),
+		VerifyCode: shared.Str(detail["verify_code"]),
+		Detail:     detail,
+	}
+}
+
 func publicUsageLogs(rows []any) []any {
 	for _, v := range rows {
 		m := shared.Obj(v)
@@ -61,11 +79,19 @@ func publicUsageLogs(rows []any) []any {
 			m["ttft_ms"] != nil && m["tokens_in"] != nil && m["tokens_out"] != nil && shared.Num(m["tokens_in"]) == 0 && shared.Num(m["tokens_out"]) == 0 {
 			m["error_message"] = "已收到内容，但日志记录的 Token 用量为 0"
 		}
-		if shared.Str(m["error_message"]) != "" {
+		if shared.Str(m["error_message"]) != "" || shared.Str(m["error_code"]) != "" {
 			if m["error_detail"] == nil {
 				m["error_detail"] = shared.M{"message": m["error_message"]}
 			}
-			m["error_message"] = fault.ConciseFailureMessage(&fault.Failure{Code: shared.Str(m["error_code"]), Message: shared.Str(m["error_message"])})
+			detail := shared.Obj(m["error_detail"])
+			body := shared.Obj(shared.Parse(detail["body"], nil))
+			upstreamError := shared.Obj(body["error"])
+			if code := shared.Str(shared.First(upstreamError["code"], body["code"], upstreamError["type"])); code != "" {
+				detail["upstream_code"] = code
+			}
+			failure := loggedFailure(shared.Str(m["error_code"]), shared.Str(m["error_message"]), detail)
+			m["error_message"] = fault.ConciseFailureMessage(failure)
+			m["error_reason"] = fault.FailureReason(failure)
 		}
 	}
 	return rows
@@ -183,14 +209,14 @@ func (a *App) pagedUsageLogs(r *http.Request) (any, int, error) {
 	choices["accounts"] = logChoice(a.rows("SELECT DISTINCT u.account_id,a.label FROM usage_log u LEFT JOIN accounts a ON a.id=u.account_id WHERE u.id<=? ORDER BY COALESCE(a.label,u.account_id)", snapshot), "account_id", "label")
 	choices["keys"] = logChoice(a.rows("SELECT DISTINCT u.key_id,k.name FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id WHERE u.id<=? ORDER BY COALESCE(k.name,u.key_id)", snapshot), "key_id", "name")
 	errors := []any{}
-	for _, v := range a.rows("SELECT COALESCE(error_code,'') code,MAX(error_message) message FROM usage_log WHERE id<=? AND (COALESCE(status,'')<>'success' OR COALESCE(error_code,'')<>'') GROUP BY COALESCE(error_code,'') ORDER BY code", snapshot) {
+	for _, v := range a.rows("SELECT COALESCE(error_code,'') code,error_message message,error_detail FROM usage_log WHERE id IN (SELECT MAX(id) FROM usage_log WHERE id<=? AND (COALESCE(status,'')<>'success' OR COALESCE(error_code,'')<>'') GROUP BY COALESCE(error_code,'')) ORDER BY code", snapshot) {
 		r := shared.Obj(v)
 		code := shared.Str(r["code"])
-		label := fault.ConciseFailureMessage(&fault.Failure{Code: code, Message: shared.Str(r["message"])})
+		label := fault.ConciseFailureMessage(loggedFailure(code, shared.Str(r["message"]), r["error_detail"]))
 		value := code
 		if value == "" {
 			value, label = "__uncoded__", "未提供错误码"
-		} else {
+		} else if !strings.HasSuffix(label, "（"+code+"）") {
 			label += "（" + code + "）"
 		}
 		errors = append(errors, shared.M{"value": value, "label": label})

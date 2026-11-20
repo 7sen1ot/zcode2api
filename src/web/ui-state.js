@@ -28,13 +28,16 @@ globalThis.Z2AUI = (() => {
     const last = Math.floor(shifted / step) * step;
     const first = Math.floor((start + offset * 60000) / step) * step;
     const known = new Map((stats.byHour || []).map(row => [row.bucket, row]));
+    const number = value => Math.max(0, Number(value) || 0);
     const rows = [];
     for (let ts = first; ts <= last; ts += step) {
       const iso = new Date(ts).toISOString();
       const bucket = step === 86400000 ? iso.slice(0, 10) : iso.slice(0, 13) + ':00:00';
       const row = known.get(bucket);
-      rows.push({ bucket, reqs: Number(row?.reqs) || 0, ok: Number(row?.ok) || 0,
-        tokens: (Number(row?.tin) || 0) + (Number(row?.tout) || 0), partial: ts < start + offset * 60000 || ts + step > shifted });
+      const input = number(row?.tin), output = number(row?.tout), cached = number(row?.cached_tokens);
+      rows.push({ bucket, reqs: Number(row?.reqs) || 0, input, output, cached,
+        tokens: input + output, rate: input > 0 ? cached / input * 100 : null,
+        partial: ts < start + offset * 60000 || ts + step > shifted });
     }
     return { rows, offset };
   }

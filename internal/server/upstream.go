@@ -211,6 +211,7 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 	}
 	committed := false
 	var res *http.Response
+	upstreamAttempted := false
 	requestDetail := shared.M{}
 	var requestSecrets []string
 	defer func() {
@@ -220,6 +221,10 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 		failure.Detail = fault.FailureDetail(failure)
 		for key, value := range requestDetail {
 			failure.Detail[key] = value
+		}
+		if !failure.LocalOnly && !shared.Truth(failure.Detail["local_cooldown"]) {
+			failure.Detail["upstream_attempted"] = upstreamAttempted
+			failure.Detail["upstream_response_received"] = res != nil
 		}
 		if res != nil {
 			failure.Detail["http_status"] = res.StatusCode
@@ -316,6 +321,7 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 		if o.OnAttempt != nil {
 			o.OnAttempt()
 		}
+		upstreamAttempted = true
 		res, e = client.Do(req)
 		if e != nil {
 			return nil, routing.TransportFailure(ctx, e)
@@ -359,11 +365,20 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 		}
 		return nil, failure
 	}
+	r.HTTPStatus = res.StatusCode
 	defer res.Body.Close()
 	if !strings.Contains(res.Header.Get("Content-Type"), "text/event-stream") {
 		body, readError := io.ReadAll(io.LimitReader(res.Body, fault.FailureBodyLimit+1))
 		if len(body) == 0 && readError == nil {
 			return nil, &fault.Failure{Status: http.StatusBadGateway, Code: "upstream_empty_response", Message: "上游结束响应，但未返回任何内容"}
+		}
+		if readError == nil {
+			payload := shared.Obj(shared.Parse(string(body), nil))
+			code := payload["code"]
+			if len(shared.Obj(payload["error"])) > 0 || shared.Str(payload["type"]) == "error" || code != nil && !shared.CodeIs(code, 0) && !shared.CodeIs(code, 200) {
+				// A successful HTTP status can still carry a business refusal.
+				return nil, fault.UpstreamHTTPFailure(res, body)
+			}
 		}
 		detail := shared.M{"body": fault.FailureBody(string(body))}
 		if readError != nil {

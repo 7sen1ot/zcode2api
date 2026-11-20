@@ -270,8 +270,11 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			if requestContext.Err() != nil {
 				failure = &fault.Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
 			}
-			_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger) VALUES(?,?,?,?,?,?,?)", id, shared.NowMS(), plan, 0, failure.Code, fault.ConciseFailureMessage(failure), trigger)
-			result = shared.Merge(result, shared.M{"ok": false, "code": failure.Code, "message": fault.ConciseFailureMessage(failure), "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "verification": diagnostic})
+			claimDetail := fault.FailureDetail(failure)
+			claimDetail["stage"], claimDetail["claim_request_sent"] = diagnostic["stage"], requestSent.Load()
+			reason := fault.FailureReason(failure)
+			_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, 0, failure.Code, reason, trigger, shared.JSON(claimDetail))
+			result = shared.Merge(result, shared.M{"ok": false, "code": failure.Code, "message": fault.ConciseFailureMessage(failure), "error_reason": reason, "error_detail": claimDetail, "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "verification": diagnostic})
 			err = failure
 		}
 		if !shared.Truth(result["ok"]) {
@@ -434,7 +437,19 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		}
 	}
 	end := accountdata.SecondsMS(p["ends_at"])
-	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger) VALUES(?,?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, shared.Integer(completed), code, message, p["user_plan_id"], end, trigger)
+	claimDetail := shared.M{}
+	if failure != nil {
+		claimDetail = fault.FailureDetail(failure)
+	}
+	claimDetail["stage"], claimDetail["claim_request_sent"] = diagnostic["stage"], requestSent.Load()
+	if res.Status > 0 {
+		claimDetail["http_status"], claimDetail["upstream_code"] = res.Status, code
+	}
+	reason := shared.Str(message)
+	if failure != nil {
+		reason = fault.FailureReason(failure)
+	}
+	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, shared.Integer(completed), code, reason, p["user_plan_id"], end, trigger, shared.JSON(claimDetail))
 	diagnostic["initial_http_status"], diagnostic["http_status"], diagnostic["requires_verification"] = res.Status, res.Status, requiresVerification
 	if verificationFailure != nil {
 		diagnostic["sdk_error"] = verificationFailure.Code
@@ -450,7 +465,10 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if len(p) > 0 {
 		resultPlan = p
 	}
-	result = shared.M{"ok": completed, "httpStatus": res.Status, "code": code, "message": message, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification, "verification": diagnostic}
+	result = shared.M{"ok": completed, "httpStatus": res.Status, "code": code, "message": message, "error_reason": reason, "error_detail": claimDetail, "plan": resultPlan, "endsAt": end, "requires_verification": requiresVerification, "verification": diagnostic}
+	if res.Status > 0 {
+		result["http_status"] = res.Status
+	}
 	if alreadyClaimed {
 		result["already_claimed"] = true
 	}
