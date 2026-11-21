@@ -26,7 +26,6 @@
     "refresh_interval_sec": 3600
   },
   "http": {
-    "client_version": "3.18.2",
     "first_token_timeout_ms": 60000,
     "idle_timeout_ms": 120000,
     "total_timeout_ms": 0,
@@ -47,9 +46,6 @@
     "busy_wait_sec": 60,
     "total_budget_ms": 120000
   },
-  "app_version": "3.18.2",
-  "zcode_version_auto_update": true,
-  "zcode_version_check_interval_sec": 432000,
   "trust_proxy": false,
   "admin_bind_public": false,
   "conversation_affinity_minutes": 10

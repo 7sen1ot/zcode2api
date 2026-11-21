@@ -108,8 +108,6 @@ type App struct {
 	proxyHealthReschedule  chan struct{}
 	mihomoInstallMu        sync.Mutex
 	updates                updateManager
-	zcodeVersionMu         sync.Mutex
-	zcodeVersionReschedule chan struct{}
 }
 
 func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
@@ -135,14 +133,12 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	a := &App{db: d, data: data, secret: secret, log: log.New(out, "", log.LstdFlags), logfile: lf, web: web, cfg: cfg, ctx: ctx, cancel: cancel, states: map[string]*accountState{}, sticky: map[string]stickyEntry{}, responses: map[string]responseEntry{}, clients: map[string]*http.Client{}, jars: map[string]*diskJar{}, claimLocks: map[string]bool{}, claimReschedule: make(chan struct{}, 1), flowLocks: map[string]bool{}, reauth: map[string]int64{}, pollDue: map[string]int64{}, polling: map[string]bool{}, origin: "https://zcode.z.ai"}
 	a.root = root
 	a.version = buildVersion
-	a.zcodeVersionReschedule = make(chan struct{}, 1)
 	a.proxyHealthReschedule = make(chan struct{}, 1)
 	a.pollWake = make(chan struct{}, 1)
 	a.usageLogCleanupWake = make(chan struct{}, 1)
 	a.claimPreviewSlots = make(chan struct{}, shared.AccountOperationConcurrency)
 	a.balances.slots = make(chan struct{}, shared.AccountOperationConcurrency)
 	saved := shared.Obj(a.setting("config_overrides", shared.M{}))
-	migrateHTTPVersion := !shared.Truth(a.setting("http_client_version_3_17_2_migrated", false))
 	migrateBalancePoll := !shared.Truth(a.setting("balance_poll_30s_migrated", false))
 	clean := settings.KnownConfig(cfg, saved)
 	if !settings.ValidUsageLogRetentionDays(cfg["usage_log_retention_days"]) {
@@ -162,13 +158,6 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	if clean["inference_driver"] != nil {
 		clean["inference_driver"] = "http"
 	}
-	// Upgrade the old default once, preserving later edits and other custom versions.
-	if migrateHTTPVersion && shared.Str(shared.Obj(a.cfg["http"])["client_version"]) == "0.17.0" {
-		shared.Obj(a.cfg["http"])["client_version"] = settings.DefaultHTTPClientVersion
-		httpOverrides := shared.Obj(clean["http"])
-		httpOverrides["client_version"] = settings.DefaultHTTPClientVersion
-		clean["http"] = httpOverrides
-	}
 	// Migrate the previous five-second default once. Preserve custom intervals
 	// and allow later explicit edits, including opting back into five seconds.
 	if migrateBalancePoll && shared.Num(a.cfg["poll_interval_sec"]) == 5 {
@@ -183,12 +172,6 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	}
 	if shared.JSON(clean) != shared.JSON(saved) {
 		if e = a.setSetting("config_overrides", clean); e != nil {
-			a.Close()
-			return nil, e
-		}
-	}
-	if migrateHTTPVersion {
-		if e = a.setSetting("http_client_version_3_17_2_migrated", true); e != nil {
 			a.Close()
 			return nil, e
 		}

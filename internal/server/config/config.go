@@ -11,29 +11,29 @@ import (
 	"zcode2api/internal/server/shared"
 )
 
-const DefaultHTTPClientVersion = "3.18.2"
+// Keep the version pinned to the reviewed client fingerprint. Update it together
+// with request headers, attribution, metadata and system templates.
+const ZCodeFingerprintVersion = "3.19.1"
 
 const DefaultBalancePollInterval = 30
 
 const DefaultUsageLogRetentionDays = 30
 
-const EditableSettings = "poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time conversation_affinity_minutes usage_log_retention_days default_reasoning_level app_version zcode_version_auto_update zcode_version_check_interval_sec aliases retry inference_driver http outbound_proxy github_update_mirror zcode_template_mode zcode_subagent_template zcode_subagent_insert_enabled zcode_subagent_harness_enabled zcode_subagent_files_enabled zcode_subagent_comments_enabled"
+const EditableSettings = "poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time conversation_affinity_minutes usage_log_retention_days default_reasoning_level aliases retry inference_driver http outbound_proxy github_update_mirror zcode_template_mode zcode_subagent_template zcode_subagent_insert_enabled zcode_subagent_harness_enabled zcode_subagent_files_enabled zcode_subagent_comments_enabled"
 
 func defaults() shared.M {
 	return shared.M{
 		"zcode_template_mode": "main", "zcode_subagent_template": "",
 		"zcode_subagent_insert_enabled": false, "zcode_subagent_harness_enabled": false,
 		"zcode_subagent_files_enabled": false, "zcode_subagent_comments_enabled": false,
-		"inference_driver": "http", "http": shared.M{"client_version": DefaultHTTPClientVersion, "first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": shared.M{"mode": "off", "claim_runtime": "jsdom", "playwright_path": "", "browser_path": "", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
-		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": DefaultBalancePollInterval, "poll_jitter_sec": 0, "poll_concurrency": shared.AccountOperationConcurrency, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "default_reasoning_level": "low", "app_version": DefaultHTTPClientVersion,
-		"daily_claim_enabled":              true,
-		"daily_claim_time":                 DefaultDailyClaimTime,
-		"usage_log_retention_days":         DefaultUsageLogRetentionDays,
-		"zcode_version_auto_update":        true,
-		"zcode_version_check_interval_sec": defaultZCodeVersionCheckIntervalSec,
-		"github_update_mirror":             "",
-		"retry":                            shared.M{"rate_limit_retry_interval_ms": 1000, "max_attempts": 10, "base_delay_ms": 2000, "backoff_factor": 2, "max_delay_ms": 60000, "jitter": true, "busy_wait_sec": 60, "total_budget_ms": 120000, "min_request_window_sec": 60},
-		"aliases":                          shared.M{"glm-flash": "GLM-5.3-Flash", "glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3"}, "bind_public": false, "proxy_url": "", "outbound_proxy": routing.ProxyDefaults(), "trust_proxy": false, "admin_bind_public": false,
+		"inference_driver": "http", "http": shared.M{"first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": shared.M{"mode": "off", "claim_runtime": "jsdom", "playwright_path": "", "browser_path": "", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
+		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": DefaultBalancePollInterval, "poll_jitter_sec": 0, "poll_concurrency": shared.AccountOperationConcurrency, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "default_reasoning_level": "low",
+		"daily_claim_enabled":      true,
+		"daily_claim_time":         DefaultDailyClaimTime,
+		"usage_log_retention_days": DefaultUsageLogRetentionDays,
+		"github_update_mirror":     "",
+		"retry":                    shared.M{"rate_limit_retry_interval_ms": 1000, "max_attempts": 10, "base_delay_ms": 2000, "backoff_factor": 2, "max_delay_ms": 60000, "jitter": true, "busy_wait_sec": 60, "total_budget_ms": 120000, "min_request_window_sec": 60},
+		"aliases":                  shared.M{"glm-flash": "GLM-5.3-Flash", "glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3"}, "bind_public": false, "proxy_url": "", "outbound_proxy": routing.ProxyDefaults(), "trust_proxy": false, "admin_bind_public": false,
 	}
 }
 

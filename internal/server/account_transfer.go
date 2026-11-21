@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 	accountdata "zcode2api/internal/server/account"
+	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
 )
@@ -197,7 +198,7 @@ func (a *App) importAccounts(ctx context.Context, b shared.M) (any, int, error) 
 	if b["group_id"] != nil && !validGroup {
 		return adminError(400, "目标分组无效")
 	}
-	appVersion := shared.Str(a.configValue("app_version"))
+	appVersion := settings.ZCodeFingerprintVersion
 	a.credentialMu.Lock()
 	defer a.credentialMu.Unlock()
 	tx, err := a.db.BeginTx(ctx, nil)

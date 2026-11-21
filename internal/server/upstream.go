@@ -86,8 +86,7 @@ func (t *requestTiming) snapshot() shared.M {
 }
 
 func (a *App) upstreamHeaders(token, session, id string, source inferenceSource) http.Header {
-	// ZCode 3.17.2 sends the desktop app version, not the inference API version.
-	version := shared.Str(shared.Fallback(a.configValue("app_version"), settings.DefaultHTTPClientVersion))
+	version := settings.ZCodeFingerprintVersion
 	clientPlatform := platform()
 	osCategory := runtime.GOOS
 	if osCategory == "darwin" {
@@ -308,7 +307,7 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 		}
 		req.Header = a.upstreamHeaders(token, session, requestID, o.Source)
 		// Keep the source header and metadata tied to the account's existing
-		// device identity, as the official 3.18.2 client does.
+		// device identity, as the official client does.
 		if device := shared.Str(account["device_mid"]); device != "" {
 			req.Header.Set("X-Device-Mid", device)
 		}

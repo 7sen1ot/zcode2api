@@ -12,7 +12,6 @@ import (
 )
 
 func (a *App) startWorkers() {
-	a.startZCodeVersionUpdates()
 	for i, v := range a.rows("SELECT id FROM accounts ORDER BY created_at") {
 		a.scheduleNext(shared.Str(shared.Obj(v)["id"]), time.Duration(i)*300*time.Millisecond)
 	}

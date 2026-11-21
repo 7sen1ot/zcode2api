@@ -134,8 +134,8 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		_, err := a.db.ExecContext(ctx, "DELETE FROM admin_sessions WHERE token_hash=?", shared.Hash(adminSessionToken(r)))
 		return wrap(ok, err)
 	case "GET /api/runtime-info":
-		cfg := a.config("host", "app_version", "poll_interval_sec")
-		return shared.M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": cfg["app_version"], "version": a.version, "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"], "account_operation_concurrency": shared.AccountOperationConcurrency}, 200, nil
+		cfg := a.config("host", "poll_interval_sec")
+		return shared.M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": settings.ZCodeFingerprintVersion, "version": a.version, "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"], "account_operation_concurrency": shared.AccountOperationConcurrency}, 200, nil
 	case "GET /api/accounts":
 		if r.URL.Query().Get("view") == "groups" {
 			return wrap(storage.Query(a.db, "SELECT id,label,customer_id,family,group_id,status FROM accounts ORDER BY created_at,id"))
@@ -291,14 +291,8 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		over := shared.Obj(a.setting("config_overrides", shared.M{}))
 		delete(over, "notify_webhook")
 		out["overrides"] = over
-		out["zcode_version_status"] = a.setting("zcode_version_status", shared.M{})
+		out["zcode_fingerprint_version"] = settings.ZCodeFingerprintVersion
 		return out, 200, nil
-	case "POST /api/settings/zcode-version/sync":
-		if err := a.syncZCodeVersion(ctx); err != nil {
-			return adminError(502, err.Error())
-		}
-		current := a.config("app_version", "http")
-		return shared.M{"ok": true, "app_version": current["app_version"], "client_version": shared.Obj(current["http"])["client_version"], "status": a.setting("zcode_version_status", shared.M{})}, 200, nil
 	case "GET /api/settings/captcha/runtime":
 		options := shared.Obj(a.configValue("http", "captcha"))
 		for _, key := range []string{"node_path", "jsdom_path", "playwright_path", "browser_path"} {
@@ -368,21 +362,10 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		over := shared.Obj(a.setting("config_overrides", shared.M{}))
 		delete(over, "notify_webhook")
 		next := shared.Clone(a.cfg)
-		autoVersion := shared.Truth(next["zcode_version_auto_update"])
-		if value, present := b["zcode_version_auto_update"]; present {
-			autoVersion = shared.Truth(value)
-		}
 		for _, k := range strings.Fields(settings.EditableSettings) {
 			v, present := b[k]
 			if !present {
 				continue
-			}
-			if autoVersion && k == "app_version" {
-				continue
-			}
-			if autoVersion && k == "http" {
-				v = shared.Clone(shared.Obj(v))
-				delete(shared.Obj(v), "client_version")
 			}
 			if k == "retry" || k == "http" || k == "outbound_proxy" {
 				v = settings.DeepMerge(shared.Obj(next[k]), shared.Obj(v), false)
@@ -399,10 +382,8 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 			return adminError(400, e.Error())
 		}
 		proxyChanged := shared.JSON(next["outbound_proxy"]) != shared.JSON(a.cfg["outbound_proxy"])
-		captchaChanged := proxyChanged || shared.JSON(next["app_version"]) != shared.JSON(a.cfg["app_version"]) || shared.JSON(shared.Obj(next["http"])["captcha"]) != shared.JSON(shared.Obj(a.cfg["http"])["captcha"])
+		captchaChanged := proxyChanged || shared.JSON(shared.Obj(next["http"])["captcha"]) != shared.JSON(shared.Obj(a.cfg["http"])["captcha"])
 		claimScheduleChanged := shared.JSON(next["daily_claim_time"]) != shared.JSON(a.cfg["daily_claim_time"]) || shared.JSON(next["daily_claim_enabled"]) != shared.JSON(a.cfg["daily_claim_enabled"])
-		versionSyncEnabled := autoVersion && (proxyChanged || !shared.Truth(a.cfg["zcode_version_auto_update"]))
-		versionScheduleChanged := shared.JSON(next["zcode_version_auto_update"]) != shared.JSON(a.cfg["zcode_version_auto_update"]) || shared.JSON(next["zcode_version_check_interval_sec"]) != shared.JSON(a.cfg["zcode_version_check_interval_sec"])
 		logRetentionChanged := shared.Integer(next["usage_log_retention_days"]) != shared.Integer(a.cfg["usage_log_retention_days"])
 		if e := a.setSetting("config_overrides", over); e != nil {
 			a.configMu.Unlock()
@@ -422,18 +403,8 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		if claimScheduleChanged || captchaChanged {
 			a.rescheduleClaims()
 		}
-		if versionScheduleChanged {
-			a.rescheduleZCodeVersionChecks()
-		}
 		if logRetentionChanged {
 			shared.Wake(a.usageLogCleanupWake)
-		}
-		if versionSyncEnabled {
-			a.background(func() {
-				if err := a.syncZCodeVersion(a.ctx); err != nil && a.ctx.Err() == nil {
-					a.log.Printf("ZCode 版本同步失败，沿用当前版本：%v", err)
-				}
-			})
 		}
 		if b["daily_claim_enabled"] != nil || b["daily_claim_time"] != nil {
 			return shared.M{"ok": true, "claim_schedule": a.dailyClaimSchedule()}, 200, nil

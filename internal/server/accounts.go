@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	accountdata "zcode2api/internal/server/account"
+	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
@@ -113,7 +114,7 @@ func (a *App) insertAccount(fields, tokens shared.M) (shared.M, error) {
 			plain[k] = shared.Str(v)
 		}
 	}
-	appVersion := shared.Str(a.configValue("app_version"))
+	appVersion := settings.ZCodeFingerprintVersion
 	tx, err := a.db.Begin()
 	if err != nil {
 		return nil, err
@@ -186,7 +187,7 @@ func (a *App) fetchBalanceUpstream(ctx context.Context, r shared.M) (shared.M, e
 	if accountdata.LoginJWTExpired(t) {
 		return shared.M{"ok": false, "authFailed": true, "httpStatus": 401, "failure_kind": "auth", "error_code": "login_expired", "reason": "ZCode 登录已过期，请重新授权"}, nil
 	}
-	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/balance?app_version="+shared.Str(a.configValue("app_version")), shared.Str(t["zcode_jwt"]), nil, shared.M{"X-Device-Mid": r["device_mid"], "X-Request-Id": shared.UUID()}, a.jar(shared.Str(r["id"])))
+	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/balance?app_version="+settings.ZCodeFingerprintVersion, shared.Str(t["zcode_jwt"]), nil, shared.M{"X-Device-Mid": r["device_mid"], "X-Request-Id": shared.UUID()}, a.jar(shared.Str(r["id"])))
 	if e != nil {
 		return nil, e
 	}

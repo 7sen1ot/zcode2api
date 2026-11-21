@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	captchasdk "zcode2api/internal/server/captcha"
@@ -12,8 +11,6 @@ import (
 	routing "zcode2api/internal/server/proxy"
 	"zcode2api/internal/server/shared"
 )
-
-var VersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 const MaxUsageLogRetentionDays = (1<<63 - 1) / int64(24*time.Hour)
 
@@ -65,23 +62,10 @@ func ValidateSettings(b shared.M) error {
 			return fmt.Errorf("自定义模板必须为不超过 256 KiB 的文本")
 		}
 	}
-	if value, present := b["zcode_version_check_interval_sec"]; present {
-		if !shared.IntegerInRange(value, minZCodeVersionCheckIntervalSec, maxZCodeVersionCheckIntervalSec) {
-			return fmt.Errorf("ZCode 版本检查间隔须为 1 分钟到 365 天之间的整数秒数")
-		}
-	}
-	if value, present := b["zcode_version_auto_update"]; present {
-		if _, ok := value.(bool); !ok {
-			return fmt.Errorf("zcode_version_auto_update 必须为布尔值")
-		}
-	}
 	if value, present := b["outbound_proxy"]; present {
 		if err := routing.ValidateOutboundProxyFields(value); err != nil {
 			return err
 		}
-	}
-	if v, ok := b["app_version"]; ok && !VersionPattern.MatchString(shared.Str(v)) {
-		return fmt.Errorf("额度与领卡 API 版本须为三段数字，例如 3.16.2")
 	}
 	if v, ok := b["inference_driver"]; ok && shared.Str(v) != "http" {
 		return fmt.Errorf("网关仅支持 HTTP 直连")
@@ -104,9 +88,6 @@ func ValidateSettings(b shared.M) error {
 					return fmt.Errorf("%s 超时设置无效", k)
 				}
 			}
-		}
-		if v, ok := h["client_version"]; ok && !VersionPattern.MatchString(shared.Str(v)) {
-			return fmt.Errorf("推理 API 版本须为三段数字，例如 %s", DefaultHTTPClientVersion)
 		}
 		if v, ok := h["captcha"]; ok {
 			if err := captchasdk.ValidateCaptchaOptions(v); err != nil {

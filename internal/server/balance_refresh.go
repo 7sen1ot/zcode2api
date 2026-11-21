@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 	accountdata "zcode2api/internal/server/account"
+	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
@@ -52,8 +53,7 @@ type balanceManager struct {
 }
 
 func (a *App) balanceScope(r shared.M) string {
-	cfg := a.config("app_version", "outbound_proxy")
-	return shared.Hash(shared.JSON([]any{r["id"], r["enc_tokens"], r["device_mid"], r["proxy_url"], a.origin, cfg["app_version"], cfg["outbound_proxy"]}))
+	return shared.Hash(shared.JSON([]any{r["id"], r["enc_tokens"], r["device_mid"], r["proxy_url"], a.origin, settings.ZCodeFingerprintVersion, a.configValue("outbound_proxy")}))
 }
 
 func (a *App) invalidateBalance(id string) {
