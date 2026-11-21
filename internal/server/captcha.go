@@ -198,7 +198,7 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account shared.M, options, 
 			return
 		}
 		failure.Detail = fault.FailureDetail(failure)
-		for from, to := range map[string]string{"stage": "sdk_stage", "code": "sdk_code", "sdk_error_code": "sdk_error_code"} {
+		for from, to := range map[string]string{"stage": "sdk_stage", "code": "sdk_code", "sdk_error_code": "sdk_error_code", "browser_launch_reason": "browser_launch_reason", "fallback_code": "fallback_code"} {
 			if value := shared.Str(result[from]); value != "" {
 				failure.Detail[to] = fault.BoundedFailureText(value)
 			}
@@ -227,7 +227,7 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account shared.M, options, 
 		if result["runtime"] == "native_browser" {
 			diagnostic["runtime"] = "native_browser"
 		}
-		shared.CopyFields(diagnostic, result, "sdk_error_code", "sdk_load_ms", "sdk_init_ms", "sdk_ready_wait_ms", "sdk_prepared_age_ms", "sdk_verify_ms", "request_id", "browser_version", "browser_visibility", "session_reused")
+		shared.CopyFields(diagnostic, result, "sdk_error_code", "sdk_load_ms", "sdk_init_ms", "sdk_ready_wait_ms", "sdk_prepared_age_ms", "sdk_verify_ms", "request_id", "browser_version", "browser_visibility", "session_reused", "browser_backend", "browser_headless", "browser_path", "browser_display", "browser_webdriver", "browser_origin", "browser_launch_reason", "fallback_code")
 	}
 	if ctx.Err() != nil {
 		return captchaTicket{}, &fault.Failure{Kind: "server", Code: "captcha_timeout", Message: "SDK 验证已取消或超时"}
@@ -237,7 +237,7 @@ func (a *App) mintCaptchaTicket(ctx context.Context, account shared.M, options, 
 	}
 	if !shared.Truth(result["ok"]) {
 		switch shared.Str(result["code"]) {
-		case "captcha_playwright_missing", "captcha_browser_missing", "captcha_browser_launch_failed":
+		case "captcha_playwright_missing", "captcha_browser_missing", "captcha_browser_launch_failed", "captcha_display_unavailable", "captcha_native_unsupported":
 			return captchaTicket{}, &fault.Failure{Kind: "server", Code: shared.Str(result["code"]), Message: fault.ConciseFailureMessage(&fault.Failure{Code: shared.Str(result["code"])})}
 		case "captcha_jsdom_missing":
 			return captchaTicket{}, &fault.Failure{Kind: "server", Code: "captcha_jsdom_missing", Message: "未找到 jsdom，请在程序根目录运行 npm --prefix captcha_node ci --omit=dev --ignore-scripts，或配置 http.captcha.jsdom_path"}

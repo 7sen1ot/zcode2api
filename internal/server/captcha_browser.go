@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 	captchasdk "zcode2api/internal/server/captcha"
@@ -82,7 +81,7 @@ func (a *App) acquireClaimCaptchaSlot(ctx context.Context, background bool) (fun
 }
 
 func (a *App) browserParameters(options shared.M) shared.M {
-	return shared.M{"root": a.root, "module_path": a.captchaModulePath(shared.Str(options["jsdom_path"])), "playwright_path": shared.Str(options["playwright_path"]), "driver_path": filepath.Join(a.data, "tools", "playwright"), "browser_cache": filepath.Join(a.data, "tools", "chromium"), "browser_path": shared.Str(options["browser_path"])}
+	return shared.M{"root": a.root, "module_path": a.captchaModulePath(shared.Str(options["jsdom_path"])), "playwright_path": shared.Str(options["playwright_path"]), "driver_path": filepath.Join(a.data, "tools", "playwright"), "browser_cache": filepath.Join(a.data, "tools", "chromium"), "browser_path": shared.Str(options["browser_path"]), "browser_backend": shared.Str(options["browser_backend"]), "browser_headless": options["browser_headless"], "browser_display": shared.Str(options["browser_display"])}
 }
 
 func (a *App) writeCaptchaRuntime(name string, source []byte) (string, error) {
@@ -103,7 +102,6 @@ func (a *App) browserHelper() (string, error) {
 	return a.writeCaptchaRuntime("captcha_browser.cjs", captchasdk.CaptchaBrowserRuntime)
 }
 
-// Worker slots serialize requests; each worker has its own process, SDK and browser profile.
 func (a *App) runBrowserCaptcha(ctx context.Context, options, parameters shared.M) (result shared.M, err error) {
 	manager := a.claimBrowserForContext(ctx)
 	manager.mu.Lock()
@@ -111,7 +109,7 @@ func (a *App) runBrowserCaptcha(ctx context.Context, options, parameters shared.
 		manager.mu.Unlock()
 		return nil, context.Canceled
 	}
-	key := shared.JSON([]any{options["node_path"], options["playwright_path"], options["browser_path"]})
+	key := shared.JSON([]any{options["node_path"], options["playwright_path"], options["browser_path"], options["browser_backend"], options["browser_headless"], options["browser_display"]})
 	if manager.process != nil && manager.process.key != key {
 		a.stopClaimBrowserLocked(manager)
 	}
@@ -146,7 +144,7 @@ func (a *App) runBrowserCaptcha(ctx context.Context, options, parameters shared.
 		if manager.process != process {
 			return
 		}
-		if err != nil || ctx.Err() != nil || result["code"] == "captcha_playwright_missing" || result["code"] == "captcha_browser_missing" || result["code"] == "captcha_browser_launch_failed" {
+		if err != nil || ctx.Err() != nil || result["code"] == "captcha_playwright_missing" || result["code"] == "captcha_browser_missing" || result["code"] == "captcha_browser_launch_failed" || result["code"] == "captcha_display_unavailable" {
 			a.stopClaimBrowserLocked(manager)
 		} else {
 			a.armClaimBrowserLocked(manager)
@@ -199,17 +197,15 @@ func (a *App) startClaimBrowser(options shared.M, key string) (*claimBrowserProc
 		return nil, err
 	}
 	process := &claimBrowserProcess{key: key, input: input, replies: make(chan shared.M, 1), done: make(chan struct{}), cancel: cancel}
-	if runtime.GOOS == "windows" {
-		profiles := filepath.Join(a.data, "browser-profiles")
-		if err = os.MkdirAll(profiles, 0700); err == nil {
-			process.profileDir, err = os.MkdirTemp(profiles, "worker-")
-		}
-		if err != nil {
-			cancel()
-			input.Close()
-			output.Close()
-			return nil, err
-		}
+	profiles := filepath.Join(a.data, "browser-profiles")
+	if err = os.MkdirAll(profiles, 0700); err == nil {
+		process.profileDir, err = os.MkdirTemp(profiles, "worker-")
+	}
+	if err != nil {
+		cancel()
+		input.Close()
+		output.Close()
+		return nil, err
 	}
 	exited := make(chan struct{})
 	command.Cancel = func() error {
@@ -228,9 +224,7 @@ func (a *App) startClaimBrowser(options shared.M, key string) (*claimBrowserProc
 		cancel()
 		input.Close()
 		output.Close()
-		if process.profileDir != "" {
-			_ = os.Remove(process.profileDir)
-		}
+		_ = os.Remove(process.profileDir)
 		return nil, err
 	}
 	a.background(func() {
@@ -253,18 +247,16 @@ func (a *App) startClaimBrowser(options shared.M, key string) (*claimBrowserProc
 		_ = command.Wait()
 		close(exited)
 		// Reap the worker's private directory even if it was stopped forcibly.
-		if process.profileDir != "" {
-			for attempt := range 3 {
-				err := os.RemoveAll(process.profileDir)
-				if err == nil {
-					break
-				}
-				if attempt == 2 {
-					a.log.Printf("清理浏览器配置目录失败: %v", err)
-					break
-				}
-				time.Sleep(200 * time.Millisecond)
+		for attempt := range 3 {
+			err := os.RemoveAll(process.profileDir)
+			if err == nil {
+				break
 			}
+			if attempt == 2 {
+				a.log.Printf("清理浏览器配置目录失败: %v", err)
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
 	})
 	return process, nil
@@ -351,7 +343,7 @@ func (a *App) warmClaimBrowser(ctx context.Context, options shared.M, due time.T
 }
 
 func (a *App) warmClaimBrowserWorker(ctx context.Context, options shared.M) error {
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	release, acquired := a.acquireClaimCaptchaSlot(ctx, true)
 	if !acquired {

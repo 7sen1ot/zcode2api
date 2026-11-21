@@ -7,6 +7,47 @@ const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
 const { captchaExpression } = require('./captcha.cjs');
 
+function processInfo(pid) {
+  try {
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
+    return { pid: Number(pid), parent: Number(fields[1]), started: fields[19] };
+  } catch { return null; }
+}
+
+async function stopBrowser(child) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === 'win32') {
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    const killed = await new Promise(resolve => execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, error => resolve(!error)));
+    if (killed) await exited;
+    return;
+  }
+  // Keep descendants in the Go worker's process group for forced shutdown.
+  // Snapshot ownership before closing Chrome; never signal an unrelated reused PID.
+  let processes = [];
+  try { processes = fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)).map(processInfo).filter(Boolean); } catch {}
+  const owned = new Set([child.pid]), descendants = [];
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const item of processes) {
+      if (!owned.has(item.pid) && owned.has(item.parent)) {
+        owned.add(item.pid); descendants.push(item); changed = true;
+      }
+    }
+  }
+  await new Promise(resolve => {
+    const finish = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => child.kill('SIGKILL'), 1000);
+    child.once('exit', finish);
+    child.kill('SIGTERM');
+  });
+  for (const item of descendants.reverse()) {
+    if (processInfo(item.pid)?.started !== item.started) continue;
+    try { process.kill(item.pid, 'SIGKILL'); } catch {}
+  }
+}
+
 // A service-owned browser runs the SDK without a debugger. Its private loopback channel
 // carries SDK commands/results only; account credentials and billing requests stay in Go.
 class NativeClaimBrowser {
@@ -16,10 +57,16 @@ class NativeClaimBrowser {
 
   async open(config) {
     const proxy = config.proxy_url || '';
-    if (this.child && this.child.exitCode === null && this.child.signalCode === null && (config.action === 'warm' || this.proxy === proxy)) return;
+    const identity = config.action === 'warm' ? '' : config.session_key || crypto.randomBytes(32).toString('hex');
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null && this.proxy === proxy && (config.action === 'warm' || !this.identity || this.identity === identity)) {
+      if (identity) this.identity = identity;
+      return;
+    }
     await this.close();
     if (this.stopping) return;
     this.proxy = proxy;
+    this.identity = identity;
+    this.launchOutput = '';
     this.nonce = crypto.randomBytes(24).toString('hex');
     this.server = http.createServer((request, response) => this.handle(request, response));
     await new Promise((resolve, reject) => {
@@ -30,17 +77,26 @@ class NativeClaimBrowser {
     this.origin = `http://127.0.0.1:${this.server.address().port}`;
     fs.mkdirSync(config.browser_profiles, { recursive: true, mode: 0o700 });
     const profile = this.profile = fs.mkdtempSync(path.join(config.browser_profiles, 'browser-'));
-    const args = ['--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', '--start-minimized'];
+    const args = ['--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check'];
+    if (process.platform === 'win32') args.push('--start-minimized');
+    // Match Playwright's root-service compatibility without changing non-root sandboxing.
+    if (process.platform === 'linux' && process.getuid() === 0) args.push('--no-sandbox');
     args.push(proxy ? '--proxy-server=' + new URL(proxy).origin : '--no-proxy-server');
     args.push('--app=' + this.origin + '/' + this.nonce);
-    const child = this.child = spawn(this.executable, args, { windowsHide: true, stdio: 'ignore' });
+    const child = this.child = spawn(this.executable, args, { windowsHide: true, env: config.browser_env, stdio: ['ignore', 'ignore', 'pipe'] });
+    child.stderr.on('data', chunk => { this.launchOutput = (this.launchOutput + chunk).slice(-8192); });
     const onBrowserExit = () => {
       if (this.child !== child) return;
-      this.finish({ ok: false, code: 'captcha_browser_launch_failed' });
+      const reason = /sandbox|zygote_host_impl/i.test(this.launchOutput) ? 'sandbox'
+        : /DISPLAY|X server|X11|ozone_platform_x11/i.test(this.launchOutput) ? 'display'
+        : /shared librar|cannot open shared object/i.test(this.launchOutput) ? 'system_library' : 'browser_exit';
+      this.finish({ ok: false, code: 'captcha_browser_launch_failed', browser_launch_reason: reason, sdk_executed: !!this.job?.sent && !this.job?.warm });
       void this.close();
     };
     child.once('error', onBrowserExit);
     child.once('exit', onBrowserExit);
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    if (process.platform !== 'win32') return;
     // Chrome app windows can ignore STARTUPINFO's hidden state. Hide only the
     // process we just created; never touch the user's browser or profile.
     const command = `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ClaimWindow { [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); }'; for($i=0;$i -lt 30;$i++){ $p=Get-Process -Id ${Number(child.pid)} -ErrorAction SilentlyContinue; if(!$p){break}; if($p.MainWindowHandle -ne 0){ [ClaimWindow]::ShowWindowAsync($p.MainWindowHandle,0) | Out-Null; break }; Start-Sleep -Milliseconds 100 }`;
@@ -62,6 +118,8 @@ class NativeClaimBrowser {
           try {
             result = job.expression ? await (0, eval)(job.expression) : { ok: true };
             result = { ...window.__captchaProgress, ...result, runtime: 'native_browser', browser_version: navigator.userAgent.match(/(?:Chrome|Edg)\\/([0-9.]+)/)?.[1] || '', browser_visibility: document.visibilityState };
+            result.browser_webdriver = navigator.webdriver;
+            result.browser_origin = location.origin;
           } catch { result = { ok: false, code: 'captcha_runtime_error', stage: 'sdk_init' }; }
           if (!job.warm || !result.ok) window.__disposeCaptcha?.();
           await fetch(root + '/result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: job.id, result }) });
@@ -143,21 +201,21 @@ class NativeClaimBrowser {
       this.opening = null;
     }
     if (this.stopping) return { ok: false, code: 'captcha_canceled' };
+    if (!this.child || this.child.exitCode !== null || this.child.signalCode !== null) return { ok: false, code: 'captcha_browser_launch_failed', sdk_executed: false };
     if (this.job) return { ok: false, code: 'captcha_capacity_exceeded' };
-    const timeout = config.action === 'warm' ? 20000 : Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
+    const warm = config.action === 'warm';
+    const timeout = warm ? 20000 : Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
     return new Promise(resolve => {
       const job = this.job = {
         id: crypto.randomBytes(16).toString('hex'), resolve, sent: false,
-        warm: config.action === 'warm',
-        // Hidden pages need time for asynchronous device collection before verification.
-        expression: config.action === 'warm' ? '' : captchaExpression(config, 7000),
+        warm, expression: warm ? '' : captchaExpression(config, 7000),
       };
       job.timer = setTimeout(async () => {
         if (this.job !== job) return;
         this.job = null;
         // Cancel late SDK callbacks before accepting another job on this profile.
         await this.close();
-        resolve({ ok: false, code: 'captcha_timeout', runtime: 'native_browser', session_reused: false });
+        resolve({ ok: false, code: job.warm ? 'captcha_browser_launch_failed' : 'captcha_timeout', stage: job.warm ? 'browser_launch' : 'sdk_verify', runtime: 'native_browser', session_reused: false });
       }, timeout);
       this.dispatch();
     });
@@ -182,12 +240,9 @@ class NativeClaimBrowser {
     this.hider?.kill(); this.hider = null;
     const child = this.child; this.child = null;
     const profile = this.profile; this.profile = null;
-    if (child && child.exitCode === null && child.signalCode === null && child.pid) {
-      const exited = new Promise(resolve => child.once('exit', resolve));
-      const killed = await new Promise(resolve => execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, error => resolve(!error)));
-      if (killed) await exited;
-      else if (child.exitCode === null && child.signalCode === null) return;
-    }
+    this.identity = '';
+    await stopBrowser(child);
+    if (child?.pid && child.exitCode === null && child.signalCode === null) return;
     if (profile) {
       // Windows can keep profile files locked briefly after the browser exits.
       await fs.promises.rm(profile, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }).catch(() => {});

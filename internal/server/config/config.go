@@ -26,7 +26,7 @@ func defaults() shared.M {
 		"zcode_template_mode": "main", "zcode_subagent_template": "",
 		"zcode_subagent_insert_enabled": false, "zcode_subagent_harness_enabled": false,
 		"zcode_subagent_files_enabled": false, "zcode_subagent_comments_enabled": false,
-		"inference_driver": "http", "http": shared.M{"first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": shared.M{"mode": "off", "claim_runtime": "jsdom", "playwright_path": "", "browser_path": "", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
+		"inference_driver": "http", "http": shared.M{"first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": shared.M{"mode": "off", "claim_runtime": "jsdom", "browser_backend": "auto", "browser_headless": true, "browser_display": "", "playwright_path": "", "browser_path": "", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
 		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": DefaultBalancePollInterval, "poll_jitter_sec": 0, "poll_concurrency": shared.AccountOperationConcurrency, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "default_reasoning_level": "low",
 		"daily_claim_enabled":      true,
 		"daily_claim_time":         DefaultDailyClaimTime,

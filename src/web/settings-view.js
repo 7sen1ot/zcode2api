@@ -132,7 +132,7 @@ async function pageSettings(main) {
   const [mihomoOS, mihomoArch] = (mihomo.platform || '').split('/');
   const mihomoTarget = mihomo.platform ? `${({ windows: 'Windows', linux: 'Linux', darwin: 'macOS' })[mihomoOS] || mihomoOS} / ${({ amd64: 'x64', arm64: 'ARM64' })[mihomoArch] || mihomoArch}` : '';
   const httpParams = { ...s.http };
-  const captcha = { mode: 'off', playwright_path: '', browser_path: '', node_path: 'node', jsdom_path: '', simulate_canvas_webgl: true, timeout_ms: 30000, ticket_ttl_ms: 75000, ...s.http.captcha };
+  const captcha = { mode: 'off', browser_backend: 'auto', browser_headless: true, browser_display: '', playwright_path: '', browser_path: '', node_path: 'node', jsdom_path: '', simulate_canvas_webgl: true, timeout_ms: 30000, ticket_ttl_ms: 75000, ...s.http.captcha };
   const proxy = { enabled: false, source: 'manual', urls: [], subscription_url: '', preferred_node: '', mihomo_path: 'mihomo', refresh_interval_sec: 3600, ...s.outbound_proxy };
   const subagentFields = { zcode_subagent_insert_enabled: 's-subagent-insert', zcode_subagent_harness_enabled: 's-subagent-harness', zcode_subagent_files_enabled: 's-subagent-files', zcode_subagent_comments_enabled: 's-subagent-comments' };
   delete httpParams.client_version;
@@ -183,9 +183,11 @@ async function pageSettings(main) {
           <label class="settings-check" for="s-captcha-canvas"><input id="s-captcha-canvas" type="checkbox" role="switch" ${captcha.simulate_canvas_webgl ? 'checked' : ''}><span>jsdom 渲染接口模拟 ${infoTip('仅为 jsdom 验证补充 Canvas、WebGL 等兼容接口，不影响真实浏览器，也不保证通过上游验证。', '渲染接口模拟')}</span></label>
         </div></div>
         <div class="settings-subsection"><h3>领卡验证</h3><div class="settings-fields">
-          <div class="field-group f"><span>定时领卡验证方式</span><strong>服务端真实浏览器（固定）</strong><small id="s-claim-browser-status" class="runtime-status" role="status" aria-live="polite">正在检测浏览器依赖…</small></div>
-          <div class="mihomo-field" id="claim-browser-fields"><div class="mihomo-field-heading"><label for="s-browser-path">服务端浏览器路径</label><span>${infoTip('需要 Node.js、Playwright 及 Chromium 内核浏览器，支持 Chromium / Chrome / Edge。定时领取前 3 分钟预热，最晚保留至计划时间后 10 分钟，完成后提前退出。', '领卡浏览器')} <button type="button" class="btn proxy-small-button" id="s-browser-install" disabled>检测中…</button></span></div><input id="s-browser-path" value="${esc(captcha.browser_path)}" placeholder="自动检测 Chromium / Chrome / Edge"><small id="s-browser-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></div>
-          <label class="f" for="s-playwright-path"><span>Playwright 驱动目录 ${infoTip('可填写 playwright-core、playwright 包目录，或包含它的 node_modules / 项目目录。留空自动检测。', 'Playwright 搜索路径')}</span><input id="s-playwright-path" value="${esc(captcha.playwright_path)}" placeholder="自动检测，或填写已有 Playwright 目录"><small id="s-playwright-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></label>
+          <label class="f" for="s-browser-backend"><span>定时领卡浏览器通道 ${infoTip('自动选择优先使用原生浏览器，启动条件不满足时使用 Playwright。SDK 风控拒绝不会触发切换。', '浏览器通道')}</span><select id="s-browser-backend"><option value="auto">自动选择（优先原生）</option><option value="native">原生浏览器</option><option value="playwright">Playwright</option></select><small id="s-claim-browser-status" class="runtime-status" role="status" aria-live="polite">正在检测浏览器依赖…</small></label>
+          <div class="mihomo-field" id="claim-browser-fields"><div class="mihomo-field-heading"><label for="s-browser-path">服务端浏览器路径</label><span>${infoTip('原生通道需要完整的 Chromium / Chrome / Edge，Linux 还需 DISPLAY 或 Xvfb；Playwright 通道额外需要驱动。定时领取前 3 分钟预热，完成后退出。', '领卡浏览器')} <button type="button" class="btn proxy-small-button" id="s-browser-install" disabled>检测中…</button></span></div><input id="s-browser-path" value="${esc(captcha.browser_path)}" placeholder="自动检测 Chromium / Chrome / Edge"><small id="s-browser-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></div>
+          <label class="f" for="s-playwright-path"><span>Playwright 驱动目录 ${infoTip('可填写 playwright-core、playwright 包目录，或包含它的 node_modules / 项目目录。原生通道不依赖此驱动。', 'Playwright 搜索路径')}</span><input id="s-playwright-path" value="${esc(captcha.playwright_path)}" placeholder="自动检测，或填写已有 Playwright 目录"><small id="s-playwright-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></label>
+          <label class="f" for="s-browser-display"><span>Linux 显示 ${infoTip('留空使用服务的 DISPLAY；未配置时，为每个验证 worker 启动专用 Xvfb，并随浏览器进程清理。', 'Linux 显示环境')}</span><input id="s-browser-display" value="${esc(captcha.browser_display)}" placeholder="自动选择，或填写 :99"><small id="s-display-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></label>
+          <label class="settings-check" for="s-browser-headless"><input id="s-browser-headless" type="checkbox" role="switch" ${captcha.browser_headless ? 'checked' : ''}><span>Playwright 无头模式 ${infoTip('关闭后使用有头浏览器，Linux 需要 DISPLAY 或 Xvfb。原生通道不使用此选项；手动批量领取保持无头模式。', 'Playwright 运行模式')}</span></label>
         </div></div>
         <div class="settings-subsection"><h3>运行环境</h3><div class="settings-fields">
           <label class="f" for="s-captcha-node"><span>Node.js 可执行文件 ${infoTip('模型推理验证和定时领卡需要 Node.js 18 或以上版本。', 'Node.js 依赖')}</span><input id="s-captcha-node" value="${esc(captcha.node_path)}" placeholder="node"><small id="s-node-status" class="runtime-status" role="status" aria-live="polite">检测中…</small></label>
@@ -261,15 +263,16 @@ async function pageSettings(main) {
     editor.setCustomValidity(insert && new TextEncoder().encode(editor.value).length > 262144 ? '自定义插入内容不能超过 256 KiB' : '');
   };
   $('#s-captcha-mode').value = captcha.mode;
+  $('#s-browser-backend').value = captcha.browser_backend;
   $('#s-proxy-source').value = proxy.source;
-  const captchaFields = { mode: 's-captcha-mode', playwright_path: 's-playwright-path', browser_path: 's-browser-path', timeout_ms: 's-captcha-timeout', simulate_canvas_webgl: 's-captcha-canvas', node_path: 's-captcha-node', jsdom_path: 's-captcha-jsdom', ticket_ttl_ms: 's-captcha-ttl' };
+  const captchaFields = { mode: 's-captcha-mode', browser_backend: 's-browser-backend', browser_headless: 's-browser-headless', browser_display: 's-browser-display', playwright_path: 's-playwright-path', browser_path: 's-browser-path', timeout_ms: 's-captcha-timeout', simulate_canvas_webgl: 's-captcha-canvas', node_path: 's-captcha-node', jsdom_path: 's-captcha-jsdom', ticket_ttl_ms: 's-captcha-ttl' };
   const ids = ['s-poll', 's-jitter', 's-conc', 's-log-retention', 's-level', 's-template-mode', 's-subagent-template', ...Object.values(subagentFields), 's-aliases', 's-retry', 's-http', ...Object.values(captchaFields), 's-proxy-enabled', 's-proxy-source', 's-proxy-urls', 's-proxy-subscription', 's-proxy-node', 's-proxy-mihomo', 's-proxy-refresh', 's-update-mirror', 's-update-mirror-custom'];
   const fields = ids.map(id => $('#' + id));
   const values = () => Object.fromEntries(fields.map(input => [input.id, input.type === 'checkbox' ? input.checked : input.value]));
   const apply = data => fields.forEach(input => { if (Object.hasOwn(data, input.id)) { if (input.type === 'checkbox') input.checked = !!data[input.id]; else input.value = data[input.id]; syncSelect(input); } });
   const captchaValues = data => Object.fromEntries(Object.entries(captchaFields).map(([key, id]) => {
     let value = data[id];
-    if (key.endsWith('_path')) value = value.trim() || (key === 'node_path' ? 'node' : '');
+    if (key.endsWith('_path') || key === 'browser_display') value = value.trim() || (key === 'node_path' ? 'node' : '');
     else if (key.endsWith('_ms')) value = Number(value);
     return [key, value];
   }));
@@ -328,11 +331,15 @@ async function pageSettings(main) {
     return valid;
   };
   const outboundValues = (data = values()) => ({ enabled: data['s-proxy-enabled'], source: data['s-proxy-source'], urls: [...new Set(data['s-proxy-urls'].split(/\r?\n/).map(x => x.trim()).filter(Boolean))], subscription_url: data['s-proxy-subscription'].trim(), subscription_filter: '', preferred_node: data['s-proxy-node'], mihomo_path: data['s-proxy-mihomo'].trim() || 'mihomo', refresh_interval_sec: Number(data['s-proxy-refresh']) || 3600 });
-  const runtimeFields = { node: $('#s-node-status'), jsdom: $('#s-jsdom-status'), playwright: $('#s-playwright-status'), browser: $('#s-browser-status') };
+  const runtimeFields = { node: $('#s-node-status'), jsdom: $('#s-jsdom-status'), playwright: $('#s-playwright-status'), browser: $('#s-browser-status'), display: $('#s-display-status') };
   const browserInstall = $('#s-browser-install');
   const claimBrowserStatus = $('#s-claim-browser-status');
-  const captchaPathIDs = Object.entries(captchaFields).filter(([key]) => key.endsWith('_path')).map(([, id]) => id);
-  const captchaRuntimePaths = () => Object.fromEntries(Object.entries(captchaValues(values())).filter(([key]) => key.endsWith('_path')));
+  const captchaRuntimeKeys = Object.keys(captchaFields).filter(key => key.endsWith('_path') || key.startsWith('browser_'));
+  const captchaRuntimeIDs = captchaRuntimeKeys.map(key => captchaFields[key]);
+  const captchaRuntimeOptions = () => {
+    const options = captchaValues(values());
+    return Object.fromEntries(captchaRuntimeKeys.map(key => [key, options[key]]));
+  };
   let captchaRuntimeRequest = 0, captchaRuntimeTimer, browserInstalling = false, lastRuntime = null;
   const runtimePending = () => {
     browserInstall.disabled = true; lastRuntime = null;
@@ -342,23 +349,40 @@ async function pageSettings(main) {
   const checkCaptchaRuntime = async () => {
     clearTimeout(captchaRuntimeTimer);
     if (!form.isConnected || browserInstalling) return;
-    const paths = captchaRuntimePaths(), snapshot = JSON.stringify(paths), request = ++captchaRuntimeRequest;
+    const paths = captchaRuntimeOptions(), snapshot = JSON.stringify(paths), request = ++captchaRuntimeRequest;
     runtimePending();
     try {
       const info = await api('/api/settings/captcha/runtime?' + new URLSearchParams(paths));
-      if (!form.isConnected || request !== captchaRuntimeRequest || snapshot !== JSON.stringify(captchaRuntimePaths())) return;
+      if (!form.isConnected || request !== captchaRuntimeRequest || snapshot !== JSON.stringify(captchaRuntimeOptions())) return;
       if (info.ok === false) throw new Error(info.error || '检测失败');
       for (const [key, note] of Object.entries(runtimeFields)) {
         const state = info[key] || {};
+        if (key === 'display') {
+          note.textContent = state.message || '未检测到显示环境';
+          note.title = state.display || state.xvfb_path || '';
+          note.classList.toggle('ok-text', !!state.available);
+          note.classList.toggle('warn-text', !state.available && !info.browser_headless);
+          continue;
+        }
+        if (key === 'playwright' && info.browser_backend === 'native' && !state.available) {
+          note.textContent = '原生通道无需 Playwright 驱动';
+          note.title = '';
+          note.classList.remove('ok-text', 'warn-text');
+          continue;
+        }
         note.textContent = state.available ? `${key === 'browser' ? '已找到 · ' + state.path.split(/[/\\]/).at(-1) : '可用'}${state.version ? ' · ' + (key === 'node' ? 'v' : '') + state.version : ''}` : state.message || '不可用';
         note.title = state.path || ''; note.classList.toggle('ok-text', !!state.available); note.classList.toggle('warn-text', !state.available);
       }
       lastRuntime = info;
-      const missing = [['node', 'Node.js 18+'], ['playwright', 'Playwright 驱动'], ['browser', 'Chromium / Chrome / Edge']].filter(([key]) => !info[key]?.available).map(([, name]) => name);
-      claimBrowserStatus.textContent = missing.length ? '定时领卡无法运行：请配置 ' + missing.join('、') : '浏览器依赖已找到，执行时检查能否启动';
-      claimBrowserStatus.classList.toggle('warn-text', missing.length > 0);
-      browserInstall.disabled = !!info.browser_ready || !info.install_available || (!!paths.playwright_path && !info.playwright?.available) || (!!paths.browser_path && !info.browser?.installed);
-      browserInstall.textContent = info.browser_ready ? '依赖已找到' : info.browser?.installed ? '安装 Playwright' : '安装浏览器与驱动';
+      const dependencies = [['node', 'Node.js 18+'], ['browser', 'Chromium / Chrome / Edge']];
+      if (info.browser_backend === 'playwright') dependencies.push(['playwright', 'Playwright 驱动']);
+      if (!info.browser_headless) dependencies.push(['display', 'DISPLAY 或 Xvfb']);
+      const missing = dependencies.filter(([key]) => !info[key]?.available).map(([, name]) => name);
+      const ready = !!info.node?.available && !!info.browser_ready;
+      claimBrowserStatus.textContent = ready ? '依赖已找到 · ' + (info.browser_backend === 'native' ? '原生浏览器' : info.browser_headless ? 'Playwright 无头' : 'Playwright 有头') : '定时领卡运行条件未齐备' + (missing.length ? '：' + missing.join('、') : '');
+      claimBrowserStatus.classList.toggle('warn-text', !ready);
+      browserInstall.disabled = !!info.browser_ready || !info.install_available || (paths.browser_backend === 'native' && !!info.browser?.installed) || (!!paths.playwright_path && !info.playwright?.available) || (!!paths.browser_path && !info.browser?.installed);
+      browserInstall.textContent = info.browser_ready ? '依赖已找到' : paths.browser_backend === 'native' && info.browser?.installed ? '需配置显示环境' : info.browser?.installed ? '安装 Playwright' : '安装浏览器与驱动';
     } catch (error) {
       if (form.isConnected && request === captchaRuntimeRequest) {
         Object.values(runtimeFields).forEach(note => { note.textContent = '检测失败'; note.title = error.message; note.classList.add('warn-text'); });
@@ -368,11 +392,11 @@ async function pageSettings(main) {
   };
   browserInstall.addEventListener('click', async () => {
     if (browserInstall.disabled || !lastRuntime || browserInstalling) return;
-    const paths = captchaRuntimePaths(), snapshot = JSON.stringify(paths), installBrowser = !lastRuntime.browser?.installed;
+    const paths = captchaRuntimeOptions(), snapshot = JSON.stringify(paths), installBrowser = !lastRuntime.browser?.installed;
     const message = installBrowser
-      ? '将在服务端下载 Chromium 无头浏览器及缺失的 Playwright 驱动，占用磁盘空间；下载文件会保留，不自动安装系统依赖。是否安装？'
+      ? '将在服务端下载 Chromium 浏览器及缺失的 Playwright 驱动，占用磁盘空间；下载文件会保留，不自动安装系统依赖。是否安装？'
       : '已找到现有浏览器，仅在服务端安装 Playwright 驱动，占用少量磁盘空间。是否安装？';
-    if (!await confirmAction('安装浏览器运行时', message, '安装', false) || !form.isConnected || snapshot !== JSON.stringify(captchaRuntimePaths())) return;
+    if (!await confirmAction('安装浏览器运行时', message, '安装', false) || !form.isConnected || snapshot !== JSON.stringify(captchaRuntimeOptions())) return;
     browserInstalling = true; captchaRuntimeRequest++; clearTimeout(captchaRuntimeTimer);
     browserInstall.disabled = true; btnLoading(browserInstall, true); browserInstall.textContent = '安装中…';
     runtimeFields.browser.textContent = installBrowser ? '正在安装 Chromium…' : '正在安装 Playwright 驱动…';
@@ -461,7 +485,7 @@ async function pageSettings(main) {
       clearTimeout(mihomoTimer); mihomoRequest++;
       if (!mihomoInstalling) { mihomoButton.disabled = true; mihomoNote.textContent = '正在检测 Mihomo 是否存在…'; mihomoTimer = setTimeout(checkMihomo, 250); }
     }
-    if (captchaPathIDs.includes(e.target.id)) {
+    if (captchaRuntimeIDs.includes(e.target.id)) {
       clearTimeout(captchaRuntimeTimer); captchaRuntimeRequest++; runtimePending(); captchaRuntimeTimer = setTimeout(checkCaptchaRuntime, 250);
     }
     validateJSON(); syncTemplateFields(); syncNetworkFields(); updateDirty(); if (e.target.id.startsWith('s-proxy-')) $('#s-proxy-result').classList.add('hidden');
@@ -469,7 +493,7 @@ async function pageSettings(main) {
   form.addEventListener('change', e => { if (ids.includes(e.target.id)) {
     if (e.target.id === 's-proxy-source') { resetProxyNodeSelection(); $('#s-proxy-result').classList.add('hidden'); if ($('#s-proxy-source').value === 'subscription') void checkMihomo(); }
     if (e.target.id === 's-proxy-mihomo') void checkMihomo();
-    if (captchaPathIDs.includes(e.target.id)) void checkCaptchaRuntime();
+    if (captchaRuntimeIDs.includes(e.target.id)) void checkCaptchaRuntime();
     syncTemplateFields(); syncNetworkFields(); updateDirty();
   } });
   $('#s-mihomo-install').addEventListener('click', async () => {

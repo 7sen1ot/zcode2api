@@ -133,7 +133,7 @@ curl http://127.0.0.1:6780/v1/chat/completions \
 
 ## 参考資料
 
-- フロントエンド UI は [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) を参考にしています。
+- フロントエンド UI は [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)、[Leibox](https://leibox.pantoria.cn/components)、[Board UI](https://www.boardui.com/zh-hans/components) を参考にしています。
 - 組み込みのジェイルブレイク用プロンプトは [kimik3.1.md](https://github.com/togg53192-cmd/jailbreaks/blob/main/Moonshot%20AI/kimik3.1.md) と [洺熙师傅の『巴别语』](https://mp.weixin.qq.com/s/WQohsXHbB8dUJisEpfm22g) を参考にしています。
 
 ## コントリビューションガイド

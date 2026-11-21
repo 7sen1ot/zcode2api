@@ -293,33 +293,37 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		out["overrides"] = over
 		out["zcode_fingerprint_version"] = settings.ZCodeFingerprintVersion
 		return out, 200, nil
-	case "GET /api/settings/captcha/runtime":
-		options := shared.Obj(a.configValue("http", "captcha"))
-		for _, key := range []string{"node_path", "jsdom_path", "playwright_path", "browser_path"} {
-			if r.URL.Query().Has(key) {
-				value := r.URL.Query().Get(key)
-				if len(value) > 4096 || captchasdk.ValidateCaptchaOptions(shared.M{key: value}) != nil {
-					return adminError(400, "验证运行时路径无效")
-				}
-				options[key] = value
-			}
-		}
-		return a.captchaRuntimeStatus(ctx, options), 200, nil
-	case "POST /api/settings/captcha/browser/install":
+	case "GET /api/settings/captcha/runtime", "POST /api/settings/captcha/browser/install":
+		install := r.Method == "POST"
 		downloadBrowser, valid := b["install_browser"].(bool)
-		if !valid {
+		if install && !valid {
 			return adminError(400, "须明确选择是否安装 Chromium")
 		}
 		options := shared.Obj(a.configValue("http", "captcha"))
-		for _, key := range []string{"node_path", "jsdom_path", "playwright_path", "browser_path"} {
-			if value, present := b[key]; present {
+		for _, key := range []string{"node_path", "jsdom_path", "playwright_path", "browser_path", "browser_backend", "browser_headless", "browser_display"} {
+			value, present := b[key]
+			if !install {
+				present = r.URL.Query().Has(key)
+				text := r.URL.Query().Get(key)
+				value = text
+				if present && key == "browser_headless" {
+					if text != "true" && text != "false" {
+						return adminError(400, "browser_headless 必须为 true 或 false")
+					}
+					value = text == "true"
+				}
+			}
+			if present {
 				if len(shared.Str(value)) > 4096 || captchasdk.ValidateCaptchaOptions(shared.M{key: value}) != nil {
-					return adminError(400, "浏览器运行时路径无效")
+					return adminError(400, "验证运行时设置无效")
 				}
 				options[key] = value
 			}
 		}
-		return wrap(a.installClaimBrowser(ctx, options, downloadBrowser))
+		if install {
+			return wrap(a.installClaimBrowser(ctx, options, downloadBrowser))
+		}
+		return a.captchaRuntimeStatus(ctx, options), 200, nil
 	case "GET /api/settings/proxy/mihomo":
 		if r.URL.Query().Has("path") {
 			path := r.URL.Query().Get("path")

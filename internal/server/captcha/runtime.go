@@ -29,13 +29,22 @@ func ValidateCaptchaOptions(value any) error {
 			if value != "jsdom" && value != "browser" {
 				return fmt.Errorf("http.captcha.claim_runtime 须为 jsdom/browser")
 			}
+		case "browser_backend":
+			if value != "auto" && value != "native" && value != "playwright" {
+				return fmt.Errorf("http.captcha.browser_backend 须为 auto/native/playwright")
+			}
 		case "mode":
 			if value != "off" && value != "auto" && value != "always" {
 				return fmt.Errorf("http.captcha.mode 须为 off/auto/always")
 			}
-		case "simulate_canvas_webgl":
+		case "simulate_canvas_webgl", "browser_headless":
 			if _, ok := value.(bool); !ok {
-				return fmt.Errorf("http.captcha.simulate_canvas_webgl 必须为布尔值")
+				return fmt.Errorf("http.captcha.%s 必须为布尔值", key)
+			}
+		case "browser_display":
+			text, ok := value.(string)
+			if !ok || len(text) > 256 || strings.ContainsAny(text, "\r\n\x00") {
+				return fmt.Errorf("http.captcha.browser_display 无效")
 			}
 		case "node_path", "jsdom_path", "playwright_path", "browser_path":
 			text, ok := value.(string)
@@ -63,7 +72,6 @@ var CaptchaBrowserRuntime []byte
 //go:embed captcha_native.cjs
 var CaptchaNativeRuntime []byte
 
-// Batch and scheduled claims use separate Chromium verification scopes.
 func CaptchaUsesBrowser(purpose string, options shared.M) bool {
 	return purpose == CaptchaPurposeBatchClaim || purpose == CaptchaPurposeScheduledClaim || (purpose == CaptchaPurposeClaim && options["claim_runtime"] == "browser")
 }

@@ -133,7 +133,7 @@ curl http://127.0.0.1:6780/v1/chat/completions \
 
 ## 参考来源
 
-- 前端 UI 参考 [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)。
+- 前端 UI 参考 [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)、[Leibox](https://leibox.pantoria.cn/components) 和 [Board UI](https://www.boardui.com/zh-hans/components)。
 - 内置破甲提示词参考 [kimik3.1.md](https://github.com/togg53192-cmd/jailbreaks/blob/main/Moonshot%20AI/kimik3.1.md) 和[洺熙师傅的《巴别语》](https://mp.weixin.qq.com/s/WQohsXHbB8dUJisEpfm22g)。
 
 ## 贡献指南

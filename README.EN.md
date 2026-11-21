@@ -133,7 +133,7 @@ curl http://127.0.0.1:6780/v1/chat/completions \
 
 ## References
 
-- The frontend UI draws on [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager).
+- The frontend UI draws on [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager), [Leibox](https://leibox.pantoria.cn/components) and [Board UI](https://www.boardui.com/zh-hans/components).
 - The built-in jailbreak prompt draws on [kimik3.1.md](https://github.com/togg53192-cmd/jailbreaks/blob/main/Moonshot%20AI/kimik3.1.md) and [《巴别语》 by 洺熙师傅](https://mp.weixin.qq.com/s/WQohsXHbB8dUJisEpfm22g).
 
 ## Contributing

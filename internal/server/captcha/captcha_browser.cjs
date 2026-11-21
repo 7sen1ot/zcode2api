@@ -4,6 +4,85 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const { spawn } = require('node:child_process');
+
+function findExecutable(name) {
+  return (process.env.PATH || '').split(path.delimiter).map(dir => path.join(dir, name)).find(executable) || '';
+}
+
+function headlessShell(file) {
+  return /headless[_-]shell/i.test(path.basename(file));
+}
+
+function browserLaunchFailure(error) {
+  const message = String(error?.message || error || '');
+  const reason = /sandbox|zygote_host_impl/i.test(message) ? 'sandbox'
+    : /DISPLAY|X server|X11|ozone_platform_x11/i.test(message) ? 'display'
+    : /shared librar|cannot open shared object/i.test(message) ? 'system_library'
+    : error?.code === 'ENOENT' ? 'executable_missing' : 'browser_launch';
+  return { ok: false, code: error?.code === 'captcha_display_unavailable' ? error.code : 'captcha_browser_launch_failed', stage: 'browser_launch', browser_launch_reason: reason };
+}
+
+function displayStatus(config) {
+  const display = String(config.browser_display || process.env.DISPLAY || '').trim();
+  const xvfb = process.platform === 'linux' ? findExecutable('Xvfb') : '';
+  const available = process.platform !== 'linux' || !!display || !!xvfb;
+  return { available, display, xvfb_path: xvfb, message: process.platform !== 'linux' ? '无需 Xvfb' : display ? '已配置显示，启动时检查连接' : xvfb ? '可启动专用 Xvfb' : '未配置 DISPLAY，且未找到 Xvfb' };
+}
+
+// One display belongs to one worker, so cancellation never touches another app's X server.
+class BrowserDisplay {
+  async environment(config) {
+    const status = displayStatus(config);
+    if (process.platform !== 'linux' || status.display) return { ...process.env, ...(status.display ? { DISPLAY: status.display } : {}) };
+    if (!status.available) throw Object.assign(new Error('No display available'), { code: 'captcha_display_unavailable' });
+    if (this.child?.exitCode === null && this.child.signalCode === null && this.display) return { ...process.env, DISPLAY: this.display };
+    await this.close();
+    const child = this.child = spawn(status.xvfb_path, ['-displayfd', '3', '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe'] });
+    child.on('error', () => {});
+    try {
+      this.display = await new Promise((resolve, reject) => {
+        let output = '';
+        const finish = (error, display) => {
+          clearTimeout(timer);
+          child.removeListener('error', failed);
+          child.removeListener('exit', failed);
+          child.stdio[3].removeListener('data', data);
+          child.stdio[3].removeListener('error', failed);
+          error ? reject(error) : resolve(display);
+        };
+        const failed = () => finish(Object.assign(new Error('Xvfb did not become ready'), { code: 'captcha_display_unavailable' }));
+        const data = chunk => {
+          output += chunk;
+          if (/^\d+\n$/.test(output)) finish(null, ':' + output.trim());
+          else if (output.length > 32) failed();
+        };
+        const timer = setTimeout(failed, 5000);
+        child.once('error', failed);
+        child.once('exit', failed);
+        child.stdio[3].on('data', data);
+        child.stdio[3].once('error', failed);
+      });
+      return { ...process.env, DISPLAY: this.display };
+    } catch (error) {
+      await this.close();
+      throw error;
+    }
+  }
+
+  async close() {
+    const child = this.child;
+    this.child = null;
+    this.display = '';
+    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise(resolve => {
+      const finish = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1000);
+      child.once('exit', finish);
+      child.kill('SIGTERM');
+    });
+  }
+}
 
 function executable(file) {
   try { fs.accessSync(file, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK); return fs.statSync(file).isFile(); }
@@ -20,7 +99,6 @@ function playwright(config) {
     path.resolve(path.dirname(process.execPath), '../lib/node_modules'),
   ];
   for (const root of new Set(roots.filter(Boolean).map(root => path.resolve(config.root, root)))) {
-    // Accept a package directory, node_modules directory, or its project root.
     for (const directory of [root, ...names.flatMap(name => [path.join(root, 'node_modules', name), path.join(root, name)])]) {
       try {
         const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
@@ -33,16 +111,15 @@ function playwright(config) {
   return null;
 }
 
-function browserPath(config, driver) {
+function browserPath(config, driver, headed = false) {
   const windows = process.platform === 'win32';
   const names = windows ? ['msedge.exe', 'chrome.exe', 'chromium.exe'] : ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable', 'microsoft-edge'];
-  const search = name => (process.env.PATH || '').split(path.delimiter).map(dir => path.join(dir, name)).find(executable);
   if (config.browser_path) {
     const configured = config.browser_path;
-    const found = path.isAbsolute(configured) || /[/\\]/.test(configured) ? path.resolve(config.root, configured) : search(configured);
-    return found && executable(found) ? found : '';
+    const found = path.isAbsolute(configured) || /[/\\]/.test(configured) ? path.resolve(config.root, configured) : findExecutable(configured);
+    return found && executable(found) && (!headed || !headlessShell(found)) ? found : '';
   }
-  const candidates = names.map(search).filter(Boolean);
+  const candidates = names.map(findExecutable).filter(Boolean);
   if (windows) {
     for (const base of [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean)) {
       candidates.push(path.join(base, 'Microsoft/Edge/Application/msedge.exe'), path.join(base, 'Google/Chrome/Application/chrome.exe'), path.join(base, 'Chromium/Application/chrome.exe'));
@@ -74,14 +151,35 @@ function browserPath(config, driver) {
       }
     }
   }
-  return candidates.find(executable) || '';
+  return candidates.find(file => executable(file) && (!headed || !headlessShell(file))) || '';
+}
+
+function browserPlan(config, nativeUnavailable = '') {
+  const driver = playwright(config), display = displayStatus(config);
+  const requested = config.headless_only ? 'playwright' : config.browser_backend || 'auto';
+  const headless = !!config.headless_only || config.browser_headless !== false;
+  const fullBrowser = browserPath(config, driver, true);
+  const proxy = config.proxy_url ? new URL(config.proxy_url) : null;
+  const nativeCode = nativeUnavailable || (!['win32', 'linux'].includes(process.platform) ? 'captcha_native_unsupported'
+    : !fullBrowser ? 'captcha_browser_missing'
+    : proxy && (!['http:', 'https:'].includes(proxy.protocol) || proxy.username || proxy.password) ? 'captcha_proxy_unsupported'
+    : !display.available ? 'captcha_display_unavailable' : '');
+  const backend = requested === 'native' || (requested === 'auto' && !nativeCode) ? 'native' : 'playwright';
+  const file = backend === 'native' || !headless ? fullBrowser : browserPath(config, driver);
+  const code = backend === 'native' ? nativeCode : !driver ? 'captcha_playwright_missing' : !file ? 'captcha_browser_missing' : !headless && !display.available ? 'captcha_display_unavailable' : '';
+  return { requested, backend, headless: backend === 'playwright' && headless, driver, display, file, code, nativeCode, fallback_code: requested === 'auto' && backend === 'playwright' ? nativeCode : '' };
 }
 
 function probe(config) {
-  const driver = playwright(config), browser = browserPath(config, driver);
+  const plan = browserPlan(config), driver = plan.driver, browser = plan.file;
   return {
+    browser_ready: !plan.code,
+    browser_backend: plan.backend,
+    browser_headless: plan.headless,
+    native_browser: { available: !plan.nativeCode, code: plan.nativeCode },
+    display: plan.display,
     playwright: { available: !!driver, installed: !!driver, path: driver?.path || '', version: driver?.version || '', message: driver ? '已找到' : config.playwright_path ? '指定目录无法加载 Playwright，请检查路径和 Node.js 版本' : '未找到 Playwright，可指定已有依赖目录或安装驱动' },
-    browser: { available: !!browser, installed: !!browser, path: browser, message: browser ? '已找到浏览器' : config.browser_path ? '指定的浏览器路径不存在或不可执行' : '未找到 Chromium、Chrome 或 Edge' },
+    browser: { available: !!browser, installed: !!browser, path: browser, message: plan.code === 'captcha_display_unavailable' ? plan.display.message : browser ? '已找到浏览器' : config.browser_path ? '指定路径不可用，或当前通道需要完整浏览器' : '未找到适用于当前通道的 Chromium、Chrome 或 Edge' },
   };
 }
 
@@ -159,11 +257,11 @@ async function verify(browser, sessions, config) {
     }
     const { captchaExpression } = require('./captcha.cjs');
     const result = await Promise.race([
-      page.evaluate(captchaExpression(config)),
+      page.evaluate(captchaExpression(config, 7000)),
       new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: 'captcha_timeout' }), Math.max(1, deadline - Date.now())); }),
     ]);
     keepPrepared = config.action === 'prepare' && result.ok;
-    const progress = { ...await page.evaluate(() => window.__captchaProgress || {}).catch(() => ({})), runtime: 'browser', browser_version: browser.version(), session_reused: reused };
+    const progress = { ...await page.evaluate(() => ({ ...window.__captchaProgress, browser_visibility: document.visibilityState, browser_webdriver: navigator.webdriver, browser_origin: location.origin })).catch(() => ({})), runtime: 'browser', browser_version: browser.version(), session_reused: reused };
     const storage = await context.storageState();
     const state = Buffer.byteLength(JSON.stringify(storage)) <= (16 << 10) ? { browserStorage: storage } : undefined;
     const { resourceStatus, retryAfter, networkFailed } = session;
@@ -186,14 +284,16 @@ async function verify(browser, sessions, config) {
 }
 
 async function worker() {
-  let browser, native, stopping = false, chain = Promise.resolve();
+  let browser, native, nativeUnavailable = '', stopping = false, chain = Promise.resolve();
+  const display = new BrowserDisplay();
   const sessions = new Map();
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
     sessions.clear();
-    await native?.shutdown();
+    await native?.shutdown().catch(() => {});
     await browser?.close().catch(() => {});
+    await display.close();
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
@@ -202,34 +302,48 @@ async function worker() {
   input.on('line', line => {
     chain = chain.then(async () => {
       if (stopping) return;
-      let result;
+      let result, plan;
       try {
         const config = JSON.parse(line);
-        const proxy = config.proxy_url ? new URL(config.proxy_url) : null;
-        if (!config.headless_only && process.platform === 'win32' && !proxy?.username && !proxy?.password) {
-          if (!native) {
-            const file = browserPath(config, playwright(config));
-            if (!file) result = { ok: false, code: 'captcha_browser_missing' };
-            else native = new (require('./captcha_native.cjs').NativeClaimBrowser)(file);
-          }
-          result ||= await native.run(config);
-          if (!stopping) process.stdout.write(JSON.stringify(result) + '\n');
-          return;
-        }
-        if (!browser?.isConnected()) {
+        plan = browserPlan(config, nativeUnavailable);
+        if (plan.code) result = { ok: false, code: plan.code, stage: 'browser_selection' };
+        if (!result && plan.backend === 'native') {
+          await browser?.close().catch(() => {});
+          browser = null;
           sessions.clear();
-          const driver = playwright(config);
-          const file = browserPath(config, driver);
-          if (!driver) result = { ok: false, code: 'captcha_playwright_missing' };
-          else if (!file) result = { ok: false, code: 'captcha_browser_missing' };
-          else {
-            browser = await driver.library.chromium.launch({ executablePath: file, headless: true, timeout: 20000 });
+          if (!native) {
+            native = new (require('./captcha_native.cjs').NativeClaimBrowser)(plan.file);
+          }
+          try {
+            result = await native.run({ ...config, browser_env: await display.environment(config) });
+          } catch (error) {
+            result = browserLaunchFailure(error);
+          }
+          // Never switch runtimes after an SDK refusal, timeout or interaction request.
+          if (!stopping && !result.ok && ['captcha_browser_launch_failed', 'captcha_display_unavailable'].includes(result.code) && !result.sdk_executed && plan.requested === 'auto') {
+            nativeUnavailable = result.code;
+            await native.close();
+            result = null;
+            plan = browserPlan(config, nativeUnavailable);
+            if (plan.code) result = { ok: false, code: plan.code, stage: 'browser_selection' };
+          }
+        }
+        if (!stopping && !result && plan.backend === 'playwright') {
+          await native?.close();
+          if (stopping) return;
+          if (!browser?.isConnected()) {
+            sessions.clear();
+            const env = plan.headless ? process.env : await display.environment(config);
+            if (stopping) return;
+            browser = await plan.driver.library.chromium.launch({ executablePath: plan.file, headless: plan.headless, env, timeout: 20000 });
             if (stopping) { await browser.close(); return; }
           }
+          result = config.action === 'warm' ? { ok: true } : await verify(browser, sessions, config);
         }
-        result ||= config.action === 'warm' ? { ok: true } : await verify(browser, sessions, config);
-      } catch { result = { ok: false, code: 'captcha_browser_launch_failed', stage: 'browser_launch' }; }
-      process.stdout.write(JSON.stringify(result) + '\n');
+      } catch (error) {
+        result = browserLaunchFailure(error);
+      }
+      if (!stopping) process.stdout.write(JSON.stringify({ ...result, runtime: plan?.backend === 'native' ? 'native_browser' : 'browser', browser_backend: plan?.backend, browser_headless: plan?.headless, browser_path: plan?.file, browser_display: plan?.headless ? undefined : display.display || plan?.display.display || undefined, fallback_code: plan?.fallback_code || undefined }) + '\n');
     }).catch(shutdown);
   });
 }

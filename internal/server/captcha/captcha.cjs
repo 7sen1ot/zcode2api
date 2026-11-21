@@ -191,6 +191,8 @@ async function verifyInWindow(config, outcome) {
 }
 
 function captchaExpression(config, delayMs = 2100) {
+  // Browser channels share the same collection interval, within the request's timeout.
+  delayMs = Math.min(delayMs, Math.max(2100, (Number(config.timeout_ms) || 30000) - 3000));
   const parameters = JSON.stringify({ sceneId: config.scene_id, region: config.region, prefix: config.prefix, sdkURL: SDK_URL, delayMs, prepareOnly: config.action === 'prepare', reuse: !!config.session_key, sessionKey: config.session_key });
   return `(${verifyInWindow.toString()})(${parameters}, ${captchaOutcome.toString()})`;
 }

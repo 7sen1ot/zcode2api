@@ -36,6 +36,8 @@ var failureCodeMessages = map[string]string{
 	"captcha_playwright_missing":                 "未找到 Playwright 驱动，请在设置中安装或配置已有运行时",
 	"captcha_browser_missing":                    "未找到浏览器，请在设置中选择已有浏览器或安装 Chromium",
 	"captcha_browser_launch_failed":              "浏览器启动失败，请检查浏览器路径、版本及系统运行依赖",
+	"captcha_display_unavailable":                "显示环境不可用，请配置 DISPLAY 或安装 Xvfb",
+	"captcha_native_unsupported":                 "当前平台不支持原生浏览器通道，请选择 Playwright",
 	"captcha_browser_timeout":                    "等待浏览器准备超时，请稍后重试",
 	"captcha_runtime_error":                      "SDK 运行失败",
 	"captcha_invalid_result":                     "SDK 票据无效",

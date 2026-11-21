@@ -94,7 +94,7 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options shared.M) sha
 	}
 	node["available"], node["message"] = true, "可用"
 	result["playwright"], result["browser"] = probe["playwright"], probe["browser"]
-	result["browser_ready"] = shared.Truth(shared.Obj(probe["playwright"])["available"]) && shared.Truth(shared.Obj(probe["browser"])["installed"])
+	shared.CopyFields(result, probe, "browser_ready", "browser_backend", "browser_headless", "native_browser", "display")
 	result["install_available"] = shared.Truth(shared.Obj(probe["playwright"])["available"]) || captchaNPM(binary) != ""
 	if shared.Str(options["playwright_path"]) != "" && !shared.Truth(shared.Obj(probe["playwright"])["available"]) {
 		result["install_available"] = false
@@ -112,8 +112,7 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options shared.M) sha
 	return result
 }
 
-// This release supports the project's Node 18 runtime. Core never downloads a
-// browser on its own; the separate CLI install below requires an explicit choice.
+// Keep the driver compatible with Node.js 18.
 const claimPlaywrightVersion = "1.58.2"
 
 func captchaNPM(node string) string {
@@ -182,7 +181,11 @@ func (a *App) installClaimBrowser(parent context.Context, options shared.M, down
 	}
 	// Recheck after installing the driver; its existing browser cache may suffice.
 	if downloadBrowser && !shared.Truth(shared.Obj(status["browser"])["installed"]) {
-		if err := run(filepath.Join(shared.Str(driver["path"]), "cli.js"), "install", "chromium", "--only-shell"); err != nil {
+		args := []string{filepath.Join(shared.Str(driver["path"]), "cli.js"), "install", "chromium"}
+		if options["browser_backend"] == "playwright" && options["browser_headless"] != false {
+			args = append(args, "--only-shell")
+		}
+		if err := run(args...); err != nil {
 			return nil, fmt.Errorf("Chromium 安装失败，请检查网络、磁盘空间与系统运行依赖：%w", err)
 		}
 		status = a.captchaRuntimeStatus(ctx, options)

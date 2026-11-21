@@ -79,9 +79,8 @@ func ClaimBrowserFallback(failure *fault.Failure) bool {
 		return true
 	}
 	switch failure.Code {
-	case "captcha_playwright_missing", "captcha_browser_missing", "captcha_browser_launch_failed":
-		return true
-	case "captcha_interaction_required", "captcha_scene_disabled", "captcha_jsdom_missing", "captcha_runtime_error", "captcha_timeout", "captcha_verification_failed", "captcha_risk_blocked", "F001", "captcha_duplicate_result", "captcha_invalid_result", "captcha_proxy_unsupported", "captcha_expired", "captcha_config_changed", "captcha_session_invalid":
+	case "captcha_playwright_missing", "captcha_browser_missing", "captcha_browser_launch_failed", "captcha_display_unavailable", "captcha_native_unsupported",
+		"captcha_interaction_required", "captcha_scene_disabled", "captcha_jsdom_missing", "captcha_runtime_error", "captcha_timeout", "captcha_verification_failed", "captcha_risk_blocked", "F001", "captcha_duplicate_result", "captcha_invalid_result", "captcha_proxy_unsupported", "captcha_expired", "captcha_config_changed", "captcha_session_invalid":
 		return true
 	}
 	return false
