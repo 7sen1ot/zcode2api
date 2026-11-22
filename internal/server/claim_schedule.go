@@ -156,10 +156,7 @@ func (a *App) startDailyClaims() {
 			var err error
 			if warming {
 				preparedAt = due
-				err = a.warmClaimBrowser(ctx, shared.Obj(a.configValue("http", "captcha")), due)
-				if err == nil {
-					err = a.prepareScheduledClaimBrowsers(ctx, due)
-				}
+				err = a.prepareScheduledClaimBrowser(ctx, due)
 			} else {
 				result, err = a.autoClaimScope(ctx, false, due)
 			}

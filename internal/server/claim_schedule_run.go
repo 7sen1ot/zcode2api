@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
-	"sync/atomic"
 	"time"
 	captchasdk "zcode2api/internal/server/captcha"
 	"zcode2api/internal/server/fault"
@@ -17,8 +15,6 @@ import (
 const dailyClaimRecoveryWindow = 10 * time.Minute
 
 const dailyClaimRecoveryDelay = time.Minute
-
-const dailyClaimConcurrency = shared.AccountOperationConcurrency
 
 type scheduledClaimContextKey struct{}
 
@@ -60,24 +56,17 @@ type scheduledClaimItem struct {
 	Result   shared.M `json:"result,omitempty"`
 }
 
-func cloneScheduledClaimAccount(account *scheduledClaimAccount) *scheduledClaimAccount {
-	copy := *account
-	if account.Result != nil {
-		copy.Result = shared.Clone(account.Result)
-	}
-	copy.Items = make([]*scheduledClaimItem, len(account.Items))
-	for index, item := range account.Items {
-		itemCopy := *item
-		if item.Result != nil {
-			itemCopy.Result = shared.Clone(item.Result)
-		}
-		copy.Items[index] = &itemCopy
-	}
-	return &copy
-}
-
 func scheduledClaimOpen(status string) bool {
 	return status == "pending" || status == "running" || status == "retry_wait" || status == "interrupted"
+}
+
+func scheduledClaimNeedsConfirmation(account *scheduledClaimAccount) bool {
+	for _, item := range account.Items {
+		if item.Status == "running" || shared.Truth(item.Result["requires_confirmation"]) || item.Result["code"] == "in_progress" {
+			return true
+		}
+	}
+	return false
 }
 
 // Keep one copy of results in the checkpoint; flatten only for API consumers.
@@ -238,7 +227,7 @@ func (run *scheduledClaimRun) recoverInterrupted(now time.Time) {
 		if !scheduledClaimOpen(account.Status) {
 			continue
 		}
-		if now.UnixMilli() >= run.RetryDeadline || account.Attempts >= 2 {
+		if now.UnixMilli() >= run.RetryDeadline || (account.Attempts >= 2 && !scheduledClaimNeedsConfirmation(account)) {
 			finishScheduledAccount(account)
 			continue
 		}
@@ -257,6 +246,7 @@ func (a *App) runScheduledClaims(ctx context.Context, due time.Time) (shared.M, 
 	ctx, cancel := context.WithDeadline(ctx, due.Add(dailyClaimRecoveryWindow))
 	defer cancel()
 	ctx = context.WithValue(ctx, scheduledClaimContextKey{}, due.UnixMilli())
+	ctx = context.WithValue(ctx, claimBrowserContextKey{}, &a.scheduledClaimBrowser)
 	last := shared.Obj(a.setting("daily_claim_last_run", nil))
 	var run scheduledClaimRun
 	if claimRunRecorded(last, due) {
@@ -275,7 +265,7 @@ func (a *App) runScheduledClaims(ctx context.Context, due time.Time) (shared.M, 
 			return shared.M{"skipped": true}, nil
 		}
 		run = scheduledClaimRun{Version: 2, Day: due.In(claimTimezone).Format("2006-01-02"), ScheduledAt: due.UnixMilli(), StartedAt: shared.NowMS(), RetryDeadline: due.Add(dailyClaimRecoveryWindow).UnixMilli(), Accounts: []*scheduledClaimAccount{}}
-		accounts, err := storage.Query(a.db, "SELECT * FROM accounts WHERE status IN ('active','unverified','cooldown') ORDER BY created_at")
+		accounts, err := storage.Query(a.db, "SELECT * FROM accounts WHERE status IN ('active','unverified','cooldown') ORDER BY created_at,id")
 		if err != nil {
 			return nil, err
 		}
@@ -291,13 +281,16 @@ func (a *App) runScheduledClaims(ctx context.Context, due time.Time) (shared.M, 
 	}
 	// Require a running browser before discovery or any claim, including when
 	// the upstream verification scene is disabled. Never fall back to jsdom.
+	browserReady := false
 	if run.Pending > 0 && ctx.Err() == nil && a.scheduledClaimEnabled(due) {
-		if err := a.warmClaimBrowser(ctx, shared.Obj(a.configValue("http", "captcha")), due); err != nil && ctx.Err() == nil && a.scheduledClaimEnabled(due) {
+		warmErr := a.warmClaimBrowser(ctx, shared.Obj(a.configValue("http", "captcha")), due)
+		browserReady = warmErr == nil
+		if warmErr != nil && ctx.Err() == nil && a.scheduledClaimEnabled(due) {
 			for _, account := range run.Accounts {
 				if !scheduledClaimOpen(account.Status) {
 					continue
 				}
-				account.Result = scheduledClaimError(ctx, err)
+				account.Result = scheduledClaimError(ctx, warmErr)
 				account.Result["requires_verification"] = false
 				if err := a.deferScheduledClaimAccount(&run, account, scheduledClaimRetryable(account.Result)); err != nil {
 					return nil, err
@@ -309,61 +302,43 @@ func (a *App) runScheduledClaims(ctx context.Context, due time.Time) (shared.M, 
 			return scheduledClaimReport(shared.Obj(shared.Parse(shared.JSON(run), nil))), nil
 		}
 	}
-	// Workers only mutate private account copies. Publish immutable snapshots
-	// under one checkpoint lock, including immediately before each claim POST.
-	// A slow browser never holds that lock while other accounts are running.
-	var checkpointMu sync.Mutex
-	var checkpointErr error
-	var nextAccount atomic.Int64
-	workerErrors := make([]error, dailyClaimConcurrency)
-	shared.ParallelFor(dailyClaimConcurrency, dailyClaimConcurrency, func(worker int) {
-		workerCtx := context.WithValue(ctx, scheduledClaimWorkerKey{}, worker)
-		for {
+	var runErr error
+	if browserReady {
+		for _, account := range run.Accounts {
 			if ctx.Err() != nil || !a.scheduledClaimEnabled(due) {
-				return
+				break
 			}
-			index := int(nextAccount.Add(1) - 1)
-			if index >= len(run.Accounts) {
-				return
-			}
-			account := cloneScheduledClaimAccount(run.Accounts[index])
 			if !scheduledClaimOpen(account.Status) || shared.NowMS() < account.RetryAt {
 				continue
 			}
 			checkpoint := func() error {
-				checkpointMu.Lock()
-				defer checkpointMu.Unlock()
-				if checkpointErr != nil {
-					return checkpointErr
-				}
-				run.Accounts[index] = cloneScheduledClaimAccount(account)
-				checkpointErr = a.saveScheduledClaims(&run)
-				if checkpointErr != nil {
+				if err := a.saveScheduledClaims(&run); err != nil {
 					cancel()
+					return err
 				}
-				return checkpointErr
+				return nil
 			}
-			if shared.NowMS() >= run.RetryDeadline || account.Attempts >= 2 {
+			if shared.NowMS() >= run.RetryDeadline || (account.Attempts >= 2 && !scheduledClaimNeedsConfirmation(account)) {
 				finishScheduledAccount(account)
-			} else if err := a.runScheduledClaimAccount(workerCtx, due, &run, account, checkpoint); err != nil {
-				workerErrors[worker] = err
+			} else if err := a.runScheduledClaimAccount(ctx, due, &run, account, checkpoint); err != nil {
+				runErr = err
 				cancel()
-				return
+				break
 			}
 			if err := checkpoint(); err != nil {
-				workerErrors[worker] = err
-				return
+				runErr = err
+				break
 			}
 		}
-	})
+	}
 	if run.Status == "interrupted" || ctx.Err() != nil || !a.scheduledClaimEnabled(due) {
 		run.Status = "interrupted"
 		if err := a.setSetting("daily_claim_last_run", &run); err != nil {
 			return nil, err
 		}
 	}
-	if err := errors.Join(workerErrors...); err != nil {
-		return nil, err
+	if runErr != nil {
+		return nil, runErr
 	}
 	return scheduledClaimReport(shared.Obj(shared.Parse(shared.JSON(run), nil))), nil
 }
@@ -371,7 +346,7 @@ func (a *App) runScheduledClaims(ctx context.Context, due time.Time) (shared.M, 
 // Reconcile successes even if the process exited after receiving the claim but
 // before updating its checkpoint, including on the final allowed attempt.
 func (a *App) reconcileScheduledClaims(run *scheduledClaimRun) error {
-	rows, err := storage.Query(a.db, "SELECT account_id,plan_id,trigger FROM claim_log WHERE ok=1 AND ts>=? ORDER BY ts", run.ScheduledAt)
+	rows, err := storage.Query(a.db, "SELECT account_id,plan_id,trigger,code FROM claim_log WHERE ok=1 AND ts>=? ORDER BY ts", run.ScheduledAt)
 	if err != nil {
 		return err
 	}
@@ -386,7 +361,7 @@ func (a *App) reconcileScheduledClaims(run *scheduledClaimRun) error {
 				continue
 			}
 			if success := successes[account.ID+"|"+item.PlanID]; success != nil {
-				item.Status, item.Result = "claimed", shared.M{"ok": true, "external_claim": success["trigger"] != "scheduled", "message": "已确认领取成功"}
+				item.Status, item.Result = "claimed", shared.M{"ok": true, "external_claim": success["trigger"] != "scheduled" || success["code"] == "1003" || success["code"] == "claim_result_confirmed", "message": "已确认领取成功"}
 			}
 		}
 	}
@@ -410,12 +385,34 @@ func (a *App) runScheduledClaimAccount(ctx context.Context, due time.Time, run *
 	}
 	// Scheduled recovery keeps the ordinary sticky exit, rather than advancing
 	// the manual per-card cursor after a verification refusal.
-	pinned, release, err := a.pinOutboundProxy(ctx, r)
+	pinned, release, err := a.pinScheduledClaimProxy(ctx, r)
 	if err != nil {
 		account.Result = scheduledClaimError(ctx, err)
 		return a.deferScheduledClaimAccount(run, account, scheduledClaimRetryable(account.Result))
 	}
 	defer release()
+	// Resolve earlier submissions even if discovery no longer advertises an already-owned card.
+	for _, item := range account.Items {
+		if !scheduledClaimOpen(item.Status) {
+			continue
+		}
+		confirmationCtx := context.WithValue(pinned, claimConfirmationOnlyKey{}, true)
+		confirmed, confirmErr := a.claim(confirmationCtx, account.ID, item.PlanID, "scheduled", nil)
+		if confirmed != nil && shared.Truth(confirmed["ok"]) {
+			item.Status, item.Result = "claimed", confirmed
+			if err := checkpoint(); err != nil {
+				return err
+			}
+		} else if confirmErr != nil || !shared.Truth(confirmed["no_pending_claim"]) {
+			item.Result = confirmed
+			if confirmErr != nil {
+				item.Result = shared.Merge(confirmed, scheduledClaimError(ctx, confirmErr))
+			}
+			item.Status = "retry_wait"
+			account.Attempts-- // Ownership queries do not consume another submission attempt.
+			return a.deferScheduledClaimAccount(run, account, scheduledClaimRetryable(item.Result) || item.Result["code"] == "in_progress")
+		}
+	}
 	if account.SameExit && account.ExitHash != shared.Hash(routing.SelectedProxy(pinned)) {
 		// A different request may have moved the shared sticky selection. Reuse
 		// the original healthy endpoint if it is still in the configured pool.
@@ -439,6 +436,10 @@ func (a *App) runScheduledClaimAccount(ctx context.Context, due time.Time, run *
 	}
 	account.ExitHash = exit
 	if ctx.Err() != nil || !a.scheduledClaimEnabled(due) {
+		return nil
+	}
+	if account.Attempts > 2 {
+		finishScheduledAccount(account)
 		return nil
 	}
 	p, err := a.preview(pinned, r, true)
@@ -555,7 +556,7 @@ func (a *App) deferScheduledClaimAccount(run *scheduledClaimRun, account *schedu
 			break
 		}
 	}
-	if retry && account.Attempts < 2 && retryAt < run.RetryDeadline {
+	if retry && (account.Attempts < 2 || scheduledClaimNeedsConfirmation(account)) && retryAt < run.RetryDeadline {
 		account.Status, account.RetryAt = "retry_wait", retryAt
 	} else {
 		finishScheduledAccount(account)

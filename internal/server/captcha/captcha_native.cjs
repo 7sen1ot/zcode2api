@@ -5,7 +5,7 @@ const http = require('node:http');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
-const { captchaExpression } = require('./captcha.cjs');
+const { browserLaunchTimeout, captchaExpression } = require('./captcha.cjs');
 
 function processInfo(pid) {
   try {
@@ -58,7 +58,7 @@ class NativeClaimBrowser {
   async open(config) {
     const proxy = config.proxy_url || '';
     const identity = config.action === 'warm' ? '' : config.session_key || crypto.randomBytes(32).toString('hex');
-    if (this.child && this.child.exitCode === null && this.child.signalCode === null && this.proxy === proxy && (config.action === 'warm' || !this.identity || this.identity === identity)) {
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null && (config.action === 'warm' || (this.proxy === proxy && (!this.identity || this.identity === identity)))) {
       if (identity) this.identity = identity;
       return;
     }
@@ -79,6 +79,9 @@ class NativeClaimBrowser {
     const profile = this.profile = fs.mkdtempSync(path.join(config.browser_profiles, 'browser-'));
     const args = ['--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check'];
     if (process.platform === 'win32') args.push('--start-minimized');
+    if (process.platform === 'linux') {
+      args.push('--disable-dev-shm-usage', '--disable-background-networking', '--disable-component-update', '--password-store=basic');
+    }
     // Match Playwright's root-service compatibility without changing non-root sandboxing.
     if (process.platform === 'linux' && process.getuid() === 0) args.push('--no-sandbox');
     args.push(proxy ? '--proxy-server=' + new URL(proxy).origin : '--no-proxy-server');
@@ -188,12 +191,12 @@ class NativeClaimBrowser {
     if (!job) return;
     this.job = null;
     clearTimeout(job.timer);
+    if (job.warm) this.ready = !!result.ok;
     job.resolve({ ...result, session_reused: false });
   }
 
   async run(config) {
-    // Native claims need a fresh SDK instance; only the browser process is warmed.
-    if (config.action === 'prepare') return { ok: true, preparation_skipped: true, runtime: 'native_browser' };
+    // Preparation binds the account and proxy, without creating a verification ticket.
     this.opening = this.open(config);
     try {
       await this.opening;
@@ -203,8 +206,16 @@ class NativeClaimBrowser {
     if (this.stopping) return { ok: false, code: 'captcha_canceled' };
     if (!this.child || this.child.exitCode !== null || this.child.signalCode !== null) return { ok: false, code: 'captcha_browser_launch_failed', sdk_executed: false };
     if (this.job) return { ok: false, code: 'captcha_capacity_exceeded' };
-    const warm = config.action === 'warm';
-    const timeout = warm ? 20000 : Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
+    const warm = config.action === 'warm' || config.action === 'prepare';
+    if (!warm && !this.ready) {
+      const ready = await this.execute(config, true);
+      if (!ready.ok || this.stopping) return ready;
+    }
+    return this.execute(config, warm);
+  }
+
+  execute(config, warm) {
+    const timeout = warm ? browserLaunchTimeout(config) : Math.max(5000, Math.min(120000, Number(config.timeout_ms) || 30000));
     return new Promise(resolve => {
       const job = this.job = {
         id: crypto.randomBytes(16).toString('hex'), resolve, sent: false,
@@ -215,7 +226,7 @@ class NativeClaimBrowser {
         this.job = null;
         // Cancel late SDK callbacks before accepting another job on this profile.
         await this.close();
-        resolve({ ok: false, code: job.warm ? 'captcha_browser_launch_failed' : 'captcha_timeout', stage: job.warm ? 'browser_launch' : 'sdk_verify', runtime: 'native_browser', session_reused: false });
+        resolve({ ok: false, code: job.warm ? 'captcha_browser_launch_failed' : 'captcha_timeout', stage: job.warm ? 'browser_launch' : 'sdk_verify', browser_launch_reason: job.warm ? 'timeout' : undefined, sdk_executed: job.sent && !job.warm, runtime: 'native_browser', session_reused: false });
       }, timeout);
       this.dispatch();
     });
@@ -241,6 +252,7 @@ class NativeClaimBrowser {
     const child = this.child; this.child = null;
     const profile = this.profile; this.profile = null;
     this.identity = '';
+    this.ready = false;
     await stopBrowser(child);
     if (child?.pid && child.exitCode === null && child.signalCode === null) return;
     if (profile) {

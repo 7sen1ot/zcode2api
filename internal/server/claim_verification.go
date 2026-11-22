@@ -174,30 +174,23 @@ func (a *App) claimVerificationContext(parent context.Context, account shared.M,
 	return ctx, session.release, nil
 }
 
-const manualClaimConcurrency = shared.AccountOperationConcurrency
-
-type manualClaimWorkerKey struct{}
-
-// Manual and scheduled submissions share the same worker budget.
-func (a *App) acquireClaimWorker(ctx context.Context) (int, func(), error) {
+// Manual claims, scheduled claims and prewarming share one serial slot.
+func (a *App) acquireClaimSlot(ctx context.Context) (func(), error) {
 	a.mu.Lock()
-	if a.claimWorkerSlots == nil {
-		a.claimWorkerSlots = make(chan int, shared.AccountOperationConcurrency)
-		for worker := range shared.AccountOperationConcurrency {
-			a.claimWorkerSlots <- worker
-		}
+	if a.claimSlot == nil {
+		a.claimSlot = make(chan struct{}, 1)
 	}
-	slots := a.claimWorkerSlots
+	slot := a.claimSlot
 	a.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	select {
-	case worker := <-slots:
-		return worker, func() { slots <- worker }, nil
+	case slot <- struct{}{}:
+		return func() { <-slot }, nil
 	case <-ctx.Done():
-		return 0, nil, ctx.Err()
+		return nil, ctx.Err()
 	case <-a.ctx.Done():
-		return 0, nil, a.ctx.Err()
+		return nil, a.ctx.Err()
 	}
 }

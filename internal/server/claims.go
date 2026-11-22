@@ -244,13 +244,13 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			return recorded, e
 		}
 	}
-	worker, releaseWorker, workerErr := a.acquireClaimWorker(ctx)
-	if workerErr != nil {
-		return nil, workerErr
+	releaseSlot, slotErr := a.acquireClaimSlot(ctx)
+	if slotErr != nil {
+		return nil, slotErr
 	}
-	defer releaseWorker()
+	defer releaseSlot()
 	if trigger != "scheduled" {
-		ctx = context.WithValue(ctx, manualClaimWorkerKey{}, worker)
+		ctx = context.WithValue(ctx, claimBrowserContextKey{}, &a.manualClaimBrowser)
 	}
 	diagnostic := shared.M{"stage": "route", "sdk_attempted": false, "sdk_executed": false, "sdk_initialized": false, "ticket_attached": false, "browser_ticket": shared.Str(verification["captcha_verify_param"]) != "", "claim_request_started": false, "http_status": 0, "initial_http_status": 0}
 	ctx = context.WithValue(ctx, claimCaptchaDiagnosticKey{}, diagnostic)
@@ -268,7 +268,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			if errors.As(err, &known) {
 				failure = fault.Classify(known)
 			}
-			if requestContext.Err() != nil {
+			if requestContext.Err() != nil && failure.Code != "claim_result_unknown" {
 				failure = &fault.Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
 			}
 			claimDetail := fault.FailureDetail(failure)
@@ -276,6 +276,9 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			reason := fault.FailureReason(failure)
 			_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, 0, failure.Code, reason, trigger, shared.JSON(claimDetail))
 			result = shared.Merge(result, shared.M{"ok": false, "code": failure.Code, "message": fault.ConciseFailureMessage(failure), "error_reason": reason, "error_detail": claimDetail, "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "verification": diagnostic})
+			if failure.Code == "claim_result_unknown" {
+				result["requires_confirmation"] = true
+			}
 			err = failure
 		}
 		if !shared.Truth(result["ok"]) {
@@ -294,6 +297,12 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		diagnostic["retry_after_ms"] = result["retry_after_ms"]
 		diagnostic["requires_verification"] = shared.Truth(result["requires_verification"])
 	}()
+	if confirmed, confirmErr := a.reconcilePendingClaim(ctx, r, plan, trigger); confirmErr != nil || confirmed != nil {
+		return confirmed, confirmErr
+	}
+	if ctx.Value(claimConfirmationOnlyKey{}) == true {
+		return shared.M{"ok": false, "no_pending_claim": true}, nil
+	}
 	ctx, release, e := a.claimVerificationContext(ctx, r, plan, token, verification)
 	if e != nil {
 		return nil, e
@@ -356,6 +365,9 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	res := fault.ApiResult{}
 	diagnostic["ticket_attached"] = shared.Str(headers["X-Aliyun-Captcha-Verify-Param"]) != ""
 	if verificationFailure == nil {
+		if e := a.markPendingClaim(r, plan); e != nil {
+			return nil, e
+		}
 		diagnostic["stage"], diagnostic["claim_request_started"] = "claim_request", true
 		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
 			if info.Err == nil {
@@ -364,8 +376,12 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		}})
 		res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, shared.M{"plan_id": plan}, headers, a.jar(id))
 		if e != nil {
+			if confirmed, confirmErr := a.reconcilePendingClaim(context.WithoutCancel(ctx), r, plan, trigger); confirmErr != nil || confirmed != nil {
+				return confirmed, confirmErr
+			}
 			return nil, e
 		}
+		diagnostic["initial_http_status"], diagnostic["http_status"] = res.Status, res.Status
 	}
 	if captchasdk.ClaimResponseRequiresVerification(res) {
 		if shared.Str(headers["X-Aliyun-Captcha-Verify-Param"]) != "" {
@@ -384,7 +400,12 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if raw := shared.First(shared.Obj(res.JSON["error"])["code"], res.JSON["code"]); raw != nil {
 		code = shared.Str(raw)
 	}
-	alreadyClaimed := manual && !ok && code == "1003" && (res.Status == 200 || res.Status == 400 || res.Status == 409)
+	if verificationFailure == nil && (res.Status >= 500 || res.Status == 408 || (res.Status == 200 && code == nil) || (res.OK && shared.CodeIs(res.JSON["code"], 0) && len(p) == 0)) {
+		if confirmed, confirmErr := a.reconcilePendingClaim(context.WithoutCancel(ctx), r, plan, trigger); confirmErr != nil || confirmed != nil {
+			return confirmed, confirmErr
+		}
+	}
+	alreadyClaimed := !ok && code == "1003" && (res.Status == 200 || res.Status == 400 || res.Status == 409)
 	completed := ok || alreadyClaimed
 	message := shared.First(data["message"], res.JSON["msg"], "")
 	if !completed {
@@ -450,7 +471,9 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if failure != nil {
 		reason = fault.FailureReason(failure)
 	}
-	_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, shared.Integer(completed), code, reason, p["user_plan_id"], end, trigger, shared.JSON(claimDetail))
+	if logErr := a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, shared.Integer(completed), code, reason, p["user_plan_id"], end, trigger, shared.JSON(claimDetail)); logErr == nil && shared.Truth(diagnostic["claim_request_started"]) {
+		_ = a.clearPendingClaim(r, plan)
+	}
 	diagnostic["initial_http_status"], diagnostic["http_status"], diagnostic["requires_verification"] = res.Status, res.Status, requiresVerification
 	if verificationFailure != nil {
 		diagnostic["sdk_error"] = verificationFailure.Code
@@ -472,6 +495,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	}
 	if alreadyClaimed {
 		result["already_claimed"] = true
+		result["external_claim"] = true
 	}
 	if failure != nil {
 		result["failure_kind"], result["retryable"] = failure.Kind, failure.Retryable
@@ -538,9 +562,10 @@ func (a *App) autoClaimScope(ctx context.Context, dry bool, scheduledAt time.Tim
 }
 
 func (a *App) recordedClaim(id, plan string, since int64) (shared.M, error) {
-	rows, err := storage.Query(a.db, "SELECT trigger FROM claim_log WHERE account_id=? AND plan_id=? AND ok=1 AND ts>=? ORDER BY ts DESC LIMIT 1", id, plan, since)
+	rows, err := storage.Query(a.db, "SELECT trigger,code FROM claim_log WHERE account_id=? AND plan_id=? AND ok=1 AND ts>=? ORDER BY ts DESC LIMIT 1", id, plan, since)
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}
-	return shared.M{"ok": true, "already_claimed": true, "external_claim": shared.Obj(rows[0])["trigger"] != "scheduled", "message": "已确认领取成功"}, nil
+	row := shared.Obj(rows[0])
+	return shared.M{"ok": true, "already_claimed": true, "external_claim": row["trigger"] != "scheduled" || row["code"] == "1003" || row["code"] == "claim_result_confirmed", "message": "已确认领取成功"}, nil
 }

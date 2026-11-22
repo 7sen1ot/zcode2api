@@ -77,7 +77,7 @@ func (a *App) captchaHeaders(parent context.Context, account shared.M, purpose s
 		return verification, routing.AsProxyFailure(err)
 	}
 	defer release()
-	ctx, cancel := a.operationContext(parent, shared.Ms(shared.Fallback(options["timeout_ms"], 30000))+3*time.Second)
+	ctx, cancel := a.operationContext(parent, captchaOperationTimeout(options, purpose))
 	defer cancel()
 	if ctx.Err() != nil {
 		return verification, &fault.Failure{Kind: "server", Code: "captcha_timeout", Message: "上游安全验证已取消或超时"}

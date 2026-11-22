@@ -33,7 +33,6 @@ func (a *App) resolveCaptchaNode(configured string) (string, error) {
 	return childproc.ResolveExecutable(a.root, configured)
 }
 
-// Check the configured runtime without downloading the SDK or requesting tickets.
 const captchaRuntimeProbe = `
 const fs = require('node:fs'), path = require('node:path');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -64,7 +63,7 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options shared.M) sha
 		return result
 	}
 	node["installed"], node["path"], node["message"] = true, binary, "Node.js 无法运行"
-	ctx, cancel := a.operationContext(parent, 5*time.Second)
+	ctx, cancel := a.operationContext(parent, 15*time.Second)
 	defer cancel()
 	helper, err := a.browserHelper()
 	if err != nil {
@@ -112,7 +111,7 @@ func (a *App) captchaRuntimeStatus(parent context.Context, options shared.M) sha
 	return result
 }
 
-// Keep the driver compatible with Node.js 18.
+// Pinned for Node.js 18 compatibility.
 const claimPlaywrightVersion = "1.58.2"
 
 func captchaNPM(node string) string {
@@ -182,7 +181,7 @@ func (a *App) installClaimBrowser(parent context.Context, options shared.M, down
 	// Recheck after installing the driver; its existing browser cache may suffice.
 	if downloadBrowser && !shared.Truth(shared.Obj(status["browser"])["installed"]) {
 		args := []string{filepath.Join(shared.Str(driver["path"]), "cli.js"), "install", "chromium"}
-		if options["browser_backend"] == "playwright" && options["browser_headless"] != false {
+		if status["browser_backend"] == "playwright" && shared.Truth(status["browser_headless"]) {
 			args = append(args, "--only-shell")
 		}
 		if err := run(args...); err != nil {

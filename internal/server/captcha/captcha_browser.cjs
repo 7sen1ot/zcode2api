@@ -19,7 +19,7 @@ function browserLaunchFailure(error) {
   const reason = /sandbox|zygote_host_impl/i.test(message) ? 'sandbox'
     : /DISPLAY|X server|X11|ozone_platform_x11/i.test(message) ? 'display'
     : /shared librar|cannot open shared object/i.test(message) ? 'system_library'
-    : error?.code === 'ENOENT' ? 'executable_missing' : 'browser_launch';
+    : error?.code === 'ENOENT' ? 'executable_missing' : error?.name === 'TimeoutError' ? 'timeout' : 'browser_launch';
   return { ok: false, code: error?.code === 'captcha_display_unavailable' ? error.code : 'captcha_browser_launch_failed', stage: 'browser_launch', browser_launch_reason: reason };
 }
 
@@ -111,7 +111,7 @@ function playwright(config) {
   return null;
 }
 
-function browserPath(config, driver, headed = false) {
+function browserPath(config, driver, headed = false, preferHeadlessShell = false) {
   const windows = process.platform === 'win32';
   const names = windows ? ['msedge.exe', 'chrome.exe', 'chromium.exe'] : ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable', 'microsoft-edge'];
   if (config.browser_path) {
@@ -151,6 +151,10 @@ function browserPath(config, driver, headed = false) {
       }
     }
   }
+  if (preferHeadlessShell) {
+    const shell = candidates.find(file => headlessShell(file) && executable(file));
+    if (shell) return shell;
+  }
   return candidates.find(file => executable(file) && (!headed || !headlessShell(file))) || '';
 }
 
@@ -164,8 +168,10 @@ function browserPlan(config, nativeUnavailable = '') {
     : !fullBrowser ? 'captcha_browser_missing'
     : proxy && (!['http:', 'https:'].includes(proxy.protocol) || proxy.username || proxy.password) ? 'captcha_proxy_unsupported'
     : !display.available ? 'captcha_display_unavailable' : '');
-  const backend = requested === 'native' || (requested === 'auto' && !nativeCode) ? 'native' : 'playwright';
-  const file = backend === 'native' || !headless ? fullBrowser : browserPath(config, driver);
+  // Linux services avoid one X server and full desktop browser per worker when a headless driver is available.
+  const preferNative = process.platform !== 'linux' || !driver || !headless;
+  const backend = requested === 'native' || (requested === 'auto' && !nativeCode && preferNative) ? 'native' : 'playwright';
+  const file = backend === 'native' || !headless ? fullBrowser : browserPath(config, driver, false, true);
   const code = backend === 'native' ? nativeCode : !driver ? 'captcha_playwright_missing' : !file ? 'captcha_browser_missing' : !headless && !display.available ? 'captcha_display_unavailable' : '';
   return { requested, backend, headless: backend === 'playwright' && headless, driver, display, file, code, nativeCode, fallback_code: requested === 'auto' && backend === 'playwright' ? nativeCode : '' };
 }
@@ -284,6 +290,7 @@ async function verify(browser, sessions, config) {
 }
 
 async function worker() {
+  const { browserLaunchTimeout } = require('./captcha.cjs');
   let browser, native, nativeUnavailable = '', stopping = false, chain = Promise.resolve();
   const display = new BrowserDisplay();
   const sessions = new Map();
@@ -321,11 +328,16 @@ async function worker() {
           }
           // Never switch runtimes after an SDK refusal, timeout or interaction request.
           if (!stopping && !result.ok && ['captcha_browser_launch_failed', 'captcha_display_unavailable'].includes(result.code) && !result.sdk_executed && plan.requested === 'auto') {
-            nativeUnavailable = result.code;
             await native.close();
-            result = null;
-            plan = browserPlan(config, nativeUnavailable);
-            if (plan.code) result = { ok: false, code: plan.code, stage: 'browser_selection' };
+            const fallback = browserPlan(config, result.code);
+            if (fallback.code) {
+              // A missing fallback must not hide a transient native startup failure.
+              plan = { ...plan, fallback_code: fallback.code };
+            } else {
+              nativeUnavailable = result.code;
+              result = null;
+              plan = fallback;
+            }
           }
         }
         if (!stopping && !result && plan.backend === 'playwright') {
@@ -335,7 +347,7 @@ async function worker() {
             sessions.clear();
             const env = plan.headless ? process.env : await display.environment(config);
             if (stopping) return;
-            browser = await plan.driver.library.chromium.launch({ executablePath: plan.file, headless: plan.headless, env, timeout: 20000 });
+            browser = await plan.driver.library.chromium.launch({ executablePath: plan.file, headless: plan.headless, env, timeout: browserLaunchTimeout(config) });
             if (stopping) { await browser.close(); return; }
           }
           result = config.action === 'warm' ? { ok: true } : await verify(browser, sessions, config);

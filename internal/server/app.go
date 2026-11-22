@@ -51,63 +51,63 @@ type profileEntry struct {
 }
 
 type App struct {
-	db                     *sql.DB
-	data, secret           string
-	root                   string
-	version                string
-	log                    *log.Logger
-	logfile                *os.File
-	web                    fs.FS
-	configMu               sync.RWMutex
-	cfg                    shared.M
-	mu                     sync.Mutex
-	states                 map[string]*accountState
-	upstreamCooldowns      map[string]*upstreamCooldown
-	cooldownEpochs         map[string]uint64
-	cooldownGeneration     uint64
-	available              chan struct{}
-	scheduleMu             sync.Mutex
-	waiters                []*accountWaiter
-	sticky                 map[string]stickyEntry
-	responses              map[string]responseEntry
-	responseOrder          []string
-	responseBytes          int
-	clients                map[string]*http.Client
-	jars                   map[string]*diskJar
-	claimLocks             map[string]bool
-	claimBatchMu           sync.Mutex
-	claimCandidatesMu      sync.Mutex
-	claimWorkerSlots       chan int
-	claimPreviewSlots      chan struct{}
-	claimReschedule        chan struct{}
-	claimScheduleCancel    context.CancelFunc
-	flowLocks              map[string]bool
-	localImportMu          sync.Mutex
-	credentialMu           sync.Mutex
-	businessRefreshes      map[string]*businessTokenFlight
-	reauth                 map[string]int64
-	pollDue                map[string]int64
-	polling                map[string]bool
-	pollWake               chan struct{}
-	usageLogCleanupWake    chan struct{}
-	balances               balanceManager
-	profiles               map[string]*profileEntry
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	wg                     sync.WaitGroup
-	webPort, gatewayPort   int
-	webUpdateHost          string
-	gatewayUpdateHost      string
-	origin                 string
-	captcha                captchaManager
-	claimBrowser           claimBrowserManager
-	manualClaimBrowsers    [manualClaimConcurrency]claimBrowserManager
-	scheduledClaimBrowsers [dailyClaimConcurrency]claimBrowserManager
-	proxies                outboundProxyManager
-	proxyHealthOnce        sync.Once
-	proxyHealthReschedule  chan struct{}
-	mihomoInstallMu        sync.Mutex
-	updates                updateManager
+	db                    *sql.DB
+	data, secret          string
+	root                  string
+	version               string
+	log                   *log.Logger
+	logfile               *os.File
+	web                   fs.FS
+	configMu              sync.RWMutex
+	cfg                   shared.M
+	mu                    sync.Mutex
+	states                map[string]*accountState
+	upstreamCooldowns     map[string]*upstreamCooldown
+	cooldownEpochs        map[string]uint64
+	cooldownGeneration    uint64
+	available             chan struct{}
+	scheduleMu            sync.Mutex
+	waiters               []*accountWaiter
+	sticky                map[string]stickyEntry
+	responses             map[string]responseEntry
+	responseOrder         []string
+	responseBytes         int
+	clients               map[string]*http.Client
+	jars                  map[string]*diskJar
+	claimLocks            map[string]bool
+	claimBatchMu          sync.Mutex
+	claimCandidatesMu     sync.Mutex
+	claimSlot             chan struct{}
+	claimPreviewSlots     chan struct{}
+	claimReschedule       chan struct{}
+	claimScheduleCancel   context.CancelFunc
+	flowLocks             map[string]bool
+	localImportMu         sync.Mutex
+	credentialMu          sync.Mutex
+	businessRefreshes     map[string]*businessTokenFlight
+	reauth                map[string]int64
+	pollDue               map[string]int64
+	polling               map[string]bool
+	pollWake              chan struct{}
+	usageLogCleanupWake   chan struct{}
+	balances              balanceManager
+	profiles              map[string]*profileEntry
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	webPort, gatewayPort  int
+	webUpdateHost         string
+	gatewayUpdateHost     string
+	origin                string
+	captcha               captchaManager
+	claimBrowser          claimBrowserManager
+	manualClaimBrowser    claimBrowserManager
+	scheduledClaimBrowser claimBrowserManager
+	proxies               outboundProxyManager
+	proxyHealthOnce       sync.Once
+	proxyHealthReschedule chan struct{}
+	mihomoInstallMu       sync.Mutex
+	updates               updateManager
 }
 
 func New(root, data string, web fs.FS, buildVersion string) (*App, error) {

@@ -1,6 +1,5 @@
 'use strict';
 
-// Shared Token/cache combo card for the dashboard and usage page.
 const tokenCacheCharts = new WeakMap();
 const tokenCacheMotion = matchMedia('(prefers-reduced-motion: reduce)');
 let tokenCacheChartID = 0;

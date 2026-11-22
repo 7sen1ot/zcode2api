@@ -6,6 +6,7 @@ import (
 )
 
 var failureCodeMessages = map[string]string{
+	"claim_result_unknown":                       "领取结果尚未确认，请稍后重试，系统会先查询持卡状态",
 	"upstream_waf_blocked":                       "上游安全网关拦截",
 	"coding_plan_security_verification_required": "需要 SDK 验证",
 	"CAPTCHA_VERIFY_FAILED":                      "SDK 验证未通过",

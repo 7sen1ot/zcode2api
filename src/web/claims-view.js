@@ -18,7 +18,6 @@ const claimPhaseLabels = {
   waiting: '等待验证…',
   preparing: '准备验证…',
   verifying: '验证中…',
-  ready: '等待提交…',
   submitting: '正在提交…',
 };
 const claimNeedsVerification = result => result && !result.ok && result.requires_verification;
@@ -319,14 +318,12 @@ function setupTimeField(main, hooks) {
 }
 
 async function pageClaims(main) {
-  const requestConcurrency = RUNTIME?.account_operation_concurrency ?? 3;
   let previews = [], accounts = [], accountsError = '', batchRunning = false, loading = false, page = 1;
+  let batchStopped = false, batchRemaining = 0;
   let schedule = null, scheduleSaving = false, scheduleError = '';
   let discoveryError = '', loadController;
-  const pendingClaims = new Map(), claimQueue = [], runningAccounts = new Set();
-  const requestQueue = [];
-  let runningRequests = 0;
-  const claimKey = claimJobKey;
+  const pendingClaims = new Map(), claimQueue = [];
+  let claimRunning = false;
   const pageSize = 8;
   main.innerHTML = `${pagehead('领卡中心', '', '<button type="button" class="btn" id="claims-refresh">' + icon('refresh', 14) + '刷新</button>')}
     <section class="daily-claim-card fade-up" aria-labelledby="daily-claim-title">
@@ -339,13 +336,12 @@ async function pageClaims(main) {
   const active = () => main.contains(content) && TOKEN === token && !$('#app-view').classList.contains('hidden');
   const visiblePreviews = () => {
     const records = manualClaimResults();
-    // A historical failure is not evidence that a card is still claimable.
-    return previews.map(preview => ({ ...preview, plans: (preview.plans || []).filter(plan => !records.get(claimKey({ account_id: preview.account_id, plan_id: plan.plan_id }))?.ok) }));
+    return previews.map(preview => ({ ...preview, plans: (preview.plans || []).filter(plan => !records.get(claimJobKey({ account_id: preview.account_id, plan_id: plan.plan_id }))?.ok) }));
   };
   const jobs = () => visiblePreviews().flatMap(preview => claimablePlans(preview).map(plan => ({ account_id: preview.account_id, plan_id: plan.plan_id })));
   const batchJobs = () => {
     const results = manualClaimResults();
-    return jobs().filter(job => !claimNeedsVerification(results.get(claimKey(job))));
+    return jobs().filter(job => !claimNeedsVerification(results.get(claimJobKey(job))));
   };
   const accountFor = id => accounts.find(account => account.id === id) || { label: previews.find(preview => preview.account_id === id)?.label };
   const syncBusy = () => {
@@ -363,12 +359,12 @@ async function pageClaims(main) {
     $('#claims-time-trigger', main).disabled = busy || loading || scheduleSaving || !schedule;
     const allButton = $('#claims-all', main);
     allButton.disabled = busy || loading || scheduleSaving || !total;
-    allButton.textContent = busy ? `正在领取（剩余 ${pendingClaims.size}）` : total ? `全部领取（${total}）` : '全部领取';
+    allButton.textContent = busy ? `正在领取（剩余 ${batchRunning ? batchRemaining : pendingClaims.size}）` : total ? `全部领取（${total}）` : '全部领取';
     const stop = $('#claims-stop', main);
     stop.hidden = !batchRunning;
-    stop.disabled = ![...pendingClaims.values()].some(entry => !entry.controller.signal.aborted && entry.phase !== 'submitting');
+    stop.disabled = batchStopped;
     $$('button[data-claim]', content).forEach(button => {
-      const accountID = button.dataset.claim, key = claimKey({ account_id: accountID, plan_id: button.dataset.plan });
+      const accountID = button.dataset.claim, key = claimJobKey({ account_id: accountID, plan_id: button.dataset.plan });
       const entry = pendingClaims.get(key);
       const result = results.get(key);
       const needsVerification = claimNeedsVerification(result);
@@ -457,8 +453,7 @@ async function pageClaims(main) {
     discoveryError = '';
     loading = true; syncBusy(); content.setAttribute('aria-busy', 'true');
     $('#claims-update', main).textContent = '正在查询…';
-    // Names and schedule settings enhance the page independently; neither
-    // request may hold back a completed card query or keep refresh disabled.
+    // Account names and schedule settings must not delay card discovery.
     void request('/api/accounts').then(result => {
       if (!current()) return;
       if (!Array.isArray(result)) throw new Error('账号信息返回格式无效');
@@ -515,7 +510,7 @@ async function pageClaims(main) {
   }
 
   function enqueueClaim(job, batch = false) {
-    const key = claimKey(job);
+    const key = claimJobKey(job);
     const existing = pendingClaims.get(key);
     if (existing) return existing.promise;
     const entry = { job, key, batch, day: claimDay(), phase: 'queued', feedback: '', controller: new AbortController() };
@@ -538,7 +533,6 @@ async function pageClaims(main) {
   }
 
   function pumpClaims() {
-    // Keep one job per account active, even while it waits for verification.
     for (let index = 0; index < claimQueue.length;) {
       const entry = claimQueue[index];
       if (!claimActive(entry)) {
@@ -547,36 +541,15 @@ async function pageClaims(main) {
         recordClaimResult(entry, result);
         pendingClaims.delete(entry.key);
         entry.resolve(result);
-      } else if (runningAccounts.has(entry.job.account_id)) {
+      } else if (claimRunning) {
         index++;
       } else {
         claimQueue.splice(index, 1);
-        runningAccounts.add(entry.job.account_id);
+        claimRunning = true;
         void runClaim(entry);
       }
     }
     syncBusy();
-  }
-
-  function requestClaim(entry, send, priority = false) {
-    return new Promise((resolve, reject) => {
-      const request = { entry, send, resolve, reject };
-      if (priority) requestQueue.unshift(request);
-      else requestQueue.push(request);
-      pumpClaimRequests();
-    });
-  }
-
-  function pumpClaimRequests() {
-    while (runningRequests < requestConcurrency && requestQueue.length) {
-      const { entry, send, resolve, reject } = requestQueue.shift();
-      if (!claimActive(entry)) { resolve(null); continue; }
-      runningRequests++;
-      Promise.resolve().then(() => claimActive(entry) ? send() : null).then(resolve, reject).finally(() => {
-        runningRequests--;
-        pumpClaimRequests();
-      });
-    }
   }
 
   function cancelClaimEntries(matches, message) {
@@ -586,7 +559,6 @@ async function pageClaims(main) {
       entry.controller.abort();
     }
     pumpClaims();
-    pumpClaimRequests();
   }
 
   async function runClaim(entry) {
@@ -598,12 +570,11 @@ async function pageClaims(main) {
       if (session) void api('/api/claims/verification/cancel', { method: 'POST', body: { verification_session: session } }).catch(() => {});
     };
     const readConfig = async forVerification => {
+      if (!claimActive(entry)) return;
       const query = new URLSearchParams(job);
       if (!forVerification) query.set('config_only', '1');
-      const fresh = await requestClaim(entry, () => {
-        setClaimPhase(entry, forVerification ? 'preparing' : 'config');
-        return api('/api/claims/verification?' + query, { cache: 'no-store' });
-      }, forVerification);
+      setClaimPhase(entry, forVerification ? 'preparing' : 'config');
+      const fresh = await api('/api/claims/verification?' + query, { cache: 'no-store' });
       if (!claimActive(entry)) { releaseConfig(fresh); return; }
       config = fresh;
       if (typeof config?.enabled !== 'boolean') throw new Error('上游未返回有效的安全验证配置，请重试。');
@@ -634,12 +605,9 @@ async function pageClaims(main) {
         });
       }
       if (!ticket || !claimActive(entry)) return;
-      setClaimPhase(entry, 'ready');
-      result = await requestClaim(entry, () => {
-        setClaimPhase(entry, 'submitting');
-        const body = entry.batch ? { ...job, auto_verify: true } : { ...job, ...ticket };
-        return api('/api/claims/claim', { method: 'POST', body });
-      }, true);
+      setClaimPhase(entry, 'submitting');
+      const body = entry.batch ? { ...job, auto_verify: true } : { ...job, ...ticket };
+      result = await api('/api/claims/claim', { method: 'POST', body });
       if (result && !result.ok && ticket.captcha_verify_param && result.httpStatus > 0) {
         result = { ...result, message: 'ZCode 领取失败：' + claimResultMessage(result), manualVerificationFailed: true };
       }
@@ -655,7 +623,7 @@ async function pageClaims(main) {
       releaseConfig();
       result ||= cancelResult(entry);
       recordClaimResult(entry, result);
-      runningAccounts.delete(job.account_id);
+      claimRunning = false;
       pendingClaims.delete(entry.key);
       entry.resolve(result);
       if (result?.ok) window.dispatchEvent(new Event('manual-claim-completed'));
@@ -703,15 +671,16 @@ async function pageClaims(main) {
     if (!button) return;
     const job = { account_id: button.dataset.claim, plan_id: button.dataset.plan };
     if (skip) {
-      cancelClaimEntries(entry => entry.key === claimKey(job), '已取消验证');
+      cancelClaimEntries(entry => entry.key === claimJobKey(job), '已取消验证');
       return;
     }
     if (button.disabled) return;
     void enqueueClaim(job).then(result => {
-      if (active() && result?.ok) toast(result.already_claimed ? '该账号已领取过' : '每日免费卡已领取', 'ok');
+      if (active() && result?.ok) toast(result.reconciled ? '已确认该账号持有此卡' : result.already_claimed ? '该账号已领取过' : '每日免费卡已领取', 'ok');
     });
   });
   $('#claims-stop', main).addEventListener('click', () => {
+    batchStopped = true;
     cancelClaimEntries(() => true, '已停止领取');
   });
   $('#claims-all', main).addEventListener('click', async () => {
@@ -719,20 +688,32 @@ async function pageClaims(main) {
     const summary = $('#claims-summary', main);
     summary.textContent = '';
     batchRunning = true;
+    batchStopped = false;
+    const queued = batchJobs();
+    batchRemaining = queued.length;
+    syncBusy();
     try {
-      const outcomes = await Promise.all(batchJobs().map(job => enqueueClaim(job, true)));
-      if (!active()) return;
-      let claimed = 0, alreadyClaimed = 0, needsVerification = 0, failed = 0, canceled = 0;
-      for (const result of outcomes) {
+      let claimed = 0, confirmed = 0, alreadyClaimed = 0, needsVerification = 0, failed = 0, canceled = 0;
+      const blockedAccounts = new Set();
+      for (const job of queued) {
+        const result = !active() || batchStopped || blockedAccounts.has(job.account_id) ? { canceled: true } : await enqueueClaim(job, true);
+        if (result && !result.ok && (result.requires_confirmation || result.retry_after_ms > 0 || ['auth', 'account_risk', 'network', 'rate_limit'].includes(result.failure_kind))) {
+          blockedAccounts.add(job.account_id);
+        }
+        batchRemaining--;
+        syncBusy();
         if (!result || result.canceled) canceled++;
+        else if (result.reconciled) confirmed++;
         else if (result.already_claimed) alreadyClaimed++;
         else if (result.ok) claimed++;
         else if (claimNeedsVerification(result)) needsVerification++;
         else failed++;
       }
-      summary.textContent = `本次领取 ${claimed} 张${alreadyClaimed ? `，${alreadyClaimed} 张此前已领` : ''}${needsVerification ? `，${needsVerification} 张需人工验证` : ''}${failed ? `，${failed} 张失败` : ''}${canceled ? `，${canceled} 张未继续` : ''}`;
+      if (!active()) return;
+      summary.textContent = `本次领取 ${claimed} 张${confirmed ? `，${confirmed} 张已核实持有` : ''}${alreadyClaimed ? `，${alreadyClaimed} 张此前已领` : ''}${needsVerification ? `，${needsVerification} 张需人工验证` : ''}${failed ? `，${failed} 张失败` : ''}${canceled ? `，${canceled} 张未继续` : ''}`;
     } finally {
       batchRunning = false;
+      batchRemaining = 0;
       syncBusy();
     }
   });

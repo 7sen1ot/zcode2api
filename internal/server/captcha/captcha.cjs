@@ -5,6 +5,10 @@ const path = require('node:path');
 
 const SDK_URL = 'https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';
 
+function browserLaunchTimeout(config) {
+  return Math.max(5000, Math.min(60000, Number(config.browser_launch_timeout_ms) || 60000));
+}
+
 // Synthetic rendering interfaces for jsdom; no host GPU is queried.
 function installCanvasWebGL(window) {
   const noop = () => {};
@@ -353,4 +357,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { captchaExpression, captchaOutcome, installCanvasWebGL, run };
+module.exports = { browserLaunchTimeout, captchaExpression, captchaOutcome, installCanvasWebGL, run };
