@@ -22,8 +22,8 @@ import (
 type updateManager struct {
 	once     sync.Once
 	mu       sync.Mutex
-	checkMu  sync.Mutex
 	cache    updater.UpdateReleaseCache
+	source   *updater.SourceCheck
 	support  updater.UpdateSupport
 	running  bool
 	checking bool
@@ -73,16 +73,29 @@ func (a *App) startUpdateBackupCleanup() {
 func (a *App) loadUpdater() {
 	a.updates.once.Do(func() {
 		a.updates.support = updater.DetectUpdateSupport(a.version)
-		_ = updater.ReadUpdateJSON(filepath.Join(a.updateDirectory(), "release.json"), &a.updates.cache)
-		cached := a.updates.cache.Release
-		if cached.URL != "https://github.com/"+updater.UpdateRepository+"/releases/tag/"+cached.Tag {
-			a.updates.cache = updater.UpdateReleaseCache{}
+		if a.updates.support.CanCheck {
+			_ = updater.ReadUpdateJSON(filepath.Join(a.updateDirectory(), "release.json"), &a.updates.cache)
+			cached := a.updates.cache.Release
+			if cached.URL != "https://github.com/"+updater.UpdateRepository+"/releases/tag/"+cached.Tag {
+				a.updates.cache = updater.UpdateReleaseCache{}
+			}
 		}
 		var state updater.UpdateState
 		filename := filepath.Join(a.updateDirectory(), "state.json")
-		if updater.ReadUpdateJSON(filename, &state) == nil && (state.Phase == "preparing" || state.Deployment != "container" && state.Phase == "downloading") {
-			state.Phase, state.Message, state.FinishedAt = "error", "服务已重启，上次更新已中断，可以重新检查更新", shared.NowMS()
-			_ = updater.WriteUpdateJSON(filename, state)
+		if updater.ReadUpdateJSON(filename, &state) != nil {
+			return
+		}
+		switch {
+		case state.Deployment == "source" && updater.UpdateBusy(state.Phase):
+			state.Message = "上次源码更新已中断，请核对当前程序与源码，已有备份可在数据目录的 updates 中查看"
+		case state.Phase == "preparing" || state.Deployment != "container" && state.Phase == "downloading":
+			state.Message = "服务已重启，上次更新已中断，可以重新检查更新"
+		default:
+			return
+		}
+		state.Phase, state.FinishedAt = "error", shared.NowMS()
+		if err := updater.WriteUpdateJSON(filename, state); err != nil {
+			a.log.Printf("记录更新中断状态失败：%v", err)
 		}
 	})
 }
@@ -99,16 +112,16 @@ func (a *App) updateSupport() updater.UpdateSupport {
 func (a *App) updateStatus() shared.M {
 	support := a.updateSupport()
 	a.updates.mu.Lock()
-	cache := a.updates.cache
+	cache, source := a.updates.cache, a.updates.source
 	running, checking := a.updates.running, a.updates.checking
 	a.updates.mu.Unlock()
 	state := updater.UpdateState{Phase: "idle"}
 	_ = updater.ReadUpdateJSON(filepath.Join(a.updateDirectory(), "state.json"), &state)
-	if !running && updater.UpdateBusy(state.Phase) && state.StartedAt < shared.NowMS()-int64((20*time.Minute)/time.Millisecond) {
+	if !running && updater.UpdateBusy(state.Phase) && time.Since(time.UnixMilli(state.StartedAt)) > 20*time.Minute {
 		state.Phase, state.Message, state.FinishedAt = "error", "更新任务已超时，请检查服务状态后重试", shared.NowMS()
 		_ = updater.WriteUpdateJSON(filepath.Join(a.updateDirectory(), "state.json"), state)
 	}
-	available := updater.NewerUpdate(a.version, cache.Release.Tag)
+	available := updater.NewerUpdate(a.version, cache.Release.Tag) || source != nil && source.Relation == "behind"
 	assetOK, assetReason := false, ""
 	if cache.Release.Tag != "" {
 		if support.Mode == "container" {
@@ -122,7 +135,8 @@ func (a *App) updateStatus() shared.M {
 	return shared.M{"current_version": a.version, "latest_version": cache.Release.Tag, "repository": updater.UpdateRepository,
 		"repository_url": "https://github.com/" + updater.UpdateRepository, "release_url": cache.Release.URL,
 		"release_notes": cache.Release.Body, "published_at": cache.Release.PublishedAt, "checked_at": cache.CheckedAt,
-		"available": available, "supported": support.Supported, "reason": support.Reason, "deployment": support.Mode,
+		"available": available, "can_check": support.CanCheck || support.SourceBuild, "supported": support.Supported, "reason": support.Reason, "deployment": support.Mode,
+		"source_check": support.SourceBuild, "source": source,
 		"asset_ready": assetOK, "asset_reason": assetReason, "busy": running || updater.UpdateBusy(state.Phase), "checking": checking, "state": state}
 }
 
@@ -140,23 +154,31 @@ func (a *App) updateClient(ctx context.Context) (*http.Client, func(), error) {
 }
 
 func (a *App) checkUpdate(parent context.Context) error {
-	mirror, err := settings.GitHubUpdateMirror(a.configValue("github_update_mirror"))
-	if err != nil {
-		return err
+	support := a.updateSupport()
+	if !support.CanCheck && !support.SourceBuild {
+		return fmt.Errorf("%s", support.Reason)
 	}
-	a.loadUpdater()
-	if !a.updates.checkMu.TryLock() {
+	var mirror string
+	if support.CanCheck {
+		var err error
+		mirror, err = settings.GitHubUpdateMirror(a.configValue("github_update_mirror"))
+		if err != nil {
+			return err
+		}
+	}
+	a.updates.mu.Lock()
+	if a.updates.checking {
+		a.updates.mu.Unlock()
 		return fmt.Errorf("正在检查更新，请稍候")
 	}
-	defer a.updates.checkMu.Unlock()
-	now := time.Now()
-	a.updates.mu.Lock()
 	cache := a.updates.cache
-	if a.updates.running {
+	var active updater.UpdateState
+	_ = updater.ReadUpdateJSON(filepath.Join(a.updateDirectory(), "state.json"), &active)
+	if a.updates.running || updater.UpdateBusy(active.Phase) {
 		a.updates.mu.Unlock()
 		return fmt.Errorf("更新正在进行中")
 	}
-	if cache.Mirror == mirror && cache.CheckedAt > now.Add(-10*time.Second).UnixMilli() {
+	if support.CanCheck && cache.Mirror == mirror && cache.CheckedAt > time.Now().Add(-10*time.Second).UnixMilli() {
 		a.updates.mu.Unlock()
 		return nil
 	}
@@ -165,6 +187,16 @@ func (a *App) checkUpdate(parent context.Context) error {
 	defer func() { a.updates.mu.Lock(); a.updates.checking = false; a.updates.mu.Unlock() }()
 	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
+	if support.SourceBuild {
+		source, err := a.checkSource(ctx)
+		if err != nil {
+			return err
+		}
+		a.updates.mu.Lock()
+		a.updates.source = source
+		a.updates.mu.Unlock()
+		return nil
+	}
 	client, release, err := a.updateClient(ctx)
 	if err != nil {
 		return err
@@ -181,6 +213,18 @@ func (a *App) checkUpdate(parent context.Context) error {
 	a.updates.cache = cache
 	a.updates.mu.Unlock()
 	return nil
+}
+
+func (a *App) checkSource(ctx context.Context) (*updater.SourceCheck, error) {
+	if root := updater.SourceCheckout(a.root); root != "" {
+		return updater.CheckSourceCheckout(ctx, root)
+	}
+	client, release, err := a.updateClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return updater.CheckGitHubSource(ctx, client)
 }
 
 func checkUpdateRelease(ctx context.Context, client *http.Client, cache updater.UpdateReleaseCache, mirror string) (updater.UpdateReleaseCache, error) {
@@ -220,11 +264,11 @@ func (a *App) startUpdate(version string) error {
 		return fmt.Errorf("%s", support.Reason)
 	}
 	cache := a.updates.cache
-	if version == "" || version != cache.Release.Tag || cache.CheckedAt < shared.NowMS()-int64((30*time.Minute)/time.Millisecond) {
+	if version == "" || cache.CheckedAt < shared.NowMS()-int64((30*time.Minute)/time.Millisecond) {
 		return fmt.Errorf("请先检查最新版本，再提交更新")
 	}
-	if !updater.NewerUpdate(a.version, version) {
-		return fmt.Errorf("当前已是最新发行版本，不执行降级或覆盖本地修复版")
+	if version != cache.Release.Tag || !updater.NewerUpdate(a.version, version) {
+		return fmt.Errorf("目标版本已变化或无需升级，请重新检查")
 	}
 	state := updater.UpdateState{Phase: "downloading", Version: version, Message: "正在下载发行包", StartedAt: shared.NowMS(), Deployment: support.Mode, PreviousVersion: a.version}
 	if support.Mode == "container" {
@@ -341,41 +385,26 @@ func (a *App) prepareUpdate(cache updater.UpdateReleaseCache, state *updater.Upd
 		return fmt.Errorf("无法保护更新目录：%w", err)
 	}
 	state.BackupJob = filepath.Base(job)
-	archive, err := os.OpenFile(filepath.Join(job, asset.Name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(archive.Name())
-	response, err := updater.UpdateGET(ctx, client, asset.URL, "", mirror)
-	if err != nil {
-		archive.Close()
-		return err
-	}
+	archive := filepath.Join(job, asset.Name)
 	state.Total = asset.Size
 	lastProgress := time.Time{}
-	progress := &updater.UpdateProgress{OnProgress: func(count int64) {
-		state.Downloaded = count
-		if time.Since(lastProgress) >= 500*time.Millisecond {
+	err = updater.DownloadUpdateArchive(ctx, client, asset, mirror, expected, archive, func(message string, count int64) {
+		state.Message, state.Downloaded = message, count
+		if count == 0 || time.Since(lastProgress) >= 500*time.Millisecond {
 			lastProgress = time.Now()
 			_ = updater.WriteUpdateJSON(filepath.Join(a.updateDirectory(), "state.json"), state)
 		}
-	}}
-	digest := sha256.New()
-	size, copyErr := io.Copy(io.MultiWriter(archive, digest, progress), io.LimitReader(response.Body, updater.UpdateArchiveLimit+1))
-	response.Body.Close()
-	closeErr := archive.Close()
-	if copyErr != nil || closeErr != nil || size != asset.Size || size > updater.UpdateArchiveLimit {
-		return fmt.Errorf("发行包下载不完整，请检查服务器网络后重试")
+	})
+	if err != nil {
+		return err
 	}
-	if hex.EncodeToString(digest.Sum(nil)) != expected {
-		return fmt.Errorf("发行包 SHA256 校验失败，未替换当前程序")
-	}
+	defer os.Remove(archive)
 	state.Phase, state.Message = "preparing", "校验通过，正在准备备份"
 	if err = updater.WriteUpdateJSON(filepath.Join(a.updateDirectory(), "state.json"), state); err != nil {
 		return err
 	}
 	binary := filepath.Join(job, updater.UpdateBinaryFilename("new-binary"))
-	if err = updater.ExtractUpdateBinary(archive.Name(), asset.Name, binary); err != nil {
+	if err = updater.ExtractUpdateBinary(archive, asset.Name, binary); err != nil {
 		return err
 	}
 	probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -425,7 +454,7 @@ func (a *App) launchUpdateHelper(ctx context.Context, job, binary string, state 
 		Backup: filepath.Join(job, updater.UpdateBinaryFilename("previous-binary")), Data: data, StateFile: filepath.Join(a.updateDirectory(), "state.json"),
 		Version: state.Version, PreviousVersion: a.version, CreatedAt: shared.NowMS(), PID: os.Getpid(), WebPort: a.webPort, GatewayPort: a.gatewayPort,
 		WebHost: a.webUpdateHost, GatewayHost: a.gatewayUpdateHost}
-	if support.Mode == "windows" {
+	if support.Service == "" {
 		plan.Directory, err = os.Getwd()
 		if err != nil {
 			return err
@@ -458,8 +487,8 @@ func (a *App) launchUpdateHelper(ctx context.Context, job, binary string, state 
 	if err = updater.WriteUpdateJSON(plan.StateFile, state); err != nil {
 		return err
 	}
-	if support.Mode == "windows" {
-		if err := updater.StartWindowsUpdater(ctx, helper, planFile); err != nil {
+	if support.Service == "" {
+		if err := updater.StartStandaloneUpdater(ctx, helper, planFile); err != nil {
 			return err
 		}
 		a.cancel()

@@ -19,8 +19,18 @@ import (
 const accountFields = "label family customer_id group_id status enc_tokens device_mid app_version card_started_at card_expires_at web_cookie_expires_at business_token_expires_at zcode_jwt_last_ok_at fail_streak cooldown_until capabilities last_balance last_error proxy_url last_ok_at last_used_at"
 const automaticAccountGroup = "SELECT id FROM groups WHERE enabled=1 AND role='primary' AND (family_filter IS NULL OR family_filter='' OR family_filter=?) ORDER BY created_at LIMIT 1"
 
+func (a *App) persistAccountFields(id string, fields shared.M) error {
+	result, err := updateFields(a.db, "accounts", id, fields, accountFields)
+	if err != nil {
+		a.log.Printf("database write: %v", err)
+	} else if result != nil {
+		a.notifyAvailable()
+	}
+	return err
+}
+
 func (a *App) updateAccount(id string, m shared.M) error {
-	return a.writeAccountUpdate(id, m, func() error { return a.update("accounts", "id", id, m, accountFields) })
+	return a.writeAccountUpdate(id, m, func() error { return a.persistAccountFields(id, m) })
 }
 
 func (a *App) writeAccountUpdate(id string, m shared.M, write func() error) error {
@@ -83,7 +93,7 @@ func (a *App) updateAccountPlacement(ctx context.Context, id string, fields, bod
 			}
 		}
 		fields["group_id"] = shared.Nullable(group)
-		if _, err := updateFields(tx, "accounts", "id", id, fields, accountFields); err != nil {
+		if _, err := updateFields(tx, "accounts", id, fields, accountFields); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -114,13 +124,12 @@ func (a *App) insertAccount(fields, tokens shared.M) (shared.M, error) {
 			plain[k] = shared.Str(v)
 		}
 	}
-	appVersion := settings.ZCodeFingerprintVersion
 	tx, err := a.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	id, err := a.insertAccountRow(tx, fields, plain, appVersion)
+	id, err := a.insertAccountRow(tx, fields, plain)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +139,7 @@ func (a *App) insertAccount(fields, tokens shared.M) (shared.M, error) {
 	return a.account(id), nil
 }
 
-func (a *App) insertAccountRow(db storage.Executor, fields shared.M, tokens map[string]string, appVersion string) (string, error) {
+func (a *App) insertAccountRow(db storage.Executor, fields shared.M, tokens map[string]string) (string, error) {
 	enc := map[string]string{}
 	for key, value := range tokens {
 		ciphertext, err := accountdata.Encrypt(value, a.secret)
@@ -150,7 +159,7 @@ func (a *App) insertAccountRow(db storage.Executor, fields shared.M, tokens map[
 		}
 	}
 	id := "acc_" + shared.Random(8)
-	_, err := db.Exec("INSERT INTO accounts(id,label,family,customer_id,group_id,status,enc_tokens,device_mid,app_version,web_cookie_expires_at,business_token_expires_at,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, shared.Fallback(fields["label"], "账号"), shared.Fallback(fields["family"], "bigmodel"), fields["customer_id"], group, shared.Fallback(fields["status"], "unverified"), shared.JSON(enc), shared.Fallback(fields["device_mid"], shared.UUID()), appVersion, fields["web_cookie_expires_at"], fields["business_token_expires_at"], shared.Fallback(fields["source"], "local"), shared.NowMS())
+	_, err := db.Exec("INSERT INTO accounts(id,label,family,customer_id,group_id,status,enc_tokens,device_mid,app_version,web_cookie_expires_at,business_token_expires_at,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, shared.Fallback(fields["label"], "账号"), shared.Fallback(fields["family"], "bigmodel"), fields["customer_id"], group, shared.Fallback(fields["status"], "unverified"), shared.JSON(enc), shared.Fallback(fields["device_mid"], shared.UUID()), settings.ZCodeFingerprintVersion, fields["web_cookie_expires_at"], fields["business_token_expires_at"], shared.Fallback(fields["source"], "local"), shared.NowMS())
 	return id, err
 }
 

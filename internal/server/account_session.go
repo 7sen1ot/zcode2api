@@ -33,7 +33,7 @@ func (a *App) updateAccountStatusIfCurrent(snapshot, balance, fields shared.M) b
 	if current == nil || current["status"] == "disabled" || current["enc_tokens"] != snapshot["enc_tokens"] || current["device_mid"] != snapshot["device_mid"] || current["proxy_url"] != snapshot["proxy_url"] || balance != nil && !a.balanceResultCurrent(current, balance) {
 		return false
 	}
-	if err := a.update("accounts", "id", id, fields, accountFields); err != nil {
+	if err := a.persistAccountFields(id, fields); err != nil {
 		return false
 	}
 	if fields["status"] == "needs_relogin" || fields["status"] == "web_only" {
@@ -120,7 +120,7 @@ func (a *App) saveLoginAccount(target, identity string, fields, tokens shared.M)
 		changes["status"], changes["last_error"], changes["fail_streak"] = "unverified", nil, 0
 	}
 	id := shared.Str(account["id"])
-	if err := a.update("accounts", "id", id, changes, accountFields); err != nil {
+	if err := a.persistAccountFields(id, changes); err != nil {
 		return nil, false, err
 	}
 	a.invalidateBalanceLocked(id)

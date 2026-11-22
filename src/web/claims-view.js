@@ -187,10 +187,10 @@ function queueClaimBrowserVerification(signal, verify) {
 function claimAccountMarkup(preview, account = {}) {
   return claimablePlans(preview).map(plan => {
     const name = account.platform_name || account.label || '当前账号';
-    const details = preview.stale ? `本次查询未更新，保留上次仍有效的卡片。${preview.error || ''}` : '';
+    const details = preview.stale ? `显示上次有效结果。${preview.error || ''}` : '';
     return `<div class="daily-claim-row${preview.stale ? ' query-stale' : ''}">
     ${accountNameMarkup({ ...account, id: preview.account_id }, 'claim-account')}
-    <div class="daily-claim-grants">${(plan.entitlements || []).map(entitlement => `<div><strong title="${esc(fmtInt(entitlement.grant_units))} ${esc(entitlement.unit_type || 'Token')}">${fmtQuota(entitlement.grant_units)}<small> ${esc(entitlement.unit_type || 'Token')}</small></strong><span>${esc(entitlement.show_name || entitlement.meter || '')}</span></div>`).join('') || '<span class="muted">额度以 ZCode 为准</span>'}</div>
+    <div class="daily-claim-grants">${(plan.entitlements || []).map(entitlement => `<div><strong title="${esc(fmtInt(entitlement.grant_units))} ${esc(entitlement.unit_type || 'Token')}">${fmtQuota(entitlement.grant_units)}<small> ${esc(entitlement.unit_type || 'Token')}</small></strong><span>${esc(entitlement.show_name || entitlement.meter || '')}</span></div>`).join('')}</div>
     <div class="daily-claim-action">${details ? infoTip(details, '查询状态') : ''}<button type="button" class="btn" data-claim-skip aria-label="取消 ${esc(name)} 的验证" hidden>取消验证</button><button type="button" class="btn primary" data-claim="${esc(preview.account_id)}" data-plan="${esc(plan.plan_id)}" aria-label="领取 ${esc(name)} 的每日免费 Token">领取</button></div>
     <p class="daily-claim-feedback" role="status"></p>
   </div>`;
@@ -325,9 +325,9 @@ async function pageClaims(main) {
   const pendingClaims = new Map(), claimQueue = [];
   let claimRunning = false;
   const pageSize = 8;
-  main.innerHTML = `${pagehead('领卡中心', '', '<button type="button" class="btn" id="claims-refresh">' + icon('refresh', 14) + '刷新</button>')}
+  main.innerHTML = `${pagehead('领卡中心', '<button type="button" class="btn" id="claims-refresh">' + icon('refresh', 14) + '刷新</button>')}
     <section class="daily-claim-card fade-up" aria-labelledby="daily-claim-title">
-      <header class="daily-claim-header"><div class="daily-claim-title"><span class="daily-claim-icon">${icon('gift', 22)}</span><div><h2 id="daily-claim-title">每日免费 Token</h2><span>每日 19:00 开放 · 北京时间</span></div></div><div class="daily-claim-actions"><div class="daily-claim-schedule"><span class="time-field control-compact" id="claims-time-field"><input id="claims-time" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="5" value="19:02" disabled aria-label="每日浏览器定时领取时间（北京时间）"><button type="button" class="time-field-trigger" id="claims-time-trigger" aria-label="选择定时领取时间" aria-expanded="false" aria-haspopup="dialog" aria-controls="claims-time-pop" disabled>${icon('timer', 13)}</button><span class="time-field-pop control-compact" id="claims-time-pop" hidden role="dialog" aria-label="选择定时领取时间"><span class="time-field-col" data-unit="hour" role="group" aria-label="小时"></span><span class="time-field-col" data-unit="minute" role="group" aria-label="分钟"></span></span></span><label for="claims-schedule">浏览器定时领取<input id="claims-schedule" type="checkbox" role="switch" disabled></label><span id="claims-schedule-info">${infoTip('定时领卡固定使用服务端真实浏览器，需在“设置 → 上游安全验证 → 领卡验证”配置浏览器依赖。服务需保持运行，网页可关闭。', '定时领取')}</span></div><button type="button" class="btn" id="claims-stop" hidden>停止剩余领取</button><button type="button" class="btn primary" id="claims-all" disabled>全部领取</button></div></header>
+      <header class="daily-claim-header"><div class="daily-claim-title"><span class="daily-claim-icon">${icon('gift', 22)}</span><h2 id="daily-claim-title">每日免费 Token</h2></div><div class="daily-claim-actions"><div class="daily-claim-schedule"><span class="time-field control-compact" id="claims-time-field"><input id="claims-time" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="5" value="19:02" disabled aria-label="每日浏览器定时领取时间（北京时间）"><button type="button" class="time-field-trigger" id="claims-time-trigger" aria-label="选择定时领取时间" aria-expanded="false" aria-haspopup="dialog" aria-controls="claims-time-pop" disabled>${icon('timer', 13)}</button><span class="time-field-pop control-compact" id="claims-time-pop" hidden role="dialog" aria-label="选择定时领取时间"><span class="time-field-col" data-unit="hour" role="group" aria-label="小时"></span><span class="time-field-col" data-unit="minute" role="group" aria-label="分钟"></span></span></span><label for="claims-schedule">定时领取（北京时间）<input id="claims-schedule" type="checkbox" role="switch" disabled></label><span id="claims-schedule-info">${infoTip('服务需保持运行，浏览器依赖在「设置 → 上游安全验证」配置。', '定时领取')}</span></div><button type="button" class="btn" id="claims-stop" hidden>停止剩余领取</button><button type="button" class="btn primary" id="claims-all" disabled>全部领取</button></div></header>
       <div id="claims-content" aria-busy="true"><div class="skeleton-block"></div></div>
       <footer class="daily-claim-footer"><span id="claims-update" class="result-count" aria-live="polite">正在查询…</span><span id="claims-summary" class="result-count" role="status"></span><div id="claims-notice"></div><nav class="pager" id="claims-pages" aria-label="可领取账号分页" hidden></nav></footer>
     </section>`;
@@ -391,7 +391,7 @@ async function pageClaims(main) {
     const time = schedule?.time || '19:02';
     $('#claims-time', main).value = time;
     timeField.highlight();
-    const details = [`每日北京时间 ${time} 固定使用服务端真实浏览器领取；服务需保持运行，网页可关闭。请在“设置 → 上游安全验证 → 领卡验证”配置浏览器依赖。`, '定时任务独立在后台执行，可重试的失败在计划时间起 10 分钟内恢复一次。'];
+    const details = ['服务端执行定时领取，关闭网页后仍会运行。浏览器依赖在「设置 → 上游安全验证」配置。'];
     if (schedule?.browser_window) {
       const window = schedule.browser_window;
       const clock = value => new Date(value).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, hour: '2-digit', minute: '2-digit' });
@@ -419,7 +419,7 @@ async function pageClaims(main) {
     page = pagination.page;
     content.innerHTML = items.length ? items.map(preview => claimAccountMarkup(preview, accountFor(preview.account_id))).join('')
       : loading ? '<div class="skeleton-block"></div>'
-      : '<div class="daily-claim-empty">' + icon('gift', 28) + `<p${discoveryError || failures.length ? ' role="alert"' : ''}>${discoveryError || failures.length ? '查询未完成，请刷新重试' : '暂无可领取的每日免费卡'}</p></div>`;
+      : '<div class="daily-claim-empty">' + icon('gift', 28) + `<p${discoveryError || failures.length ? ' role="alert"' : ''}>${discoveryError || failures.length ? '查询未完成，请刷新重试' : '暂无可领取的卡片'}</p></div>`;
     const notices = [];
     if (failures.length) notices.push(`<span class="warn-text">${failures.length} 个账号未更新</span>${infoTip(failures.map(preview => `${accountFor(preview.account_id).platform_name || preview.label || '账号'}：${preview.error}${preview.stale ? '（保留上次有效结果）' : ''}`).join('\n'), '账号查询失败')}`);
     if (discoveryError) notices.push(infoTip(discoveryError, '查询失败'));

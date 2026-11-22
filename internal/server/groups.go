@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"unicode/utf16"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
 )
@@ -26,14 +25,10 @@ func groupConfig(body shared.M, create bool) (shared.M, error) {
 		if !exists {
 			continue
 		}
+		var err error
 		switch field {
 		case "name":
-			name, _ := value.(string)
-			name = strings.TrimSpace(name)
-			if name == "" || len(utf16.Encode([]rune(name))) > 80 {
-				return nil, errors.New("请输入分组名称，最多 80 个字符")
-			}
-			value = name
+			value, err = parseAdminName(value, "分组名称")
 		case "role":
 			switch value {
 			case nil, "":
@@ -67,14 +62,10 @@ func groupConfig(body shared.M, create bool) (shared.M, error) {
 				value = shared.Integer(value)
 			}
 		case "enabled":
-			switch shared.Str(value) {
-			case "true", "1":
-				value = 1
-			case "false", "0":
-				value = 0
-			default:
-				return nil, errors.New("启用状态无效")
-			}
+			value, err = parseEnabledFlag(value)
+		}
+		if err != nil {
+			return nil, err
 		}
 		fields[field] = value
 	}
@@ -187,7 +178,7 @@ func (a *App) updateGroup(ctx context.Context, id string, fields shared.M) (any,
 			return adminError(http.StatusConflict, fmt.Sprintf("有 %d 个关联账号与新类型不匹配，请先移出这些账号", conflicts))
 		}
 	}
-	if _, err := updateFields(tx, "groups", "id", id, fields, groupColumns); err != nil {
+	if _, err := updateFields(tx, "groups", id, fields, groupColumns); err != nil {
 		return nil, 500, err
 	}
 	if err := tx.Commit(); err != nil {

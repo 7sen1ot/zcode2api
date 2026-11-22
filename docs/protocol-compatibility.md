@@ -29,17 +29,18 @@ python3 -m venv grammar_python/.venv
 grammar_python/.venv/bin/python -m pip install --only-binary=:all: -r grammar_python/requirements.txt
 ```
 
-可用 `ZCODE2API_GRAMMAR_PYTHON` 指定解释器，否则依次查找 `--root` 下的 `grammar_python/.venv`、PATH 中的 `python3` 和 `python`。Docker 构建时加入 `GRAMMAR_RUNTIME=1` 安装运行时。
+可用 `ZCODE2API_GRAMMAR_PYTHON` 指定解释器，否则依次查找 `--root` 下的 `grammar_python/.venv`、PATH 中的 `python3` 和 `python`。Docker 构建时加入 `--build-arg GRAMMAR_RUNTIME=1` 安装运行时。
 
-Chat 的语法位于 `custom.format.grammar.{syntax,definition}`，Responses 位于 `format.{syntax,definition}`。响应附带 `X-Zcode-Grammar-Validation: llguidance-post-generation`。
+Chat 的语法位于 `custom.format.grammar.{syntax,definition}`，Responses 位于 `format.{syntax,definition}`。请求通过工具声明校验并进入推理时，网关设置响应头 `X-Zcode-Grammar-Validation: llguidance-post-generation`。
 
 | 阶段 | 结果 |
 | --- | --- |
-| 请求进入时编译语法 | 无效、不支持或无法完整解释时返回 `400 invalid_grammar` |
+| 检查声明 | 不支持的格式、空定义或超过 64 KiB 的定义返回 `400 unsupported_request` |
+| 编译语法 | LLGuidance 拒绝定义或返回警告时，返回 `400 invalid_grammar` |
 | 校验生成结果的全部 UTF-8 字节及最终接受状态 | 不匹配时非流式返回 `502 grammar_mismatch`；已开始的 SSE 保持 HTTP 200，通过 Chat `error` 或 Responses `response.failed` 结束 |
 | 运行时缺失 / 校验超时 | 分别返回 `503 grammar_runtime_unavailable` / `504 grammar_validation_timeout`，不降级为只靠提示 |
 
-grammar 定义最多 64 KiB，输入最多 1 MiB；单次编译或校验限时 5 秒，最多同时运行 4 个校验进程，Linux 进程地址空间限制为 512 MiB。
+单次编译或校验的 5 秒时限包括等待空闲进程名额的时间。最多同时运行 4 个校验进程，Linux 进程地址空间上限为 512 MiB。生成的工具输入超过 1 MiB 时返回 `grammar_input_too_large`。
 
 流式响应可提前发送空输入的调用元信息，实际 custom 输入通过完整校验后才发送；失败时终止调用，不能把空元信息当作可执行输入。
 
@@ -49,11 +50,18 @@ grammar 定义最多 64 KiB，输入最多 1 MiB；单次编译或校验限时 5
 
 ### 模板与去重
 
-网关注入 ZCode 3.17.2 所需的三段模板，将顶层调用方文本指令合并到第三段，保持恰好三个系统块；缺少模板或改变结构可能导致上游返回 3012。合并保留一致的 `cache_control`，拒绝非文本块、额外字段或冲突的缓存策略。
+「设置 → 请求模板」默认使用 `main`。两种模板接收调用方指令的位置不同。
+
+| 模板 | 上游 system 块 | 调用方文本的位置 |
+| --- | --- | --- |
+| `main` | 三个内置文本块 | 合并到第三块末尾 |
+| `subagent` | 固定身份和可选正文，共两个文本块 | 合并到第二块末尾。四项正文默认关闭，此时只保留调用方提供的正文。 |
+
+合并时可保留一致的 `cache_control`。非文本块、未支持的字段或相互冲突的缓存策略会返回请求错误。请求头 `X-Zcode-Template-Mode` 可覆盖全局模板，同时提供的 `X-Zcode-Session-Type` 须与所选模板一致。[模板实现](../internal/server/protocol/zcode_system.go)
 
 去重按已知完整内容匹配，兼容默认段落内的空白差异和身份末尾句号：
 
-- 请求开头的明确 ZCode 身份前缀按已识别的旧版默认段落清理，遇到未知内容停止此前缀清理；与当前注入模板一致的段落、条目和旧身份仍可在自定义内容之后清理。
+- 请求开头的明确 ZCode 身份前缀按已识别的旧版默认段落清理，遇到未知内容停止此前缀清理；已识别的内置默认段落、条目和旧身份仍可在自定义内容之后清理。
 - 扩展区块保留额外文字，移除重复默认条目及清理后为空的标题。剩余客户端独有规则以 `Client` 标题区分，例如 `# Client Session-specific guidance`。
 - 清理已识别的 Claude Code / Agent SDK 固定身份声明及 Fable 5 默认模型介绍；未知、自定义、改写文本和 Markdown 围栏示例保留。
 

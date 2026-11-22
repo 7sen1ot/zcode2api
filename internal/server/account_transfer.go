@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 	accountdata "zcode2api/internal/server/account"
-	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
 )
@@ -198,7 +197,6 @@ func (a *App) importAccounts(ctx context.Context, b shared.M) (any, int, error) 
 	if b["group_id"] != nil && !validGroup {
 		return adminError(400, "目标分组无效")
 	}
-	appVersion := settings.ZCodeFingerprintVersion
 	a.credentialMu.Lock()
 	defer a.credentialMu.Unlock()
 	tx, err := a.db.BeginTx(ctx, nil)
@@ -262,7 +260,7 @@ func (a *App) importAccounts(ctx context.Context, b shared.M) (any, int, error) 
 		if entry.Disabled {
 			status = "disabled"
 		}
-		id, err := a.insertAccountRow(tx, shared.M{"label": shared.Fallback(entry.Label, "导入账号"), "family": entry.Family, "customer_id": shared.Nullable(entry.CustomerID), "group_id": shared.Nullable(targetGroup), "status": status, "device_mid": entry.DeviceMid, "web_cookie_expires_at": entry.WebCookieExpiresAt, "business_token_expires_at": entry.BusinessTokenExpiresAt, "source": "file"}, entry.Tokens, appVersion)
+		id, err := a.insertAccountRow(tx, shared.M{"label": shared.Fallback(entry.Label, "导入账号"), "family": entry.Family, "customer_id": shared.Nullable(entry.CustomerID), "group_id": shared.Nullable(targetGroup), "status": status, "device_mid": entry.DeviceMid, "web_cookie_expires_at": entry.WebCookieExpiresAt, "business_token_expires_at": entry.BusinessTokenExpiresAt, "source": "file"}, entry.Tokens)
 		if err != nil {
 			return nil, 500, err
 		}

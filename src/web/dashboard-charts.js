@@ -18,7 +18,7 @@ function tokenCacheCurve(points) {
   }).join(' ');
 }
 
-function renderTokenCacheChart(root, stats = {}, { rangeId = '', showTotals = true } = {}) {
+function renderTokenCacheChart(root, stats = {}, { rangeId = '' } = {}) {
   stats ||= {};
   const { rows, offset } = UI.usageTimeline(stats);
   const total = rows.reduce((sum, row) => ({ input: sum.input + row.input, cached: sum.cached + row.cached, tokens: sum.tokens + row.tokens }), { input: 0, cached: 0, tokens: 0 });
@@ -32,14 +32,13 @@ function renderTokenCacheChart(root, stats = {}, { rangeId = '', showTotals = tr
   root.setAttribute('aria-labelledby', `${id}-title`);
   root.innerHTML = `<header class="combo-chart-heading">
     <div class="combo-heading-main"><div class="combo-chart-title"><h2 id="${id}-title">Token 与缓存</h2></div>
-      <div class="combo-chart-context"><span data-combo-caption>${range}</span><span>命中率 <b data-combo-rate>${rateText(total.rate)}</b></span></div>
-      <div class="combo-chart-amount"><strong data-combo-tokens title="${fmtInt(total.tokens)} Token">${fmtQuota(total.tokens)}</strong><span>Token</span></div>
+      <div class="combo-chart-context"><span><i class="combo-line-key" aria-hidden="true"></i> 缓存命中率 <b data-combo-rate>${rateText(total.rate)}</b></span><span data-combo-caption hidden></span></div>
+      <div class="combo-chart-amount"><strong data-combo-tokens title="${fmtInt(total.tokens)} Token">${fmtQuota(total.tokens)}</strong><span><i class="combo-bar-key" aria-hidden="true"></i> Token</span></div>
     </div>
     <div class="combo-chart-range">${rangeId ? `<select id="${esc(rangeId)}" class="round" aria-label="统计时间范围"><option value="24">近 24 小时</option><option value="168">近 7 天</option><option value="720">近 30 天</option></select>` : `<span class="combo-range-label">${range}</span>`}</div>
   </header>
   <div class="combo-chart-plot"></div>
-  <div class="combo-chart-tooltip" id="${id}-tooltip" role="tooltip" hidden></div>
-  ${showTotals ? `<div class="combo-chart-tiles"><div class="combo-chart-tile"><span><i class="combo-bar-key" aria-hidden="true"></i>Token 合计</span><strong>${fmtInt(total.tokens)}</strong></div><div class="combo-chart-tile"><span><i class="combo-line-key" aria-hidden="true"></i>缓存命中率</span><strong>${rateText(total.rate)}</strong></div></div>` : ''}`;
+  <div class="combo-chart-tooltip" id="${id}-tooltip" role="tooltip" hidden></div>`;
   if (rangeId) root.querySelector('select').value = String(hours);
   const plot = root.querySelector('.combo-chart-plot'), tooltip = root.querySelector('.combo-chart-tooltip');
   const headingCaption = root.querySelector('[data-combo-caption]');
@@ -48,7 +47,8 @@ function renderTokenCacheChart(root, stats = {}, { rangeId = '', showTotals = tr
   let active = -1, hits = [], columns = [], pulse = null, width = 0, painted = false;
   const current = index => {
     const row = rows[index] || total;
-    headingCaption.textContent = index < 0 ? range : row.bucket.slice(5).replace('T', ' ').replace(':00:00', ':00');
+    headingCaption.hidden = index < 0;
+    headingCaption.textContent = index < 0 ? '' : caption(row);
     headingRate.textContent = rateText(row.rate);
     headingTokens.textContent = fmtQuota(row.tokens);
     headingTokens.title = `${fmtInt(row.tokens)} Token`;

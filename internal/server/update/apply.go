@@ -25,66 +25,78 @@ import (
 )
 
 type UpdateSupport struct {
-	Supported                     bool
+	CanCheck, Supported           bool
+	SourceBuild                   bool
 	Reason, Mode, Service, Binary string
-	Systemctl, SystemdRun         string
+	SystemdRun                    string
 }
 
 var updateServicePattern = regexp.MustCompile(`^[A-Za-z0-9_@][A-Za-z0-9_.@:-]*\.service$`)
 
 func DetectUpdateSupport(version string) UpdateSupport {
-	support := UpdateSupport{Mode: "manual", Reason: "当前部署支持检查版本，请使用发行包手动更新"}
+	_, validVersion := updateVersionNumbers(version)
+	localVersion := strings.Contains(version, "-local.")
+	support := UpdateSupport{
+		Mode:        "manual",
+		Reason:      "当前部署支持检查版本，请使用发行包手动更新",
+		CanCheck:    validVersion && !localVersion,
+		SourceBuild: version == "dev" || strings.HasPrefix(version, "src-") || localVersion,
+	}
+	if !support.CanCheck {
+		support.Reason = "当前构建请通过原部署方式手动更新"
+	}
 	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
 		if _, err := os.Stat(marker); err == nil {
 			support.Mode, support.Reason = "container", "容器部署请在宿主机更新镜像并重建容器"
 			return support
 		}
 	}
-	if runtime.GOOS != "linux" {
-		if runtime.GOOS == "windows" {
-			if _, valid := updateVersionNumbers(version); valid {
-				if !windowsUpdateAvailable() {
-					support.Reason = "Windows 在线更新适用于直接启动的发行版；由服务管理器托管时请通过该管理器更新"
-					return support
-				}
-				return detectUpdateBinary(support, "windows")
-			}
-			support.Reason = "Windows 在线更新适用于发行版，请通过源码更新当前开发构建"
+	var cgroups []byte
+	var err error
+	if runtime.GOOS == "linux" {
+		cgroups, err = os.ReadFile("/proc/self/cgroup")
+		if err != nil {
+			return support
 		}
-		return support
-	}
-	if _, ok := updateVersionNumbers(version); !ok {
-		support.Reason = "开发构建请通过源码更新；安装发行版后可使用在线更新"
-		return support
-	}
-	if os.Geteuid() != 0 {
-		support.Reason = "在线更新需要由 root 运行的 systemd 服务"
-		return support
-	}
-	cgroups, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return support
-	}
-	if strings.Contains(string(cgroups), "docker") || strings.Contains(string(cgroups), "kubepods") || strings.Contains(string(cgroups), "libpod") {
-		support.Mode, support.Reason = "container", "容器部署请在宿主机更新镜像并重建容器"
-		return support
-	}
-	for _, line := range strings.Split(string(cgroups), "\n") {
-		fields := strings.SplitN(line, ":", 3)
-		if len(fields) != 3 {
-			continue
-		}
-		unit := filepath.Base(fields[2])
-		if strings.HasPrefix(fields[2], "/system.slice/") && updateServicePattern.MatchString(unit) {
-			support.Service = unit
-			break
+		groups := string(cgroups)
+		if strings.Contains(groups, "docker") || strings.Contains(groups, "kubepods") || strings.Contains(groups, "libpod") {
+			support.Mode, support.Reason = "container", "容器部署请在宿主机更新镜像并重建容器"
+			return support
 		}
 	}
-	if support.Service == "" {
-		support.Reason = "在线更新需要使用 systemd 托管当前程序"
+	if !support.CanCheck {
 		return support
 	}
-	support.Systemctl, err = exec.LookPath("systemctl")
+	switch runtime.GOOS {
+	case "windows":
+		if !windowsUpdateAvailable() {
+			support.Reason = "Windows 服务请通过服务管理器更新"
+			return support
+		}
+		return detectUpdateBinary(support, "windows")
+	case "darwin":
+		if service := os.Getenv("XPC_SERVICE_NAME"); os.Getppid() == 1 && service != "" && service != "0" {
+			support.Reason = "launchd 托管的程序请通过服务管理器更新"
+			return support
+		}
+		return detectUpdateBinary(support, "standalone")
+	case "linux":
+		if os.Getpid() == 1 {
+			support.Reason = "当前程序是系统或容器的首进程，请通过部署工具更新"
+			return support
+		}
+		support.Service = linuxUpdateService(string(cgroups))
+		if support.Service == "" {
+			return detectUpdateBinary(support, "standalone")
+		}
+	default:
+		return support
+	}
+	if os.Geteuid() != 0 || !updateServicePattern.MatchString(support.Service) {
+		support.Reason = "当前 systemd 服务请通过服务管理器更新，在线更新需要 root 系统服务"
+		return support
+	}
+	systemctl, err := exec.LookPath("systemctl")
 	if err != nil {
 		return support
 	}
@@ -95,12 +107,33 @@ func DetectUpdateSupport(version string) UpdateSupport {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, support.Systemctl, "show", support.Service, "-p", "MainPID", "--value").Output()
+	output, err := exec.CommandContext(ctx, systemctl, "show", support.Service, "-p", "MainPID", "--value").Output()
 	if err != nil || strings.TrimSpace(string(output)) != strconv.Itoa(os.Getpid()) {
 		support.Reason = "当前程序不是 systemd 主进程，请使用发行包手动更新"
 		return support
 	}
 	return detectUpdateBinary(support, "systemd")
+}
+
+// Use the systemd hierarchy (v1 or unified v2). A login session scope
+// nested inside a service belongs to the session, not the enclosing service.
+func linuxUpdateService(cgroups string) string {
+	for _, line := range strings.Split(cgroups, "\n") {
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 || fields[1] != "" && !strings.Contains(","+fields[1]+",", ",name=systemd,") {
+			continue
+		}
+		parts := strings.Split(fields[2], "/")
+		for i := len(parts) - 1; i >= 0; i-- {
+			if strings.HasSuffix(parts[i], ".scope") {
+				break
+			}
+			if strings.HasSuffix(parts[i], ".service") {
+				return parts[i]
+			}
+		}
+	}
+	return ""
 }
 
 func detectUpdateBinary(support UpdateSupport, mode string) UpdateSupport {
@@ -264,7 +297,7 @@ func waitUpdateHealthy(ctx context.Context, plan UpdatePlan, version string) err
 			err = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&health)
 			response.Body.Close()
 			if err != nil || response.StatusCode != 200 || !health.OK ||
-				health.Version != version && (health.Version != "" || runtime.GOOS == "windows") {
+				health.Version != version && (health.Version != "" || plan.Service == "") {
 				healthy = false
 				break
 			}
@@ -282,8 +315,9 @@ func waitUpdateHealthy(ctx context.Context, plan UpdatePlan, version string) err
 func validateUpdatePlanPaths(filename string, plan UpdatePlan) error {
 	job := filepath.Dir(filename)
 	validPlatform := runtime.GOOS == "linux" && os.Geteuid() == 0 && updateServicePattern.MatchString(plan.Service)
-	if runtime.GOOS == "windows" {
-		validPlatform = plan.Service == "" && filepath.IsAbs(plan.Directory) && strings.EqualFold(filepath.Ext(plan.Binary), ".exe")
+	if plan.Service == "" && filepath.IsAbs(plan.Directory) {
+		validPlatform = runtime.GOOS == "linux" || runtime.GOOS == "darwin" ||
+			runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(plan.Binary), ".exe")
 	}
 	if !validPlatform ||
 		!filepath.IsAbs(plan.Binary) || !filepath.IsAbs(plan.Data) ||
@@ -317,8 +351,7 @@ func validateUpdatePlan(filename string, plan UpdatePlan) error {
 	return nil
 }
 
-// ApplyUpdate runs in a separate transient systemd unit, so stopping the main
-// service cannot kill the updater. It never overwrites configuration or data.
+// Apply runs outside the server process so it can finish the restart and recovery.
 func Apply(filename string) (resultErr error) {
 	filename, err := filepath.Abs(filename)
 	if err != nil {
@@ -343,13 +376,17 @@ func Apply(filename string) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("该更新计划已经执行")
 	}
-	lock.Close()
+	if err := tryLockUpdateFile(lock); err != nil {
+		lock.Close()
+		return err
+	}
+	defer lock.Close()
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(signalCtx, 5*time.Minute)
 	defer cancel()
-	if runtime.GOOS == "windows" {
-		return applyWindowsUpdate(ctx, filename, plan, state)
+	if plan.Service == "" {
+		return applyStandaloneUpdate(ctx, filename, plan, state)
 	}
 	stopped, replaced := false, false
 	defer func() {

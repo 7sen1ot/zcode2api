@@ -43,32 +43,17 @@ func (a *App) setSetting(k string, v any) error {
 	return a.exec("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v WHERE settings.v IS NOT excluded.v", k, shared.JSON(v))
 }
 
-func (a *App) update(table, idcol, id string, fields shared.M, allowed string) error {
-	result, err := updateFields(a.db, table, idcol, id, fields, allowed)
-	if err != nil {
-		a.log.Printf("database write: %v", err)
-	} else if result != nil && (table == "accounts" || table == "groups") {
-		a.notifyAvailable()
-	}
-	return err
-}
-
-func updateFields(db storage.Executor, table, idcol, id string, fields shared.M, allowed string) (sql.Result, error) {
+func updateFields(db storage.Executor, table, id string, fields shared.M, allowed string) (sql.Result, error) {
 	sets := []string{}
 	args := []any{}
-	for k, v := range fields {
-		if !strings.Contains(" "+allowed+" ", " "+k+" ") {
+	for k := range strings.FieldsSeq(allowed) {
+		v, present := fields[k]
+		if !present {
 			continue
 		}
 		switch v.(type) {
 		case map[string]any, []any:
 			v = shared.JSON(v)
-		}
-		if b, ok := v.(bool); ok {
-			v = 0
-			if b {
-				v = 1
-			}
 		}
 		sets = append(sets, k+"=?")
 		args = append(args, v)
@@ -77,5 +62,5 @@ func updateFields(db storage.Executor, table, idcol, id string, fields shared.M,
 		return nil, nil
 	}
 	args = append(args, id)
-	return db.Exec("UPDATE "+table+" SET "+strings.Join(sets, ",")+" WHERE "+idcol+"=?", args...)
+	return db.Exec("UPDATE "+table+" SET "+strings.Join(sets, ",")+" WHERE id=?", args...)
 }

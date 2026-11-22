@@ -48,15 +48,16 @@ globalThis.Z2AUI = (() => {
     const start = (current - 1) * size;
     return { items: items.slice(start, start + size), page: current, pageSize: size, pages, total: items.length, start: items.length ? start + 1 : 0, end: Math.min(start + size, items.length) };
   }
-  function pageNumbers(current, pages) {
+  function pageNumberButtons(current, pages, attribute) {
     const candidates = new Set([1, pages]);
     for (let n = Math.max(1, current - 2); n <= Math.min(pages, current + 2); n++) candidates.add(n);
-    const result = [];
-    for (const n of [...candidates].sort((a, b) => a - b)) {
-      if (result.length && n - result.at(-1) > 1) result.push('…');
-      result.push(n);
-    }
-    return result;
+    let previous = 0;
+    return [...candidates].sort((a, b) => a - b).map(page => {
+      const gap = page - previous > 1 ? '<span aria-hidden="true">…</span>' : '';
+      previous = page;
+      const active = page === current ? ' class="cur" aria-current="page"' : '';
+      return `${gap}<button type="button" ${attribute}="${page}" aria-label="第 ${page} 页"${active}>${page}</button>`;
+    }).join('');
   }
-  return Object.freeze({ readRoute, routeHash, usageTimeline, paginate, pageNumbers });
+  return Object.freeze({ readRoute, routeHash, usageTimeline, paginate, pageNumberButtons });
 })();

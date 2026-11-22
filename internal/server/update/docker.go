@@ -91,7 +91,7 @@ func RunDockerUpdater(ctx context.Context, dir string) error {
 		return err
 	}
 	defer lock.Close()
-	if err := lockDockerUpdater(lock); err != nil {
+	if err := tryLockUpdateFile(lock); err != nil {
 		return fmt.Errorf("该 Compose 目录已有更新器在运行")
 	}
 	data, err := os.OpenRoot(filepath.Join(dir, "data"))

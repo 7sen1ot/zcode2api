@@ -1,7 +1,6 @@
 'use strict';
 
 globalThis.Z2ALogs = (() => {
-  const pageSize = 20;
   const fields = ['q', 'hours', 'status', 'error_code', 'model', 'account', 'key', 'since', 'until'];
   const defaults = () => Object.fromEntries(fields.map(name => [name, ['q', 'since', 'until'].includes(name) ? '' : 'all']));
   let filters = defaults(), logPage = 1, logSnapshot = null, logLive = true;
@@ -92,7 +91,7 @@ globalThis.Z2ALogs = (() => {
     const data = await api(url);
     if (queryFor(options.live) !== url) return;
     if (options.live && (!previousPanel?.isConnected || !canAutoRefresh(main))) return;
-    const fingerprint = JSON.stringify([data.items, data.total, data.pages, data.summary, data.filters]);
+    const fingerprint = JSON.stringify([data.items, data.total, data.pages, data.page_size, data.summary, data.filters]);
     if (options.live && main.dataset.logFingerprint === fingerprint) { updateLiveButton(main); return; }
     const view = main.ownerDocument.defaultView, scroll = { x: view.scrollX, y: view.scrollY, tableX: main.querySelector('.log-calls')?.scrollLeft || 0 };
     const focusedID = options.live && main.contains(view.document.activeElement) ? view.document.activeElement.id : '';
@@ -117,13 +116,16 @@ globalThis.Z2ALogs = (() => {
     const advanced = select('model', '模型', choices.models || []) + select('account', '账号', choices.accounts || []) + select('key', '密钥', choices.keys || []) +
       `<label class="log-filter log-filter-date"><span>开始时间</span><input type="datetime-local" step="1" name="since" id="lf-since" value="${esc(f.since)}" aria-label="开始时间"></label><label class="log-filter log-filter-date"><span>结束时间</span><input type="datetime-local" step="1" name="until" id="lf-until" value="${esc(f.until)}" aria-label="结束时间"></label>`;
     const filterIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg>';
-    const form = `<form id="log-filters" class="log-filter-card control-compact"><div class="log-filter-grid log-primary-filters">${primary}</div><details id="log-advanced" class="log-advanced disclosure" ${showAdvanced ? 'open' : ''}><summary class="log-advanced-trigger control-trigger" aria-expanded="${showAdvanced}" aria-controls="log-advanced-fields">${filterIcon}<span class="log-advanced-label">${showAdvanced ? '收起筛选' : '更多筛选'}</span>${selectedAdvanced ? `<span class="log-filter-count" title="已选 ${selectedAdvanced} 项">${selectedAdvanced}</span>` : ''}</summary><div id="log-advanced-fields" class="log-filter-grid">${advanced}</div></details><div class="log-filter-actions"><span id="lf-error" role="alert"></span><button type="button" class="btn" id="lf-reset">重置</button><button type="submit" class="btn primary">筛选</button></div></form>`;
-    const pages = data.pages, page = data.page, total = data.total;
+    const form = `<form id="log-filters" class="log-filter-card control-compact"><div class="log-filter-grid log-primary-filters">${primary}</div><details id="log-advanced" class="log-advanced disclosure" ${showAdvanced ? 'open' : ''}><summary class="log-advanced-trigger control-trigger" aria-expanded="${showAdvanced}" aria-controls="log-advanced-fields">${filterIcon}<span>更多筛选</span>${selectedAdvanced ? `<span class="log-filter-count" title="已选 ${selectedAdvanced} 项">${selectedAdvanced}</span>` : ''}</summary><div id="log-advanced-fields" class="log-filter-grid">${advanced}</div></details><div class="log-filter-actions"><span id="lf-error" role="alert"></span><button type="button" class="btn" id="lf-reset">重置</button><button type="submit" class="btn primary">筛选</button></div></form>`;
+    const { pages, page, total, page_size: pageSize } = data;
     const start = total ? (page - 1) * pageSize + 1 : 0, end = Math.min(page * pageSize, total);
-    const pager = `<nav class="pager usage-pager" aria-label="调用记录分页"><span class="pinfo">第 ${fmtInt(start)}–${fmtInt(end)} 条 / 共 ${fmtInt(total)} 条 · 每页 20 条</span><button type="button" data-pg="1" aria-label="首页" ${page === 1 ? 'disabled' : ''}>«</button><button type="button" data-pg="${page - 1}" aria-label="上一页" ${page === 1 ? 'disabled' : ''}>‹</button>${Z2AUI.pageNumbers(page, pages).map(n => n === '…' ? '<span aria-hidden="true">…</span>' : `<button type="button" data-pg="${n}" aria-label="第 ${n} 页" ${n === page ? 'class="cur" aria-current="page"' : ''}>${n}</button>`).join('')}<button type="button" data-pg="${page + 1}" aria-label="下一页" ${page === pages ? 'disabled' : ''}>›</button><button type="button" data-pg="${pages}" aria-label="末页" ${page === pages ? 'disabled' : ''}>»</button><form id="log-page-jump"><label>跳至 <input name="page" type="number" min="1" max="${pages}" value="${page}" required aria-label="跳转页码"> 页</label><button class="btn" type="submit">跳转</button></form></nav>`;
+    const pager = pages > 1 ? `<nav class="pager usage-pager" aria-label="调用记录分页"><span class="pinfo">${fmtInt(start)}–${fmtInt(end)} / ${fmtInt(total)} 条</span><button type="button" data-pg="1" aria-label="首页" ${page === 1 ? 'disabled' : ''}>«</button><button type="button" data-pg="${page - 1}" aria-label="上一页" ${page === 1 ? 'disabled' : ''}>‹</button>${Z2AUI.pageNumberButtons(page, pages, 'data-pg')}<button type="button" data-pg="${page + 1}" aria-label="下一页" ${page === pages ? 'disabled' : ''}>›</button><button type="button" data-pg="${pages}" aria-label="末页" ${page === pages ? 'disabled' : ''}>»</button><form id="log-page-jump"><input name="page" type="number" min="1" max="${pages}" value="${page}" required aria-label="跳转页码"><button class="btn" type="submit">跳转</button></form></nav>` : '';
     const strip = `<div class="overview-strip logs-strip"><div><span>匹配调用</span><strong>${fmtInt(total)}</strong></div><div><span>成功 / 忙碌</span><strong>${fmtInt(summary.success)}<small> / ${fmtInt(summary.busy)}</small></strong></div><div><span>失败 / 已取消</span><strong>${fmtInt(summary.failed)}<small> / ${fmtInt(summary.canceled)}</small></strong></div><div><span>首 Token 时间 P50</span><strong>${summary.p50 == null ? '—' : fmtInt(summary.p50) + '<small> ms</small>'}</strong></div><div><span>Token 消耗</span><strong>${fmtInt(summary.tokens)}</strong></div></div>`;
-    const error = row => `<span class="log-error-message" title="${esc(errorText(row))}">${esc(errorText(row))}</span>`;
-    const clipped = value => `<span class="log-cell-clip" title="${esc(value)}">${esc(value)}</span>`;
+    const errorMessages = rows.map(errorText);
+    const clipped = (value, className = 'log-cell-clip') => {
+      const text = esc(value);
+      return `<span class="${className}" title="${text}">${text}</span>`;
+    };
     const cacheRate = row => {
       const rate = Z2ACacheDetails.hitRate(row);
       return rate == null ? '—' : rate.toFixed(1) + '%';
@@ -134,16 +136,15 @@ globalThis.Z2ALogs = (() => {
     };
     const cacheCell = (row, index) => `<span class="log-cache-inline"><span class="log-cache-percent">${cacheRate(row)}</span>${details(row, index)}</span>`;
     const tokenUsage = row => row.tokens_in == null && row.tokens_out == null ? '—' : fmtInt((row.tokens_in || 0) + (row.tokens_out || 0));
-    const table = `<div class="tablecard log-table log-desktop log-calls"><table><colgroup><col span="9"><col class="log-col-error"></colgroup><thead><tr><th>时间</th><th>密钥</th><th>账号</th><th>模型</th><th>状态</th><th>尝试</th><th>首 Token <small>ms</small></th><th>Token 用量</th><th>缓存命中率</th><th>报错内容</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td class="mono">${fmtTime(row.ts)}</td><td>${clipped(row.key_name || row.key_id || '—')}</td><td>${clipped(row.account_label || row.account_id || '—')}</td><td>${clipped(row.model || '—')}</td><td>${badge(row.status)}</td><td>${fmtInt(row.attempt_count)}</td><td>${fmtInt(row.ttft_ms)}</td><td>${tokenUsage(row)}</td><td>${cacheCell(row, index)}</td><td>${error(row)}</td></tr>`).join('')}</tbody></table></div>` +
-      `<div class="log-mobile log-calls-mobile">${rows.map((row, index) => `<details class="mobile-log"><summary><span class="mobile-log-heading"><strong>${esc(row.model || '未知模型')}</strong>${badge(row.status)}</span><span class="mobile-log-time">${fmtCompactTime(row.ts)}<span>查看详情</span></span>${errorText(row) !== '—' ? `<span class="mobile-log-error">${esc(errorText(row))}</span>` : ''}</summary><dl><div><dt>账号</dt><dd>${esc(row.account_label || row.account_id || '—')}</dd></div><div><dt>密钥</dt><dd>${esc(row.key_name || row.key_id || '—')}</dd></div><div><dt>尝试次数</dt><dd>${fmtInt(row.attempt_count)}</dd></div><div><dt>首 Token 时间</dt><dd>${row.ttft_ms == null ? '—' : fmtInt(row.ttft_ms) + ' ms'}</dd></div><div><dt>Token 用量</dt><dd>${tokenUsage(row)}</dd></div><div><dt>缓存命中率</dt><dd>${cacheCell(row, index)}</dd></div><div><dt>请求 ID</dt><dd>${esc(row.request_id)}</dd></div><div><dt>追踪 ID</dt><dd>${esc(row.trace_id || '—')}</dd></div></dl></details>`).join('')}</div>`;
-    main.innerHTML = `${pagehead('请求日志', '', `<button type="button" class="btn log-live" id="log-live" aria-label="实时刷新" aria-pressed="true"><span>实时</span></button><button class="btn" id="log-refresh">${icon('refresh', 14)}刷新</button>`)}<div id="log-panel">${form}${strip}${rows.length ? table : '<div class="empty">当前筛选条件下暂无记录</div>'}${pager}</div>`;
+    const table = `<div class="tablecard log-table log-desktop log-calls"><table><colgroup><col span="9"><col class="log-col-error"></colgroup><thead><tr><th>时间</th><th>密钥</th><th>账号</th><th>模型</th><th>状态</th><th>尝试</th><th>首 Token <small>ms</small></th><th>Token 用量</th><th>缓存命中率</th><th>报错内容</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td class="mono">${fmtTime(row.ts)}</td><td>${clipped(row.key_name || row.key_id || '—')}</td><td>${clipped(row.account_label || row.account_id || '—')}</td><td>${clipped(row.model || '—')}</td><td>${badge(row.status)}</td><td>${fmtInt(row.attempt_count)}</td><td>${fmtInt(row.ttft_ms)}</td><td>${tokenUsage(row)}</td><td>${cacheCell(row, index)}</td><td>${clipped(errorMessages[index], 'log-error-message')}</td></tr>`).join('')}</tbody></table></div>` +
+      `<div class="log-mobile log-calls-mobile">${rows.map((row, index) => `<details class="mobile-log"><summary><span class="mobile-log-heading"><strong>${esc(row.model || '未知模型')}</strong>${badge(row.status)}</span><span class="mobile-log-time">${fmtCompactTime(row.ts)}${icon('chevron-right', 14)}</span>${errorMessages[index] !== '—' ? `<span class="mobile-log-error">${esc(errorMessages[index])}</span>` : ''}</summary><dl><div><dt>账号</dt><dd>${esc(row.account_label || row.account_id || '—')}</dd></div><div><dt>密钥</dt><dd>${esc(row.key_name || row.key_id || '—')}</dd></div><div><dt>尝试次数</dt><dd>${fmtInt(row.attempt_count)}</dd></div><div><dt>首 Token 时间</dt><dd>${row.ttft_ms == null ? '—' : fmtInt(row.ttft_ms) + ' ms'}</dd></div><div><dt>Token 用量</dt><dd>${tokenUsage(row)}</dd></div><div><dt>缓存命中率</dt><dd>${cacheCell(row, index)}</dd></div><div><dt>请求 ID</dt><dd>${esc(row.request_id)}</dd></div><div><dt>追踪 ID</dt><dd>${esc(row.trace_id || '—')}</dd></div></dl></details>`).join('')}</div>`;
+    main.innerHTML = `${pagehead('请求日志', `<button type="button" class="btn log-live" id="log-live" aria-label="实时刷新" aria-pressed="true"><span>实时</span></button><button class="btn" id="log-refresh">${icon('refresh', 14)}刷新</button>`)}<div id="log-panel">${form}${strip}${rows.length ? table : '<div class="empty">暂无匹配记录</div>'}${pager}</div>`;
     Z2ACacheDetails.bind(main, rows, { ...helpers, badge });
     const $ = selector => main.querySelector(selector);
     const advancedDetails = $('#log-advanced');
     advancedDetails.addEventListener('toggle', () => {
       const trigger = advancedDetails.querySelector('summary');
       trigger.setAttribute('aria-expanded', String(advancedDetails.open));
-      trigger.querySelector('.log-advanced-label').textContent = advancedDetails.open ? '收起筛选' : '更多筛选';
     });
     const filtersForm = $('#log-filters'), search = $('#lf-q');
     let searchTimer, composing = false;
@@ -187,7 +188,7 @@ globalThis.Z2ALogs = (() => {
       logPage = target;
       rerender();
     }));
-    $('#log-page-jump').addEventListener('submit', event => {
+    $('#log-page-jump')?.addEventListener('submit', event => {
       event.preventDefault();
       if (!event.currentTarget.reportValidity()) return;
       clearTimeout(searchTimer);

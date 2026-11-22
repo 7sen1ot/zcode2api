@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"unicode/utf16"
 	accountdata "zcode2api/internal/server/account"
 	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
@@ -45,14 +44,10 @@ func apiKeyConfig(body shared.M, create bool) (shared.M, error) {
 		if !exists {
 			continue
 		}
+		var err error
 		switch field.column {
 		case "name":
-			name, _ := value.(string)
-			name = strings.TrimSpace(name)
-			if name == "" || len(utf16.Encode([]rune(name))) > 80 {
-				return nil, errors.New("请输入密钥名称，最多 80 个字符")
-			}
-			value = name
+			value, err = parseAdminName(value, field.label)
 		case "quota_limit", "expires_at":
 			if value == nil || value == "" {
 				value = nil
@@ -105,14 +100,10 @@ func apiKeyConfig(body shared.M, create bool) (shared.M, error) {
 				return nil, errors.New("默认思考档位无效")
 			}
 		case "enabled":
-			switch shared.Str(value) {
-			case "true", "1":
-				value = 1
-			case "false", "0":
-				value = 0
-			default:
-				return nil, errors.New("启用状态无效")
-			}
+			value, err = parseEnabledFlag(value)
+		}
+		if err != nil {
+			return nil, err
 		}
 		fields[field.column] = value
 	}
@@ -217,7 +208,7 @@ func (a *App) createKey(ctx context.Context, fields shared.M) (shared.M, error) 
 
 func (a *App) patchKey(ctx context.Context, id string, fields shared.M) error {
 	return a.writeKeyConfig(ctx, fields, func(db storage.Executor) error {
-		result, err := updateFields(db, "keys", "id", id, fields, apiKeyConfigColumns)
+		result, err := updateFields(db, "keys", id, fields, apiKeyConfigColumns)
 		if err != nil || result == nil {
 			return err
 		}

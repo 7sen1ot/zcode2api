@@ -67,8 +67,8 @@ func (a *App) updateLoginMaterialIfCurrent(snapshot, changes, fields shared.M) (
 	}
 	fields = shared.Clone(fields)
 	fields["enc_tokens"] = enc
-	// applyMu is already held, so use update rather than updateAccount here.
-	if err := a.update("accounts", "id", id, fields, accountFields); err != nil {
+	// Keep applyMu held through the write and balance invalidation.
+	if err := a.persistAccountFields(id, fields); err != nil {
 		return false, err
 	}
 	a.invalidateBalanceLocked(id)

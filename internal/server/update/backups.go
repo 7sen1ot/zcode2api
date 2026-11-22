@@ -144,8 +144,13 @@ func cleanupUpdateBackup(root *os.Root, job, version string, lastCheck, now time
 	}
 	nowMS, target := now.UnixMilli(), backupRetention.Milliseconds()
 	if backup.CleanedAt != 0 || backup.CompletedAt <= 0 || backup.CompletedAt > nowMS ||
-		backup.RuntimeMS < 0 || backup.RuntimeMS > target ||
-		version != backup.Version && !NewerUpdate(backup.Version, version) {
+		backup.RuntimeMS < 0 || backup.RuntimeMS > target {
+		return nil
+	}
+	if _, valid := updateVersionNumbers(backup.Version); !valid {
+		return nil
+	}
+	if version != backup.Version && !NewerUpdate(backup.Version, version) {
 		return nil
 	}
 	// The monotonic interval bounds credited time. The wall-clock check
@@ -162,7 +167,8 @@ func cleanupUpdateBackup(root *os.Root, job, version string, lastCheck, now time
 		return nil
 	}
 
-	for _, name := range []string{"previous-binary", "previous-binary.exe", "update-helper", "update-helper.exe", "database-before.db"} {
+	files := []string{"previous-binary", "previous-binary.exe", "update-helper", "update-helper.exe", "database-before.db"}
+	for _, name := range files {
 		info, err := dir.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue

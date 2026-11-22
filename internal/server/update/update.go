@@ -217,6 +217,13 @@ func updateRedirect(request *http.Request, via []*http.Request, mirrorHost strin
 	return fmt.Errorf("更新下载重定向地址无效")
 }
 
+type updateStatusError struct {
+	status  int
+	message string
+}
+
+func (e *updateStatusError) Error() string { return e.message }
+
 func UpdateGET(ctx context.Context, client *http.Client, address, etag, mirror string) (*http.Response, error) {
 	u, err := url.Parse(address)
 	if err != nil || u.Scheme != "https" || u.User != nil || (u.Host != "api.github.com" && u.Host != "github.com") {
@@ -249,14 +256,14 @@ func UpdateGET(ctx context.Context, client *http.Client, address, etag, mirror s
 	}
 	if response.StatusCode != 200 && (response.StatusCode != 304 || etag == "") {
 		response.Body.Close()
+		message := fmt.Sprintf("%s返回 HTTP %d", source, response.StatusCode)
 		switch response.StatusCode {
 		case 403, 429:
-			return nil, fmt.Errorf("%s请求受限，请稍后重试", source)
+			message = fmt.Sprintf("%s请求受限，请稍后重试", source)
 		case 404:
-			return nil, fmt.Errorf("%s未找到正式版本或发行文件", source)
-		default:
-			return nil, fmt.Errorf("%s返回 HTTP %d", source, response.StatusCode)
+			message = fmt.Sprintf("%s未找到正式版本或发行文件", source)
 		}
+		return nil, &updateStatusError{response.StatusCode, message}
 	}
 	return response, nil
 }
