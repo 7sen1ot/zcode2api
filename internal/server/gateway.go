@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"regexp"
@@ -291,6 +292,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	}
 	payload := shared.Clone(body)
 	var inheritedAffinity string
+	var previousHistory *responseHistory
 	if protocol == "responses" && shared.Truth(body["previous_response_id"]) {
 		a.mu.Lock()
 		entry, ok := a.responses[shared.Str(body["previous_response_id"])]
@@ -300,12 +302,14 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 			return
 		}
 		inheritedAffinity = entry.Affinity
-		items := append([]any{}, entry.Input...)
-		items = append(items, shared.Arr(entry.Response["output"])...)
-		payload["input"] = append(items, inputItems(body["input"])...)
+		previousHistory = entry.History
+		payload["input"] = previousHistory.withInput(inputItems(body["input"]))
 	}
 	level := a.effectiveEffort(body, k)
 	mode := shared.Str(shared.Fallback(r.Header.Get("X-Zcode-Instruction-Mode"), payload["instruction_mode"]))
+	if mode == "" && protocol != "anthropic" {
+		mode = shared.Str(k["default_instruction_mode"])
+	}
 	instructions, e := wire.NewInstructionContext(mode)
 	if e != nil {
 		a.sendFailure(w, e.(*fault.Failure), protocol)
@@ -382,7 +386,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 		}
 	}
 	if protocol == "responses" && body["store"] != false {
-		a.rememberResponse(shared.Str(k["id"]), affinity, inputItems(payload["input"]), response)
+		a.rememberResponse(shared.Str(k["id"]), affinity, previousHistory, inputItems(body["input"]), response)
 	}
 	if stream == nil {
 		w.Header().Set("X-Retry-Attempts", fmt.Sprint(result.Attempts))
@@ -394,6 +398,13 @@ func (a *App) forgetResponse(id string) {
 	if e, ok := a.responses[id]; ok {
 		a.responseBytes -= e.Bytes
 		delete(a.responses, id)
+		for h := e.History; h != nil; h = h.parent {
+			h.refs--
+			if h.refs > 0 {
+				break
+			}
+			a.responseBytes -= h.bytes
+		}
 	}
 	if i := slices.Index(a.responseOrder, id); i >= 0 {
 		a.responseOrder = slices.Delete(a.responseOrder, i, i+1)
@@ -407,19 +418,50 @@ func (a *App) touchResponse(id string) {
 	a.responseOrder = append(a.responseOrder, id)
 }
 
-func (a *App) rememberResponse(key, affinity string, input []any, response shared.M) {
-	size := len(shared.JSON(input)) + len(shared.JSON(response)) + len(affinity)
-	if size > 64<<20 {
+func (h *responseHistory) withInput(input []any) []any {
+	items := make([]any, h.count+len(input))
+	copy(items[h.count:], input)
+	for node := h; node != nil; node = node.parent {
+		copy(items[node.count-len(node.items):node.count], node.items)
+	}
+	return items
+}
+
+func (a *App) rememberResponse(key, affinity string, parent *responseHistory, input []any, response shared.M) {
+	const maxResponseBytes = 64 << 20
+	output := shared.Arr(response["output"])
+	items := make([]any, 0, len(input)+len(output))
+	items = append(append(items, input...), output...)
+	// Share history across continuations and branches, including when a parent
+	// response is later evicted or explicitly deleted.
+	itemBytes := len(shared.JSON(items))
+	history := &responseHistory{parent: parent, items: items, count: len(items), bytes: itemBytes, totalBytes: itemBytes}
+	if parent != nil {
+		history.count += parent.count
+		history.totalBytes += parent.totalBytes
+	}
+	// The history node already accounts for the output items.
+	envelope := maps.Clone(response)
+	envelope["output"] = []any{}
+	size := len(shared.JSON(envelope)) + len(affinity)
+	if size+history.totalBytes > maxResponseBytes {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	id := shared.Str(response["id"])
 	a.forgetResponse(id)
-	a.responses[id] = responseEntry{Key: key, Affinity: affinity, Input: input, Response: response, Bytes: size}
+	a.responses[id] = responseEntry{Key: key, Affinity: affinity, History: history, Response: response, Bytes: size}
 	a.responseOrder = append(a.responseOrder, id)
 	a.responseBytes += size
-	for len(a.responses) > 100 || a.responseBytes > 64<<20 {
+	for h := history; h != nil; h = h.parent {
+		h.refs++
+		if h.refs > 1 {
+			break
+		}
+		a.responseBytes += h.bytes
+	}
+	for len(a.responses) > 100 || a.responseBytes > maxResponseBytes {
 		a.forgetResponse(a.responseOrder[0])
 	}
 }

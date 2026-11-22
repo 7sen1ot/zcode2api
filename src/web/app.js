@@ -1425,6 +1425,7 @@ function keyFormValues(form, groupOrder) {
     quota_limit: fields.quota_limit.value.trim() || null,
     group_order: groupOrder,
     default_level: fields.default_level.value || null,
+    default_instruction_mode: fields.default_instruction_mode.value || null,
     model_whitelist: list(fields.model_whitelist),
     ip_whitelist: list(fields.ip_whitelist),
     sticky_minutes: fields.sticky_minutes.value === '' ? 0 : Number(fields.sticky_minutes.value),
@@ -1453,6 +1454,12 @@ function openKeyForm(groups, key) {
         <option value="max">max</option>
       </select></label>
       <label class="dialog-field">黏住分钟<input name="sticky_minutes" type="number" min="0" step="any" value="${esc(values.sticky_minutes)}" placeholder="0"></label>
+      <label class="dialog-field key-field-wide">OpenAI 指令模式<select name="default_instruction_mode">
+        <option value="">协议默认（scoped）</option>
+        <option value="history">history（保留指令位置）</option>
+        <option value="scoped">scoped（顶层系统指令）</option>
+        <option value="strict">strict（严格转换）</option>
+      </select></label>
       <label class="dialog-field key-field-wide">模型白名单<input name="model_whitelist" value="${esc(values.model_whitelist?.join(','))}" placeholder="逗号分隔，留空允许全部模型" spellcheck="false"></label>
       <label class="dialog-field key-field-wide">IP 白名单<input name="ip_whitelist" value="${esc(values.ip_whitelist?.join(','))}" placeholder="逗号分隔，支持 CIDR 和 1.2.3.*，留空不限" spellcheck="false"></label>
     </div>
@@ -1463,6 +1470,9 @@ function openKeyForm(groups, key) {
   const level = form.elements.default_level;
   level.value = values.default_level ?? '';
   if (level.selectedIndex === -1) level.selectedIndex = 0;
+  const instructionMode = form.elements.default_instruction_mode;
+  instructionMode.value = values.default_instruction_mode ?? '';
+  if (instructionMode.selectedIndex === -1) instructionMode.selectedIndex = 0;
   const groupOrder = bindKeyGroupChain(form, values.group_order, groups);
   const initial = keyFormValues(form, groupOrder());
   const token = TOKEN;

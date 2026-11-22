@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS keys (
   group_order TEXT, -- JSON 分组链，NULL 使用默认链
   sticky_minutes INTEGER NOT NULL DEFAULT 0,
   default_level TEXT, -- NULL 跟随全局思考档位
+  default_instruction_mode TEXT, -- NULL 使用协议默认值
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   last_used_at INTEGER

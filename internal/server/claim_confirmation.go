@@ -73,7 +73,8 @@ func (a *App) reconcilePendingClaim(parent context.Context, account shared.M, pl
 	}
 	for _, value := range plans {
 		owned := shared.Obj(value)
-		if shared.Str(owned["plan_id"]) != plan || shared.Str(owned["user_plan_id"]) == "" || shared.Str(owned["status"]) != "active" {
+		if shared.Str(owned["plan_id"]) != plan || shared.Str(owned["user_plan_id"]) == "" ||
+			shared.Str(owned["status"]) != "active" || shared.Truth(owned["_staleExpired"]) {
 			continue
 		}
 		end := accountdata.SecondsMS(owned["ends_at"])

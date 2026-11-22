@@ -64,7 +64,7 @@ func sourceGit(ctx context.Context, root string, args ...string) (string, error)
 		}
 		command.Env = append(command.Env, value)
 	}
-	command.Env = append(command.Env, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=Never", "GIT_NO_REPLACE_OBJECTS=1", "GIT_ALLOW_PROTOCOL=https:http:ssh:git")
+	command.Env = append(command.Env, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=Never", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=https:http:ssh:git")
 	process.HideChildWindow(command)
 	output, err := command.Output()
 	if ctx.Err() != nil {
@@ -91,22 +91,14 @@ func CheckSourceCheckout(ctx context.Context, root string) (*SourceCheck, error)
 		return nil, fmt.Errorf("当前分支没有配置远端跟踪分支")
 	}
 	result := &SourceCheck{LocalCommit: local, Upstream: remote + "/" + strings.TrimPrefix(ref, "refs/heads/")}
-	// Use a private ref and suppress the configured refspec so checking never
-	// moves local branches, remote-tracking refs, or FETCH_HEAD.
-	pin := "refs/zcode2api/check-" + shared.Random(12)
-	defer func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_, _ = sourceGit(cleanup, root, "update-ref", "-d", pin)
-	}()
-	if _, err = sourceGit(ctx, root, "fetch", "--no-tags", "--no-prune", "--no-auto-gc", "--no-write-fetch-head", "--no-recurse-submodules", "--refmap=", "--", remote, ref+":"+pin); err != nil {
+	result.RemoteCommit, err = sourceBranchCommit(ctx, root, remote, ref, local)
+	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("检查远端提交超时，请检查服务端 Git 网络配置")
 		}
 		return nil, fmt.Errorf("无法读取远端分支 %s，请检查服务端 Git 网络配置和仓库访问权限", result.Upstream)
 	}
-	result.RemoteCommit, err = sourceGit(ctx, root, "rev-parse", "--verify", pin+"^{commit}")
-	if err != nil || !sourceCommit.MatchString(result.RemoteCommit) {
+	if !sourceCommit.MatchString(result.RemoteCommit) {
 		return nil, fmt.Errorf("无法读取远端源码提交")
 	}
 	if local == result.RemoteCommit {
@@ -138,6 +130,43 @@ func CheckSourceCheckout(ctx context.Context, root string) (*SourceCheck, error)
 		result.Relation = "unknown"
 	}
 	return result, nil
+}
+
+func sourceBranchCommit(ctx context.Context, root, remote, ref, local string) (string, error) {
+	listing, err := sourceGit(ctx, root, "ls-remote", "--refs", "--exit-code", "--", remote, ref)
+	if err != nil {
+		return "", err
+	}
+	var tip string
+	for line := range strings.SplitSeq(listing, "\n") {
+		id, name, ok := strings.Cut(strings.TrimSuffix(line, "\r"), "\t")
+		if ok && name == ref {
+			tip = id
+			break
+		}
+	}
+	if !sourceCommit.MatchString(tip) {
+		return "", fmt.Errorf("远端未返回有效的分支提交")
+	}
+	if tip == local {
+		return tip, nil
+	}
+	if _, err := sourceGit(ctx, root, "cat-file", "-e", tip+"^{commit}"); err == nil {
+		return tip, nil
+	}
+
+	// The branch may have moved since ls-remote. Compare the fetched tip
+	// without updating the configured tracking refs or FETCH_HEAD.
+	pin := "refs/zcode2api/check-" + shared.Random(12)
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, _ = sourceGit(cleanup, root, "update-ref", "-d", pin)
+	}()
+	if _, err := sourceGit(ctx, root, "fetch", "--no-tags", "--no-prune", "--no-auto-gc", "--no-write-fetch-head", "--no-recurse-submodules", "--refmap=", "--", remote, ref+":"+pin); err != nil {
+		return "", err
+	}
+	return sourceGit(ctx, root, "rev-parse", "--verify", pin+"^{commit}")
 }
 
 func sourceAncestor(ctx context.Context, root, older, newer string) (bool, error) {

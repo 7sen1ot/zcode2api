@@ -145,6 +145,10 @@ func detectUpdateBinary(support UpdateSupport, mode string) UpdateSupport {
 	if err != nil {
 		return support
 	}
+	if err := checkUpdateCapabilities(support.Binary); err != nil {
+		support.Reason = err.Error()
+		return support
+	}
 	file, err := os.CreateTemp(filepath.Dir(support.Binary), ".update-permission-*")
 	if err != nil {
 		support.Reason = "程序目录不可写，无法在线替换发行版"
@@ -340,6 +344,9 @@ func validateUpdatePlanPaths(filename string, plan UpdatePlan) error {
 
 func validateUpdatePlan(filename string, plan UpdatePlan) error {
 	if err := validateUpdatePlanPaths(filename, plan); err != nil {
+		return err
+	}
+	if err := checkUpdateCapabilities(plan.Binary); err != nil {
 		return err
 	}
 	for name, expected := range map[string]string{plan.Binary: plan.OldSHA256, plan.Backup: plan.OldSHA256, plan.Candidate: plan.NewSHA256} {

@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"zcode2api/internal/server/fault"
 	"zcode2api/internal/server/shared"
@@ -66,7 +67,21 @@ func NewToolCatalog(ctx context.Context, root string, value any, protocol string
 			return nil, e
 		}
 	}
+	// Keep each explicit cache breakpoint on the same tool and after the same
+	// set of definitions. Unmarked tools can use a consistent upstream order.
+	start := 0
+	for i, tool := range c.Tools {
+		if shared.Obj(tool)["cache_control"] != nil {
+			slices.SortFunc(c.Tools[start:i], compareToolNames)
+			start = i + 1
+		}
+	}
+	slices.SortFunc(c.Tools[start:], compareToolNames)
 	return c, nil
+}
+
+func compareToolNames(a, b any) int {
+	return strings.Compare(shared.Str(shared.Obj(a)["name"]), shared.Str(shared.Obj(b)["name"]))
 }
 
 func (c *ToolCatalog) add(t shared.M, protocol, namespace, namespaceDescription string) error {
@@ -90,8 +105,10 @@ func (c *ToolCatalog) add(t shared.M, protocol, namespace, namespaceDescription 
 		return fault.Invalid("工具映射名称冲突：" + identity)
 	}
 	definition := toolDefinition{Name: name, Namespace: namespace, Kind: kind, UpstreamName: upstreamName}
-	converted := shared.Clone(t)
-	if protocol != "anthropic" {
+	var converted shared.M
+	if protocol == "anthropic" {
+		converted = shared.Clone(t)
+	} else {
 		description := shared.Str(f["description"])
 		if namespace != "" {
 			description = strings.TrimSpace("Namespace " + namespace + ": " + namespaceDescription + "\n" + description)

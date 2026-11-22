@@ -14,12 +14,13 @@ import (
 	accountdata "zcode2api/internal/server/account"
 	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
+	wire "zcode2api/internal/server/protocol"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
 )
 
-const apiKeyColumns = "id,name,key_tail,quota_limit,used_units,expires_at,ip_whitelist,model_whitelist,group_order,sticky_minutes,default_level,enabled,created_at,last_used_at"
-const apiKeyConfigColumns = "name quota_limit expires_at ip_whitelist model_whitelist group_order sticky_minutes default_level enabled"
+const apiKeyColumns = "id,name,key_tail,quota_limit,used_units,expires_at,ip_whitelist,model_whitelist,group_order,sticky_minutes,default_level,default_instruction_mode,enabled,created_at,last_used_at"
+const apiKeyConfigColumns = "name quota_limit expires_at ip_whitelist model_whitelist group_order sticky_minutes default_level default_instruction_mode enabled"
 
 func apiKeyConfig(body shared.M, create bool) (shared.M, error) {
 	fields := shared.M{}
@@ -35,6 +36,7 @@ func apiKeyConfig(body shared.M, create bool) (shared.M, error) {
 		{"group_order", "groupOrder", "分组链"},
 		{"sticky_minutes", "stickyMinutes", "黏住分钟"},
 		{"default_level", "defaultLevel", "默认思考档位"},
+		{"default_instruction_mode", "defaultInstructionMode", "OpenAI 指令模式"},
 		{"enabled", "", "启用状态"},
 	} {
 		value, exists := body[field.column]
@@ -99,6 +101,16 @@ func apiKeyConfig(body shared.M, create bool) (shared.M, error) {
 			} else if !settings.ValidLevel(shared.Str(value)) {
 				return nil, errors.New("默认思考档位无效")
 			}
+		case "default_instruction_mode":
+			if value == nil || value == "" {
+				value = nil
+				break
+			}
+			mode, ok := value.(string)
+			if !ok {
+				return nil, errors.New("OpenAI 指令模式须为字符串")
+			}
+			_, err = wire.NewInstructionContext(mode)
 		case "enabled":
 			value, err = parseEnabledFlag(value)
 		}
@@ -192,8 +204,8 @@ func (a *App) createKey(ctx context.Context, fields shared.M) (shared.M, error) 
 	}
 	id := "key_" + shared.Random(4)
 	err = a.writeKeyConfig(ctx, fields, func(db storage.Executor) error {
-		_, err := db.Exec(`INSERT INTO keys(id,name,key_hash,key_tail,secret_enc,quota_limit,expires_at,ip_whitelist,model_whitelist,group_order,sticky_minutes,default_level,enabled,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, fields["name"], shared.Hash(secret), secret[len(secret)-6:], encrypted, fields["quota_limit"], fields["expires_at"], fields["ip_whitelist"], fields["model_whitelist"], fields["group_order"], fields["sticky_minutes"], fields["default_level"], fields["enabled"], shared.NowMS())
+		_, err := db.Exec(`INSERT INTO keys(id,name,key_hash,key_tail,secret_enc,quota_limit,expires_at,ip_whitelist,model_whitelist,group_order,sticky_minutes,default_level,default_instruction_mode,enabled,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, fields["name"], shared.Hash(secret), secret[len(secret)-6:], encrypted, fields["quota_limit"], fields["expires_at"], fields["ip_whitelist"], fields["model_whitelist"], fields["group_order"], fields["sticky_minutes"], fields["default_level"], fields["default_instruction_mode"], fields["enabled"], shared.NowMS())
 		if err != nil {
 			a.log.Printf("insert API key: %v", err)
 			return errors.New("无法保存 API 密钥")

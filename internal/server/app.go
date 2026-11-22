@@ -38,9 +38,18 @@ type stickyEntry struct {
 type responseEntry struct {
 	Key      string
 	Affinity string
-	Input    []any
+	History  *responseHistory
 	Response shared.M
 	Bytes    int
+}
+
+type responseHistory struct {
+	parent     *responseHistory
+	items      []any
+	count      int
+	bytes      int
+	totalBytes int
+	refs       int // Stored entries and child nodes, guarded by App.mu.
 }
 
 type profileEntry struct {
