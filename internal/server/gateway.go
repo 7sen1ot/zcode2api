@@ -19,8 +19,8 @@ import (
 func (a *App) GatewayHandler() http.Handler {
 	return a.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-session-id, x-zcode-instruction-mode, x-zcode-session-type, x-zcode-query-source, x-zcode-template-mode")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Zcode-Instruction-Mode, X-Zcode-Compatibility, X-Zcode-Grammar-Validation, X-Zcode-Session-Type, X-Zcode-Query-Source, X-Zcode-Template-Mode, Retry-After, X-Retry-Attempts")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-session-id, x-zcode-instruction-mode, x-zcode-session-type, x-zcode-query-source, x-zcode-template-mode, x-zcode-reuse-tools")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Zcode-Instruction-Mode, X-Zcode-Compatibility, X-Zcode-Grammar-Validation, X-Zcode-Session-Type, X-Zcode-Query-Source, X-Zcode-Template-Mode, X-Zcode-Tools-Reused, Retry-After, X-Retry-Attempts")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
@@ -291,8 +291,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 		w.Header().Set("X-Zcode-Query-Source", source.QuerySource)
 	}
 	payload := shared.Clone(body)
-	var inheritedAffinity string
-	var previousHistory *responseHistory
+	var previous responseEntry
 	if protocol == "responses" && shared.Truth(body["previous_response_id"]) {
 		a.mu.Lock()
 		entry, ok := a.responses[shared.Str(body["previous_response_id"])]
@@ -301,14 +300,30 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 			writeJSON(w, 404, shared.M{"error": shared.M{"type": "invalid_request_error", "code": "response_not_found", "message": "previous_response_id 不存在或不属于当前密钥"}})
 			return
 		}
-		inheritedAffinity = entry.Affinity
-		previousHistory = entry.History
-		payload["input"] = previousHistory.withInput(inputItems(body["input"]))
+		previous = entry
+		payload["input"] = previous.History.withInput(inputItems(body["input"]))
+	}
+	var keepTools bool
+	var reusedTools *responseToolSet
+	if protocol == "responses" {
+		switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Zcode-Reuse-Tools"))) {
+		case "":
+			keepTools = previous.Tools != nil
+		case "true":
+			keepTools = true
+		case "false":
+		default:
+			a.sendFailure(w, &fault.Failure{Kind: "invalid", Code: "unsupported_request", Message: "X-Zcode-Reuse-Tools 只能为 true 或 false"}, protocol)
+			return
+		}
+		if keepTools {
+			reusedTools = previous.reuseTools(payload)
+		}
 	}
 	level := a.effectiveEffort(body, k)
 	mode := shared.Str(shared.Fallback(r.Header.Get("X-Zcode-Instruction-Mode"), payload["instruction_mode"]))
 	if mode == "" && protocol != "anthropic" {
-		mode = shared.Str(k["default_instruction_mode"])
+		mode = shared.Str(shared.Fallback(previous.InstructionMode, k["default_instruction_mode"]))
 	}
 	instructions, e := wire.NewInstructionContext(mode)
 	if e != nil {
@@ -324,6 +339,9 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	if e != nil {
 		a.sendFailure(w, e.(*fault.Failure), protocol)
 		return
+	}
+	if reusedTools != nil {
+		w.Header().Set("X-Zcode-Tools-Reused", "true")
 	}
 	if protocol != "anthropic" && instructions.Mode == "history" {
 		w.Header().Set("X-Zcode-Instruction-Mode", "history")
@@ -350,7 +368,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	affinity, sticky := a.affinity(r, body, k)
 	if protocol == "responses" && affinity == shared.Str(k["id"]) {
 		// The bare key means no explicit session was recognized by affinity().
-		affinity = inheritedAffinity
+		affinity = previous.Affinity
 		if affinity == "" {
 			affinity = shared.Str(k["id"]) + ":responses:" + shared.Hash(id)[:24]
 		}
@@ -386,7 +404,22 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 		}
 	}
 	if protocol == "responses" && body["store"] != false {
-		a.rememberResponse(shared.Str(k["id"]), affinity, previousHistory, inputItems(body["input"]), response)
+		entry := responseEntry{Key: shared.Str(k["id"]), Affinity: affinity, Response: response}
+		// Only the cache-friendly opt-in carries forward when the next turn omits a mode.
+		if instructions.Mode == "history" {
+			entry.InstructionMode = instructions.Mode
+		}
+		if keepTools {
+			entry.Tools = reusedTools
+			if definitions := shared.Arr(payload["tools"]); entry.Tools == nil && len(definitions) > 0 {
+				entry.Tools = &responseToolSet{definitions: definitions, bytes: len(shared.JSON(definitions))}
+			}
+			if entry.Tools != nil {
+				entry.ToolOptions = shared.M{}
+				shared.CopyFields(entry.ToolOptions, payload, "tool_choice", "parallel_tool_calls")
+			}
+		}
+		a.rememberResponse(entry, previous.History, inputItems(body["input"]))
 	}
 	if stream == nil {
 		w.Header().Set("X-Retry-Attempts", fmt.Sprint(result.Attempts))
@@ -394,10 +427,30 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	}
 }
 
+func (e responseEntry) reuseTools(payload shared.M) *responseToolSet {
+	// An explicit tools field, including an empty list, replaces the previous set.
+	if _, explicit := payload["tools"]; explicit || e.Tools == nil {
+		return nil
+	}
+	payload["tools"] = e.Tools.definitions
+	for field, value := range e.ToolOptions {
+		if _, explicit := payload[field]; !explicit {
+			payload[field] = value
+		}
+	}
+	return e.Tools
+}
+
 func (a *App) forgetResponse(id string) {
 	if e, ok := a.responses[id]; ok {
 		a.responseBytes -= e.Bytes
 		delete(a.responses, id)
+		if e.Tools != nil {
+			e.Tools.refs--
+			if e.Tools.refs == 0 {
+				a.responseBytes -= e.Tools.bytes
+			}
+		}
 		for h := e.History; h != nil; h = h.parent {
 			h.refs--
 			if h.refs > 0 {
@@ -427,9 +480,9 @@ func (h *responseHistory) withInput(input []any) []any {
 	return items
 }
 
-func (a *App) rememberResponse(key, affinity string, parent *responseHistory, input []any, response shared.M) {
+func (a *App) rememberResponse(entry responseEntry, parent *responseHistory, input []any) {
 	const maxResponseBytes = 64 << 20
-	output := shared.Arr(response["output"])
+	output := shared.Arr(entry.Response["output"])
 	items := make([]any, 0, len(input)+len(output))
 	items = append(append(items, input...), output...)
 	// Share history across continuations and branches, including when a parent
@@ -441,19 +494,31 @@ func (a *App) rememberResponse(key, affinity string, parent *responseHistory, in
 		history.totalBytes += parent.totalBytes
 	}
 	// The history node already accounts for the output items.
-	envelope := maps.Clone(response)
+	envelope := maps.Clone(entry.Response)
 	envelope["output"] = []any{}
-	size := len(shared.JSON(envelope)) + len(affinity)
-	if size+history.totalBytes > maxResponseBytes {
+	entry.Bytes = len(shared.JSON(envelope)) + len(entry.Affinity) + len(entry.InstructionMode)
+	toolBytes := 0
+	if entry.Tools != nil {
+		entry.Bytes += len(shared.JSON(entry.ToolOptions))
+		toolBytes = entry.Tools.bytes
+	}
+	if entry.Bytes+history.totalBytes+toolBytes > maxResponseBytes {
 		return
 	}
+	entry.History = history
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	id := shared.Str(response["id"])
+	id := shared.Str(entry.Response["id"])
 	a.forgetResponse(id)
-	a.responses[id] = responseEntry{Key: key, Affinity: affinity, History: history, Response: response, Bytes: size}
+	a.responses[id] = entry
 	a.responseOrder = append(a.responseOrder, id)
-	a.responseBytes += size
+	a.responseBytes += entry.Bytes
+	if entry.Tools != nil {
+		entry.Tools.refs++
+		if entry.Tools.refs == 1 {
+			a.responseBytes += toolBytes
+		}
+	}
 	for h := history; h != nil; h = h.parent {
 		h.refs++
 		if h.refs > 1 {

@@ -36,11 +36,20 @@ type stickyEntry struct {
 }
 
 type responseEntry struct {
-	Key      string
-	Affinity string
-	History  *responseHistory
-	Response shared.M
-	Bytes    int
+	Key             string
+	Affinity        string
+	InstructionMode string
+	History         *responseHistory
+	Tools           *responseToolSet
+	ToolOptions     shared.M
+	Response        shared.M
+	Bytes           int
+}
+
+type responseToolSet struct {
+	definitions []any
+	bytes       int
+	refs        int // Stored entries, guarded by App.mu.
 }
 
 type responseHistory struct {
