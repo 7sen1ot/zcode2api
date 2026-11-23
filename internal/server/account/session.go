@@ -44,8 +44,11 @@ func OptionalExpiry(expiry int64) any {
 }
 
 func LoginJWTExpired(tokens map[string]string) bool {
-	expiry := JwtExpiresAt(tokens["zcode_jwt"])
-	return expiry > 0 && expiry <= shared.NowMS()+30000
+	return LoginJWTExpiredAt(JwtExpiresAt(tokens["zcode_jwt"]), shared.NowMS())
+}
+
+func LoginJWTExpiredAt(expiry, now int64) bool {
+	return expiry > 0 && expiry <= now+30000
 }
 
 func LoginProfile(profile shared.M) shared.M {

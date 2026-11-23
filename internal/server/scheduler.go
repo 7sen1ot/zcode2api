@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"maps"
 	rand "math/rand/v2"
 	"sort"
 	"strings"
@@ -29,13 +30,27 @@ type accountWaiter struct {
 	result   chan accountAssignment
 }
 
-type schedulingCandidate struct {
-	row       shared.M
-	remaining float64
-	skip      string
+type schedulingAccount struct {
+	row           shared.M
+	id            string
+	jwtExpiresAt  int64
+	cardExpiresAt int64
+	// Decoded on first use during the dispatch pass.
+	models  []string
+	balance shared.M
 }
 
 type schedulingPool struct {
+	group    shared.M
+	accounts []schedulingAccount
+}
+
+type schedulingCandidate struct {
+	*schedulingAccount
+	remaining float64
+}
+
+type eligibleSchedulingPool struct {
 	group    shared.M
 	accounts []schedulingCandidate
 }
@@ -55,9 +70,9 @@ type poolRecoveryRound struct {
 	retryAt    time.Time
 }
 
-func (a *App) schedulingPools(key shared.M) []schedulingPool {
+func (a *App) schedulingPools(groupOrder string) []schedulingPool {
 	query := `SELECT a.*,g.id AS _gid,g.name AS _name,g.role AS _role,g.policy AS _policy,g.family_filter AS _family,g.urgent_window_min AS _urgent FROM groups g LEFT JOIN accounts a ON a.group_id=g.id WHERE g.enabled=1`
-	chain, explicit := shared.Parse(key["group_order"], nil).([]any)
+	chain, explicit := shared.Parse(groupOrder, nil).([]any)
 	args := []any{}
 	if explicit {
 		if len(chain) == 0 {
@@ -78,8 +93,8 @@ func (a *App) schedulingPools(key shared.M) []schedulingPool {
 			pools[gid] = pool
 			order = append(order, pool.group)
 		}
-		if r["id"] != nil {
-			pool.accounts = append(pool.accounts, schedulingCandidate{row: r})
+		if r["id"] != nil && shared.Str(r["status"]) == "active" {
+			pool.accounts = append(pool.accounts, schedulingAccount{row: r, id: shared.Str(r["id"])})
 		}
 	}
 	if !explicit {
@@ -90,6 +105,11 @@ func (a *App) schedulingPools(key shared.M) []schedulingPool {
 	for _, id := range chain {
 		gid := shared.Str(id)
 		if p := pools[gid]; p != nil && !seen[gid] {
+			for i := range p.accounts {
+				account := &p.accounts[i]
+				account.jwtExpiresAt = accountdata.JwtExpiresAt(a.accountTokens(account.row)["zcode_jwt"])
+				account.cardExpiresAt = shared.Integer(account.row["card_expires_at"])
+			}
 			out = append(out, *p)
 			seen[gid] = true
 		}
@@ -97,55 +117,60 @@ func (a *App) schedulingPools(key shared.M) []schedulingPool {
 	return out
 }
 
-func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account shared.M, busy, upstreamBusy bool, failure *fault.Failure) {
-	params := a.retryParams()
-	now := shared.NowMS()
-	minWindow := int64(shared.Num(shared.Fallback(params["min_request_window_sec"], 60)) * 1000)
-	pools := a.schedulingPools(o.Key)
-	for pi := range pools {
-		p := &pools[pi]
-		for i := range p.accounts {
-			c := &p.accounts[i]
-			r := c.row
-			switch {
-			case shared.Str(r["status"]) != "active":
-				c.skip = "status=" + shared.Str(r["status"])
-			case accountdata.LoginJWTExpired(a.accountTokens(r)):
-				c.skip = "login_expired"
-				a.scheduleNext(shared.Str(r["id"]), 0)
-			case shared.Truth(r["card_expires_at"]) && shared.Integer(r["card_expires_at"])-now < minWindow:
-				c.skip = "card_expiring"
-			case shared.Truth(p.group["family_filter"]) && p.group["family_filter"] != r["family"]:
-				c.skip = "family_filter"
-			}
-			if c.skip != "" {
+func (a *App) eligibleSchedulingPools(snapshot []schedulingPool, model string, now, minWindow int64) []eligibleSchedulingPool {
+	pools := make([]eligibleSchedulingPool, 0, len(snapshot))
+	for _, pool := range snapshot {
+		eligible := eligibleSchedulingPool{group: pool.group, accounts: make([]schedulingCandidate, 0, len(pool.accounts))}
+		familyFilter := pool.group["family_filter"]
+		for i := range pool.accounts {
+			account := &pool.accounts[i]
+			if accountdata.LoginJWTExpiredAt(account.jwtExpiresAt, now) {
+				a.scheduleNext(account.id, 0)
 				continue
 			}
-			caps := shared.Arr(shared.Parse(r["capabilities"], nil))
-			if len(caps) > 0 {
+			if shared.Truth(account.row["card_expires_at"]) && account.cardExpiresAt-now < minWindow {
+				continue
+			}
+			if shared.Truth(familyFilter) && familyFilter != account.row["family"] {
+				continue
+			}
+			if account.models == nil {
+				models := shared.Arr(shared.Parse(account.row["capabilities"], nil))
+				account.models = make([]string, len(models))
+				for j, model := range models {
+					account.models[j] = shared.Str(model)
+				}
+			}
+			if len(account.models) > 0 {
 				allowed := false
-				for _, cap := range caps {
-					if strings.EqualFold(shared.Str(cap), o.Model) {
+				for _, capability := range account.models {
+					if strings.EqualFold(capability, model) {
 						allowed = true
 						break
 					}
 				}
 				if !allowed {
-					c.skip = "model_not_available"
 					continue
 				}
 			}
-			data := accountdata.BalanceData(r)
-			if _, known := data["balances"].([]any); !known {
-				c.skip = "quota_unknown"
+			if account.balance == nil {
+				account.balance = accountdata.BalanceData(account.row)
+			}
+			if _, known := account.balance["balances"].([]any); !known {
 				continue
 			}
-			c.remaining = accountdata.RemainingBalance(data, now)
-			if !(c.remaining > 0) {
-				c.skip = "quota_remaining=0"
+			if remaining := accountdata.RemainingBalance(account.balance, now); remaining > 0 {
+				eligible.accounts = append(eligible.accounts, schedulingCandidate{account, remaining})
 			}
 		}
+		pools = append(pools, eligible)
 	}
+	return pools
+}
+
+func (a *App) selectAccount(o inferOptions, excluded map[string]bool, snapshot []schedulingPool, minWindow int64) (account shared.M, busy, upstreamBusy bool, failure *fault.Failure) {
+	now := shared.NowMS()
+	pools := a.eligibleSchedulingPools(snapshot, o.Model, now, minWindow)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	poolKey, poolCooldown := a.accountPoolCooldownLocked(pools, o.Model)
@@ -164,8 +189,8 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account s
 		eligible := map[string]bool{}
 		for _, pool := range pools {
 			for _, c := range pool.accounts {
-				id := shared.Str(c.row["id"])
-				if c.skip == "" && !a.state(id).QuotaExhausted {
+				id := c.id
+				if !a.state(id).QuotaExhausted {
 					eligible[id] = true
 					if _, exists := round.checked[id]; !exists {
 						round.checked[id] = false
@@ -186,56 +211,23 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account s
 			o.Recovery.key, o.Recovery.generation = poolKey, poolCooldown.generation
 		}
 		// Check every eligible account at most once, including backup groups.
-		probePool := schedulingPool{group: shared.M{"policy": "risk_probe"}}
+		probePool := eligibleSchedulingPool{group: shared.M{"policy": "risk_probe"}}
 		for _, pool := range pools {
 			probePool.accounts = append(probePool.accounts, pool.accounts...)
 		}
-		pools = []schedulingPool{probePool}
+		pools = []eligibleSchedulingPool{probePool}
 	}
 	stickyAccount := a.sticky.account(o.Affinity, o.Sticky, now)
 	for _, p := range pools {
-		usable := make([]schedulingCandidate, 0, len(p.accounts))
-		for _, c := range p.accounts {
-			reason := c.skip
-			id := shared.Str(c.row["id"])
-			if reason == "" && a.state(id).QuotaExhausted {
-				reason = "quota_remaining=0"
-			}
-			if reason == "" && poolCooldown != nil && poolCooldown.recovery.checked[id] {
-				reason = "checked_for_pool_recovery"
-			}
-			if reason == "" {
-				if entry := a.upstreamCooldowns[a.accountCooldownKey(id)]; entry != nil && (time.Now().Before(entry.until) || entry.probing) {
-					reason = "upstream_cooldown"
-					failure := entry.refusal()
-					if cooling == nil || failure.RetryAfter < cooling.RetryAfter {
-						cooling = failure
-					}
-				}
-			}
-			if reason == "" && excluded[id] {
-				reason = "excluded_for_request"
-			}
-			if reason == "" {
-				s := a.state(id)
-				if s.BusyUntil > now || s.BusyUntil != 0 && (s.BusyProbe || s.Inflight > 0) {
-					reason = "upstream_busy"
-					busy, upstreamBusy = true, true
-				}
-			}
-			if reason == "" {
-				usable = append(usable, c)
-			}
-		}
 		policy := shared.Str(p.group["policy"])
 		urgentWindow := int64(shared.Num(shared.Fallback(p.group["urgent_window_min"], 180)) * 60000)
-		preferred := func(x, y schedulingCandidate) bool {
-			xs, ys := a.state(shared.Str(x.row["id"])), a.state(shared.Str(y.row["id"]))
+		preferred := func(x, y *schedulingCandidate) bool {
+			xs, ys := a.state(x.id), a.state(y.id)
 			if poolCooldown != nil {
 				return xs.LastUsed < ys.LastUsed
 			}
 			if stickyAccount != "" {
-				xp, yp := shared.Str(x.row["id"]) == stickyAccount, shared.Str(y.row["id"]) == stickyAccount
+				xp, yp := x.id == stickyAccount, y.id == stickyAccount
 				if xp != yp {
 					return xp
 				}
@@ -244,7 +236,7 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account s
 			case "remaining_desc":
 				return x.remaining > y.remaining
 			case "expiring_first":
-				xe, ye := shared.Integer(x.row["card_expires_at"]), shared.Integer(y.row["card_expires_at"])
+				xe, ye := x.cardExpiresAt, y.cardExpiresAt
 				xu, yu := xe > 0 && xe-now < urgentWindow, ye > 0 && ye-now < urgentWindow
 				if xu != yu {
 					return xu
@@ -261,31 +253,48 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account s
 			}
 		}
 		var picked *schedulingCandidate
-		for i := range usable {
-			c := &usable[i]
-			id := shared.Str(c.row["id"])
-			s := a.state(id)
+		for i := range p.accounts {
+			c := &p.accounts[i]
+			s := a.state(c.id)
+			if s.QuotaExhausted || poolCooldown != nil && poolCooldown.recovery.checked[c.id] {
+				continue
+			}
+			if entry := a.upstreamCooldowns[a.accountCooldownKey(c.id)]; entry != nil && (time.Now().Before(entry.until) || entry.probing) {
+				failure := entry.refusal()
+				if cooling == nil || failure.RetryAfter < cooling.RetryAfter {
+					cooling = failure
+				}
+				continue
+			}
+			if excluded[c.id] {
+				continue
+			}
+			if s.BusyUntil > now || s.BusyUntil != 0 && (s.BusyProbe || s.Inflight > 0) {
+				busy, upstreamBusy = true, true
+				continue
+			}
 			if s.Inflight >= accountConcurrencyLimit {
 				busy = true
 				continue
 			}
-			if picked == nil || preferred(*c, *picked) {
+			if picked == nil || preferred(c, picked) {
 				picked = c
 			}
 		}
 		if picked != nil {
-			id := shared.Str(picked.row["id"])
-			a.state(id).Inflight++
-			picked.row["_busy_generation"] = a.state(id).BusyGeneration
-			picked.row["_busy_probe"] = a.state(id).BusyUntil != 0
+			state := a.state(picked.id)
+			state.Inflight++
+			assigned := maps.Clone(picked.row)
+			assigned["_busy_generation"] = state.BusyGeneration
+			assigned["_busy_probe"] = state.BusyUntil != 0
 			if poolCooldown != nil {
-				picked.row["_risk_pool"] = poolKey
-				picked.row["_risk_generation"] = poolCooldown.generation
+				assigned["_risk_pool"] = poolKey
+				assigned["_risk_generation"] = poolCooldown.generation
 			}
-			if a.state(id).BusyUntil != 0 {
-				a.state(id).BusyProbe = true
+			if state.BusyUntil != 0 {
+				state.BusyProbe = true
 			}
-			return picked.row, busy, upstreamBusy, nil
+			return assigned, busy, upstreamBusy, nil
 		}
 	}
 	if busy {
@@ -299,7 +308,7 @@ func (a *App) accountCooldownKey(id string) string { return "account|" + a.origi
 // Pool identity is the authorized group set and model, independent of API key
 // and ordering. Quota/card expiry must not reset a pool's backoff progression.
 // Call with a.mu held, after the scheduler's ordinary eligibility filters.
-func (a *App) accountPoolCooldownLocked(pools []schedulingPool, model string) (string, *upstreamCooldown) {
+func (a *App) accountPoolCooldownLocked(pools []eligibleSchedulingPool, model string) (string, *upstreamCooldown) {
 	groups := make([]string, 0, len(pools))
 	eligible := 0
 	allBlocked := true
@@ -308,8 +317,8 @@ func (a *App) accountPoolCooldownLocked(pools []schedulingPool, model string) (s
 	for _, pool := range pools {
 		groups = append(groups, shared.Str(pool.group["id"]))
 		for _, c := range pool.accounts {
-			id := shared.Str(c.row["id"])
-			if c.skip != "" || a.state(id).QuotaExhausted {
+			id := c.id
+			if a.state(id).QuotaExhausted {
 				continue
 			}
 			eligible++
@@ -514,12 +523,38 @@ func (a *App) runAccountQueue() {
 func (a *App) dispatchAccounts() {
 	a.scheduleMu.Lock()
 	defer a.scheduleMu.Unlock()
+	// Share database state within this pass only. Each assignment checks live
+	// occupancy and cooldowns when reserving a slot.
+	snapshots := make(map[string][]schedulingPool)
+	lastByGroupOrder := make(map[string]*accountWaiter)
+	for _, w := range a.waiters {
+		lastByGroupOrder[shared.Str(w.o.Key["group_order"])] = w
+	}
+	var minWindow int64
+	retryLoaded := false
 	pending := a.waiters[:0]
 	for _, w := range a.waiters {
+		groupOrder := shared.Str(w.o.Key["group_order"])
+		last := lastByGroupOrder[groupOrder] == w
+		pools, loaded := snapshots[groupOrder]
+		if last {
+			delete(snapshots, groupOrder)
+		}
 		if w.ctx.Err() != nil {
 			continue
 		}
-		account, busy, upstreamBusy, failure := a.selectAccount(w.o, w.skip)
+		if !retryLoaded {
+			params := a.retryParams()
+			minWindow = int64(shared.Num(shared.Fallback(params["min_request_window_sec"], 60)) * 1000)
+			retryLoaded = true
+		}
+		if !loaded {
+			pools = a.schedulingPools(groupOrder)
+			if !last {
+				snapshots[groupOrder] = pools
+			}
+		}
+		account, busy, upstreamBusy, failure := a.selectAccount(w.o, w.skip, pools, minWindow)
 		if account == nil && upstreamBusy {
 			w.deadline = time.Time{}
 		}
