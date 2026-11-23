@@ -19,6 +19,8 @@ import (
 
 const adminSessionTTL = 24 * time.Hour
 
+var apiKeyColumnNames = strings.Split(apiKeyColumns, ",")
+
 func bearer(r *http.Request) string {
 	s := r.Header.Get("Authorization")
 	if strings.HasPrefix(s, "Bearer ") {
@@ -102,14 +104,44 @@ func ipAllowed(ip string, patterns []any) bool {
 	return false
 }
 
+func (a *App) gatewayKey(ctx context.Context, hash string) (shared.M, error) {
+	values := make([]any, len(apiKeyColumnNames))
+	dest := make([]any, len(values))
+	for i := range values {
+		dest[i] = &values[i]
+	}
+	err := a.db.QueryRowContext(ctx, "SELECT "+apiKeyColumns+" FROM keys WHERE key_hash=?", hash).Scan(dest...)
+	if err != nil {
+		return nil, err
+	}
+	key := make(shared.M, len(values))
+	for i, column := range apiKeyColumnNames {
+		value := values[i]
+		if b, ok := value.([]byte); ok {
+			value = string(b)
+		}
+		key[column] = value
+	}
+	return key, nil
+}
+
 func (a *App) authenticate(r *http.Request) (shared.M, *fault.Failure) {
 	secret := bearer(r)
 	if secret == "" {
 		return nil, &fault.Failure{Status: 401, Code: "invalid_api_key", Message: "缺少 API 密钥"}
 	}
-	k := a.row("SELECT "+apiKeyColumns+" FROM keys WHERE key_hash=?", shared.Hash(secret))
-	if k == nil {
-		return nil, &fault.Failure{Status: 401, Code: "invalid_api_key", Message: "无效密钥"}
+	ctx := r.Context()
+	k, err := a.gatewayKey(ctx, shared.Hash(secret))
+	if err != nil {
+		switch {
+		case err == sql.ErrNoRows:
+			return nil, &fault.Failure{Status: 401, Code: "invalid_api_key", Message: "无效密钥"}
+		case ctx.Err() != nil:
+			return nil, &fault.Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
+		default:
+			a.log.Printf("read gateway API key: %v", err)
+			return nil, &fault.Failure{Kind: "exhausted", Code: "gateway_storage_unavailable", Message: "暂时无法读取 API 密钥", RetryAfter: time.Second}
+		}
 	}
 	if !shared.Truth(k["enabled"]) {
 		return nil, &fault.Failure{Status: 403, Code: "invalid_api_key", Message: "密钥已禁用"}
