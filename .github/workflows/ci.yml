@@ -45,3 +45,12 @@ jobs:
           done
       - name: Build executable
         run: go build -trimpath -ldflags "-X main.version=ci" -o bin/zcode2api .
+      - name: Install headless Chromium for scheduled claims
+        run: |
+          npm install --prefix "$RUNNER_TEMP/claim-browser" --ignore-scripts --no-audit --no-fund playwright-core@1.58.2
+          "$RUNNER_TEMP/claim-browser/node_modules/.bin/playwright-core" install --with-deps --only-shell chromium
+      - name: Test executable, gateway and claim workflows
+        env:
+          NODE_PATH: ${{ runner.temp }}/claim-browser/node_modules
+          ZCODE2API_TEST_BINARY: ${{ github.workspace }}/bin/zcode2api
+        run: go test -v -tags=browser -count=1 -timeout=5m ./test

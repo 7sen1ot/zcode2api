@@ -7,4 +7,5 @@ data/
 .zcode/
 config.json
 probe-*.json
-/test/
+/test/*
+!/test/*_test.go
