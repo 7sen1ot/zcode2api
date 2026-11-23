@@ -192,6 +192,7 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account s
 		}
 		pools = []schedulingPool{probePool}
 	}
+	stickyAccount := a.sticky.account(o.Affinity, o.Sticky, now)
 	for _, p := range pools {
 		usable := make([]schedulingCandidate, 0, len(p.accounts))
 		for _, c := range p.accounts {
@@ -227,16 +228,14 @@ func (a *App) selectAccount(o inferOptions, excluded map[string]bool) (account s
 			}
 		}
 		policy := shared.Str(p.group["policy"])
-		sticky := a.sticky[o.Affinity]
-		stickyValid := o.Sticky > 0 && float64(now-sticky.At) <= o.Sticky*60000
 		urgentWindow := int64(shared.Num(shared.Fallback(p.group["urgent_window_min"], 180)) * 60000)
 		preferred := func(x, y schedulingCandidate) bool {
 			xs, ys := a.state(shared.Str(x.row["id"])), a.state(shared.Str(y.row["id"]))
 			if poolCooldown != nil {
 				return xs.LastUsed < ys.LastUsed
 			}
-			if stickyValid {
-				xp, yp := shared.Str(x.row["id"]) == sticky.Account, shared.Str(y.row["id"]) == sticky.Account
+			if stickyAccount != "" {
+				xp, yp := shared.Str(x.row["id"]) == stickyAccount, shared.Str(y.row["id"]) == stickyAccount
 				if xp != yp {
 					return xp
 				}

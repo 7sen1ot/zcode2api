@@ -182,18 +182,11 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*wire.Result, *fault.F
 		}
 		a.finishAccountAttempt(account, f, true, p)
 		if f == nil {
-			a.mu.Lock()
 			if o.Sticky > 0 {
-				a.sticky[o.Affinity] = stickyEntry{id, shared.NowMS()}
+				a.mu.Lock()
+				a.sticky.remember(o.Affinity, id, shared.NowMS())
+				a.mu.Unlock()
 			}
-			if len(a.sticky) > 1000 {
-				for k, v := range a.sticky {
-					if shared.NowMS()-v.At > 86400000 {
-						delete(a.sticky, k)
-					}
-				}
-			}
-			a.mu.Unlock()
 			result.Attempts = attempts
 			_ = a.exec("UPDATE keys SET used_units=used_units+? WHERE id=?", result.Usage["totalTokens"], o.Key["id"])
 			a.logUsage(o, result, nil, account, attempts, rotated)
