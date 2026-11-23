@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"zcode2api/internal/server/shared"
@@ -8,15 +9,22 @@ import (
 )
 
 func (a *App) rows(q string, args ...any) []any {
-	v, e := storage.Query(a.db, q, args...)
-	if e != nil {
+	return a.rowsContext(context.Background(), q, args...)
+}
+
+func (a *App) row(q string, args ...any) shared.M {
+	return firstRow(a.rows(q, args...))
+}
+
+func (a *App) rowsContext(ctx context.Context, q string, args ...any) []any {
+	v, e := storage.QueryContext(ctx, a.db, q, args...)
+	if e != nil && ctx.Err() == nil {
 		a.log.Printf("database query: %v", e)
 	}
 	return v
 }
 
-func (a *App) row(q string, args ...any) shared.M {
-	v := a.rows(q, args...)
+func firstRow(v []any) shared.M {
 	if len(v) > 0 {
 		return shared.Obj(v[0])
 	}

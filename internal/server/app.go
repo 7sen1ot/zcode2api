@@ -167,10 +167,6 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 		}
 		a.cfg[k] = v
 	}
-	a.cfg["inference_driver"] = "http"
-	if clean["inference_driver"] != nil {
-		clean["inference_driver"] = "http"
-	}
 	// Migrate the previous five-second default once. Preserve custom intervals
 	// and allow later explicit edits, including opting back into five seconds.
 	if migrateBalancePoll && shared.Num(a.cfg["poll_interval_sec"]) == 5 {
@@ -354,7 +350,7 @@ func (a *App) health(w http.ResponseWriter, r *http.Request, scope string) bool 
 	}
 	switch r.URL.Path {
 	case "/healthz":
-		writeJSON(w, 200, shared.M{"ok": true, "scope": scope, "version": a.version, "inference_driver": "http", "backend": "go", "ts": shared.NowMS()})
+		writeJSON(w, 200, shared.M{"ok": true, "scope": scope, "version": a.version, "inference_driver": settings.InferenceDriver, "backend": "go", "ts": shared.NowMS()})
 		return true
 	case "/readyz":
 		n := shared.Integer(a.row("SELECT COUNT(*) n FROM accounts WHERE status='active'")["n"])
@@ -362,7 +358,7 @@ func (a *App) health(w http.ResponseWriter, r *http.Request, scope string) bool 
 		if n == 0 {
 			status = 503
 		}
-		writeJSON(w, status, shared.M{"ok": n > 0, "scope": scope, "active_accounts": n, "inference_driver": "http"})
+		writeJSON(w, status, shared.M{"ok": n > 0, "scope": scope, "active_accounts": n, "inference_driver": settings.InferenceDriver})
 		return true
 	}
 	return false

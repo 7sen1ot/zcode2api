@@ -11,22 +11,21 @@ import (
 	"zcode2api/internal/server/shared"
 )
 
-// Keep the version pinned to the reviewed client fingerprint. Update it together
-// with request headers, attribution, metadata and system templates.
-const ZCodeFingerprintVersion = "3.19.1"
+const InferenceDriver = "http"
 
 const DefaultBalancePollInterval = 30
 
 const DefaultUsageLogRetentionDays = 30
 
-const EditableSettings = "poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time conversation_affinity_minutes usage_log_retention_days default_reasoning_level aliases retry inference_driver http outbound_proxy github_update_mirror zcode_template_mode zcode_subagent_template zcode_subagent_insert_enabled zcode_subagent_harness_enabled zcode_subagent_files_enabled zcode_subagent_comments_enabled"
+const EditableSettings = "poll_interval_sec poll_jitter_sec poll_concurrency daily_claim_enabled daily_claim_time conversation_affinity_minutes usage_log_retention_days default_reasoning_level aliases retry http outbound_proxy github_update_mirror zcode_template_mode zcode_subagent_template zcode_subagent_insert_enabled zcode_subagent_harness_enabled zcode_subagent_files_enabled zcode_subagent_comments_enabled zcode_subagent_finishing_work_enabled zcode_subagent_memory_notes_enabled"
 
 func defaults() shared.M {
 	return shared.M{
 		"zcode_template_mode": "main", "zcode_subagent_template": "",
 		"zcode_subagent_insert_enabled": false, "zcode_subagent_harness_enabled": false,
 		"zcode_subagent_files_enabled": false, "zcode_subagent_comments_enabled": false,
-		"inference_driver": "http", "http": shared.M{"first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": shared.M{"mode": "off", "claim_runtime": "jsdom", "browser_backend": "auto", "browser_headless": true, "browser_display": "", "playwright_path": "", "browser_path": "", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
+		"zcode_subagent_finishing_work_enabled": false, "zcode_subagent_memory_notes_enabled": false,
+		"http":     shared.M{"first_token_timeout_ms": 60000, "idle_timeout_ms": 120000, "total_timeout_ms": 0, "captcha": shared.M{"mode": "off", "claim_runtime": "jsdom", "browser_backend": "auto", "browser_headless": true, "browser_display": "", "playwright_path": "", "browser_path": "", "node_path": "node", "jsdom_path": "", "simulate_canvas_webgl": true, "timeout_ms": 30000, "ticket_ttl_ms": 75000}},
 		"web_port": 6789, "gateway_port": 6780, "host": "127.0.0.1", "admin_password": "", "poll_interval_sec": DefaultBalancePollInterval, "poll_jitter_sec": 0, "poll_concurrency": shared.AccountOperationConcurrency, "web_only_ping_min": 30, "conversation_affinity_minutes": 10, "default_reasoning_level": "low",
 		"daily_claim_enabled":      true,
 		"daily_claim_time":         DefaultDailyClaimTime,
@@ -104,7 +103,6 @@ func Load(root, data string) (shared.M, error) {
 	if e = os.MkdirAll(data, 0700); e != nil {
 		return nil, e
 	}
-	cfg["inference_driver"] = "http"
 	for env, k := range map[string]string{"ZCODE2API_WEB_PORT": "web_port", "ZCODE2API_GATEWAY_PORT": "gateway_port"} {
 		if v, ok := os.LookupEnv(env); ok && v != "" {
 			n, e := strconv.Atoi(v)

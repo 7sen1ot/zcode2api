@@ -6,8 +6,7 @@ import (
 	"zcode2api/internal/server/shared"
 )
 
-// Fingerprints of complete default paragraphs from ZCode 3.17.2 and its older
-// identity prefix. These are removal rules, never instructions sent upstream.
+// Fingerprints of complete default paragraphs accepted from older clients.
 var zcodeClientPromptParagraphs = map[string]struct{}{
 	"7779642ea44a46963bcdc9c151aa95d4761f17182929e41cb5bff571110af440": {}, // You are ZCode, an interactive agent
 	"8202d4b44e0a8f12ff5798ff1d9ea6e435f6cc5426d1e87a5afef229b55af6c5": {}, // You are an agent working with the user toward their goals, using your own judgment...
@@ -20,7 +19,6 @@ var zcodeClientPromptParagraphs = map[string]struct{}{
 	"ee43af37398581e92bde06d341c98c7b7a9ff6c56023c2bc17b9feaf2d6e31ea": {}, // Write code that reads like the surrounding code: match its comment density, naming...
 	"3fcd2b200896a7163b9626229394d0192bcc900d1a94c5c45d659d5e0b42db24": {}, // When you use a pronoun for someone — the user or anyone else you mention — and the...
 	"9724415357935973e69202f40e6ed02276e4f52fe1ac2c4359bf1dc8013e81f1": {}, // For actions that are hard to reverse or outward-facing, confirm first unless durab...
-	"052e6c0c0d52c3ce116a62cf5b748aea69697052d9284d02b26ee00aba6f0a63": {}, // # Session-specific guidance
 	"bc19d90fc9a64470818128e892aa0deba8ab793af972b5be113a9b6b3365ca66": {}, // # Context management
 	"4e4e48fb23ceb764b0bfb78bc43ad0809284a1bd080f32264bb4826251e8ca38": {}, // When you have enough information to act, act. Do not re-derive facts already estab...
 	"46dd360a22c87a92dfdf29ae2c3011b0f9a014209a7b607f8fcd17a920e5eafa": {}, // You are ZCode, an interactive coding agent
@@ -40,16 +38,19 @@ func zcodePromptParagraphKey(text string) string {
 	return shared.Hash(strings.Join(strings.Fields(text), " "))
 }
 
-// Derive duplicate-removal rules from the template actually sent upstream so
-// restoring or updating that template cannot leave the cleaner out of sync.
+// Derive duplicate-removal rules from the current template and the desktop
+// sections included in older gateway templates.
 var zcodeInjectedPromptDefaults = func() struct {
 	paragraphs, lines, headings map[string]bool
 } {
 	rules := struct{ paragraphs, lines, headings map[string]bool }{
 		paragraphs: map[string]bool{}, lines: map[string]bool{}, headings: map[string]bool{},
 	}
-	for _, value := range zcodeUpstreamSystemPrefix {
-		text := shared.Str(shared.Obj(value)["text"])
+	defaults := []string{subagentFiles, subagentComments}
+	for _, value := range zcodeRelease.MainSystem {
+		defaults = append(defaults, shared.Str(shared.Obj(value)["text"]))
+	}
+	for _, text := range defaults {
 		for _, paragraph := range zcodePromptParagraphBreak.Split(text, -1) {
 			if strings.TrimSpace(paragraph) != "" {
 				rules.paragraphs[zcodePromptParagraphKey(paragraph)] = true

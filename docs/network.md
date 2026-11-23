@@ -6,8 +6,8 @@
 
 在「设置 → 出站代理」选择来源、加载节点并保存：
 
-- 手填模式支持 HTTP/HTTPS 地址，每行一个，可带用户名和密码。
-- 订阅模式支持 HTTPS 订阅中的 URI / Base64 URI 列表：VLESS TCP/WS（含 Reality）、Hysteria2、HTTP/HTTPS，最多 64 个节点。
+- 手填模式支持 HTTP/HTTPS 地址，每行一个，可带用户名和密码，最多填写 64 个地址。
+- 订阅由服务端直接通过 HTTPS 获取，响应体上限为 2 MiB。支持 URI 或 Base64 URI 列表中的 VLESS TCP/WS（含 Reality）、Hysteria2 和 HTTP/HTTPS。筛选并去重后超过 64 个节点会报错。[订阅读取](../internal/server/proxy_subscription.go) · [节点解析](../internal/server/proxy/subscription.go)
 
 账号固定代理优先于全局代理池；账号未设代理且全局代理关闭时直连。程序不读取 Windows 系统代理。推理优先使用指定节点，否则选第一个可用节点，正常请求保持当前节点；手填池中的领卡使用独立游标逐次选择可用出口，不改变推理的粘性出口。
 
@@ -56,7 +56,7 @@
 
 ### 连通性检测
 
-「检测当前代理配置」使用未保存的配置，不发送账号令牌或消耗模型额度。`transport_reachable` 表示收到 HTTP 响应。只有收到预期的 401 且未识别到拦截时，才显示出口可达。账号授权和模型可用性需单独确认。
+「检测当前代理配置」使用表单当前值，无需保存。代理开关关闭时检测直连，开启时逐个检测该配置中的节点。探测不携带账号令牌，也不消耗模型额度。结果中的 `transport_reachable` 表示收到 HTTP 响应，`reachable` 还要求状态为预期的 401 且未识别到拦截。账号授权和模型可用性需单独确认。[连通性检测](../internal/server/proxy_health.go)
 
 代理地址和订阅链接不写入浏览器草稿，节点凭据保存在管理员配置及私有运行目录。
 
@@ -138,7 +138,7 @@ docker compose up -d
 
 ## 故障排查
 
-调用记录中的 `error_message` 是简要说明，`error_code` 是网关或上游记录的错误码。「请求详情」可查看已记录的上游响应和结束原因。排查时保留 HTTP 状态、错误码、`request_id` 和 `trace_id`。日志入口与筛选方式见[日志保存与筛选](configuration.md#日志保存与筛选)。
+网关在密钥鉴权或请求转换阶段拒绝请求时，客户端会收到 HTTP 错误，此时还没有推理调用记录。已进入推理的请求可在「日志」中查看 `error_code`、`error_message` 及已记录的上游信息。排查时保留 HTTP 状态、错误码和可用的 `request_id`、`trace_id`。[日志保存与筛选](configuration.md#日志保存与筛选)
 
 遇到 0 Token 时，结合错误码和请求详情中的「上游结束原因」判断。Token 用量显示 `—` 表示输入和输出用量均无记录。
 
@@ -146,6 +146,10 @@ docker compose up -d
 
 | 错误码 / 提示 | 含义与处理方式 |
 | --- | --- |
+| `gateway_storage_unavailable`（HTTP 503） | 网关暂时无法从 SQLite 读取 API 密钥。可按 `Retry-After` 重试，持续出现时查看服务端数据库错误日志 |
+| `invalid_api_key`（HTTP 401 / 403） | 401 表示缺少密钥或密钥不存在。403 表示密钥已禁用或过期，检查控制台的 API 密钥状态 |
+| `quota_exceeded`（HTTP 429） | 当前网关密钥已用完配置的 Token 配额，检查密钥用量和上限 |
+| `ip_not_allowed` / `model_not_allowed`（HTTP 403） | 请求来源 IP 或解析后的模型未获当前密钥授权，检查该密钥的白名单 |
 | `3008` / `3009` / `3010` | 上游账号并发暂忙，按[调度与重试](configuration.md#调度与重试)等待或使用其他可用账号 |
 | `account_busy` | 网关等待账号槽位超时；检查账号数量、并发占用和排队时长 |
 | `rate_limit_error` / 请求频率受限 | 遵守等待时间和重试窗口，不因此认定代理损坏 |

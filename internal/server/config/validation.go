@@ -49,7 +49,10 @@ func ValidateSettings(b shared.M) error {
 			return fmt.Errorf("模板模式仅支持 main 或 subagent")
 		}
 	}
-	for _, key := range []string{"zcode_subagent_insert_enabled", "zcode_subagent_harness_enabled", "zcode_subagent_files_enabled", "zcode_subagent_comments_enabled"} {
+	for _, key := range []string{
+		"zcode_subagent_insert_enabled", "zcode_subagent_harness_enabled", "zcode_subagent_files_enabled", "zcode_subagent_comments_enabled",
+		"zcode_subagent_finishing_work_enabled", "zcode_subagent_memory_notes_enabled",
+	} {
 		if value, present := b[key]; present {
 			if _, ok := value.(bool); !ok {
 				return fmt.Errorf("%s 必须为布尔值", key)
@@ -67,7 +70,8 @@ func ValidateSettings(b shared.M) error {
 			return err
 		}
 	}
-	if v, ok := b["inference_driver"]; ok && shared.Str(v) != "http" {
+	// Older settings clients may still include this fixed field when saving.
+	if v, ok := b["inference_driver"]; ok && shared.Str(v) != InferenceDriver {
 		return fmt.Errorf("网关仅支持 HTTP 直连")
 	}
 	if v, ok := b["http"]; ok {

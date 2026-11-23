@@ -10,7 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode/utf8"
+	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
 	wire "zcode2api/internal/server/protocol"
 	"zcode2api/internal/server/shared"
@@ -20,7 +20,7 @@ func (a *App) GatewayHandler() http.Handler {
 	return a.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-session-id, x-zcode-instruction-mode, x-zcode-session-type, x-zcode-query-source, x-zcode-template-mode, x-zcode-reuse-tools")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Zcode-Instruction-Mode, X-Zcode-Compatibility, X-Zcode-Grammar-Validation, X-Zcode-Session-Type, X-Zcode-Query-Source, X-Zcode-Template-Mode, X-Zcode-Tools-Reused, Retry-After, X-Retry-Attempts")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Zcode-Instruction-Mode, X-Zcode-Compatibility, X-Zcode-Grammar-Validation, X-Zcode-Session-Type, X-Zcode-Query-Source, X-Zcode-Template-Mode, X-Zcode-Tools-Reused, X-Zcode-Token-Count, Retry-After, X-Retry-Attempts")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
@@ -102,10 +102,6 @@ func (a *App) GatewayHandler() http.Handler {
 				a.sendFailure(w, e.(*fault.Failure), protocol)
 				return
 			}
-			if path == "/v1/messages/count_tokens" {
-				writeJSON(w, 200, shared.M{"input_tokens": countTokens(body)})
-				return
-			}
 			model := a.resolveModel(shared.Str(body["model"]))
 			w.Header().Set("X-Upstream-Model", model)
 			if wire.ModelSuffix.MatchString(shared.Str(body["model"])) {
@@ -113,6 +109,10 @@ func (a *App) GatewayHandler() http.Handler {
 			}
 			if !a.modelAllowed(k, model) {
 				a.sendFailure(w, &fault.Failure{Kind: "permission", Code: "model_not_allowed", Message: "模型不在该密钥白名单"}, protocol)
+				return
+			}
+			if path == "/v1/messages/count_tokens" {
+				a.handleCountTokens(w, r, body, model)
 				return
 			}
 			a.handleInference(w, r, body, k, protocol, model)
@@ -157,30 +157,25 @@ func (a *App) models(k shared.M) []any {
 	return out
 }
 
-func countTokens(b shared.M) int {
-	n := 0
-	count := func(v any) {
-		if s, ok := v.(string); ok {
-			n += utf8.RuneCountInString(s)
-		} else {
-			for _, v := range shared.Arr(v) {
-				c := shared.Obj(v)
-				switch shared.Str(c["type"]) {
-				case "text":
-					n += utf8.RuneCountInString(shared.Str(c["text"]))
-				case "tool_result":
-					n += utf8.RuneCountInString(shared.JSON(c["content"]))
-				case "tool_use":
-					n += utf8.RuneCountInString(shared.JSON(c["input"]))
-				}
-			}
-		}
+func (a *App) handleCountTokens(w http.ResponseWriter, r *http.Request, body shared.M, model string) {
+	const protocol = "anthropic"
+	source, err := a.parseInferenceSource(r)
+	if err != nil {
+		a.sendFailure(w, err.(*fault.Failure), protocol)
+		return
 	}
-	count(b["system"])
-	for _, m := range shared.Arr(b["messages"]) {
-		count(shared.Obj(m)["content"])
+	tools, err := wire.NewToolCatalog(r.Context(), a.root, body["tools"], protocol)
+	if err != nil {
+		a.sendFailure(w, err.(*fault.Failure), protocol)
+		return
 	}
-	return max(1, int(math.Ceil(float64(n)/2.5)))
+	upstream, err := wire.BuildRequest(body, protocol, model, "", tools, &wire.InstructionContext{}, source.Template)
+	if err != nil {
+		a.sendFailure(w, err.(*fault.Failure), protocol)
+		return
+	}
+	w.Header().Set("X-Zcode-Token-Count", "estimated")
+	writeJSON(w, 200, shared.M{"input_tokens": wire.EstimateInputTokens(upstream)})
 }
 
 func (a *App) sendFailure(w http.ResponseWriter, f *fault.Failure, protocol string) {
@@ -234,7 +229,11 @@ func inputItems(v any) []any {
 var querySourcePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 func (a *App) parseInferenceSource(r *http.Request) (inferenceSource, error) {
-	cfg := a.config("zcode_template_mode", "zcode_subagent_template", "zcode_subagent_insert_enabled", "zcode_subagent_harness_enabled", "zcode_subagent_files_enabled", "zcode_subagent_comments_enabled")
+	cfg := a.config(
+		"zcode_template_mode", "zcode_subagent_template",
+		"zcode_subagent_insert_enabled", "zcode_subagent_harness_enabled", "zcode_subagent_files_enabled", "zcode_subagent_comments_enabled",
+		"zcode_subagent_finishing_work_enabled", "zcode_subagent_memory_notes_enabled",
+	)
 	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Zcode-Template-Mode")))
 	explicitMode := mode != ""
 	source := inferenceSource{
@@ -266,6 +265,8 @@ func (a *App) parseInferenceSource(r *http.Request) (inferenceSource, error) {
 	template.HarnessEnabled = shared.Truth(cfg["zcode_subagent_harness_enabled"])
 	template.FilesEnabled = shared.Truth(cfg["zcode_subagent_files_enabled"])
 	template.CommentsEnabled = shared.Truth(cfg["zcode_subagent_comments_enabled"])
+	template.FinishingWorkEnabled = shared.Truth(cfg["zcode_subagent_finishing_work_enabled"])
+	template.MemoryNotesEnabled = shared.Truth(cfg["zcode_subagent_memory_notes_enabled"])
 	if explicitMode && source.SessionType != "" && source.SessionType != template.SessionType() {
 		return source, fault.Invalid("X-Zcode-Session-Type 与 X-Zcode-Template-Mode 不一致")
 	}
@@ -290,9 +291,17 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	if source.QuerySource != "" {
 		w.Header().Set("X-Zcode-Query-Source", source.QuerySource)
 	}
-	payload := shared.Clone(body)
+	// Continuation overrides replace top-level fields. The original input is
+	// kept separately for storing just this turn in the response history.
+	payload := maps.Clone(body)
 	var previous responseEntry
 	if protocol == "responses" && shared.Truth(body["previous_response_id"]) {
+		switch body["input"].(type) {
+		case nil, string, []any:
+		default:
+			a.sendFailure(w, fault.Invalid("input 必须为字符串或数组").(*fault.Failure), protocol)
+			return
+		}
 		a.mu.Lock()
 		entry, ok := a.responses[shared.Str(body["previous_response_id"])]
 		a.mu.Unlock()
@@ -377,7 +386,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	o := inferOptions{Key: k, Body: payload, Upstream: upstream, Tools: tools, Source: source, Protocol: protocol, Model: model, Level: level, ID: id, IP: a.ip(r), Affinity: affinity, Sticky: sticky, Stream: shared.Truth(body["stream"]), Timing: newTiming()}
 	ctx, cancel := a.operationContext(r.Context(), 0)
 	defer cancel()
-	w.Header().Set("X-Inference-Driver", "http")
+	w.Header().Set("X-Inference-Driver", settings.InferenceDriver)
 	var stream *wire.Stream
 	if o.Stream {
 		stream = wire.NewStream(w, r, protocol, id, model, shared.Truth(shared.Obj(body["stream_options"])["include_usage"]), tools)
@@ -394,14 +403,14 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 		return
 	}
 	var response shared.M
-	if stream != nil {
-		response = stream.Complete(result)
-	} else {
+	if stream == nil {
 		response, e = wire.BuildResponse(protocol, result, model, id, tools)
 		if e != nil {
 			a.sendFailure(w, e.(*fault.Failure), protocol)
 			return
 		}
+	} else if protocol == "responses" {
+		response = stream.FinalResponse(result)
 	}
 	if protocol == "responses" && body["store"] != false {
 		entry := responseEntry{Key: shared.Str(k["id"]), Affinity: affinity, Response: response}
@@ -419,12 +428,14 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 				shared.CopyFields(entry.ToolOptions, payload, "tool_choice", "parallel_tool_calls")
 			}
 		}
-		a.rememberResponse(entry, previous.History, inputItems(body["input"]))
+		a.rememberResponse(entry, previous.History, inputItems(body["input"]), result.ContinuationItem())
 	}
-	if stream == nil {
-		w.Header().Set("X-Retry-Attempts", fmt.Sprint(result.Attempts))
-		writeJSON(w, 200, response)
+	if stream != nil {
+		stream.Complete(result, response)
+		return
 	}
+	w.Header().Set("X-Retry-Attempts", fmt.Sprint(result.Attempts))
+	writeJSON(w, 200, response)
 }
 
 func (e responseEntry) reuseTools(payload shared.M) *responseToolSet {
@@ -480,11 +491,13 @@ func (h *responseHistory) withInput(input []any) []any {
 	return items
 }
 
-func (a *App) rememberResponse(entry responseEntry, parent *responseHistory, input []any) {
+func (a *App) rememberResponse(entry responseEntry, parent *responseHistory, input []any, assistant any) {
 	const maxResponseBytes = 64 << 20
-	output := shared.Arr(entry.Response["output"])
-	items := make([]any, 0, len(input)+len(output))
-	items = append(append(items, input...), output...)
+	items := make([]any, 0, len(input)+1)
+	items = append(items, input...)
+	if assistant != nil {
+		items = append(items, assistant)
+	}
 	// Share history across continuations and branches, including when a parent
 	// response is later evicted or explicitly deleted.
 	itemBytes := len(shared.JSON(items))
@@ -493,10 +506,7 @@ func (a *App) rememberResponse(entry responseEntry, parent *responseHistory, inp
 		history.count += parent.count
 		history.totalBytes += parent.totalBytes
 	}
-	// The history node already accounts for the output items.
-	envelope := maps.Clone(entry.Response)
-	envelope["output"] = []any{}
-	entry.Bytes = len(shared.JSON(envelope)) + len(entry.Affinity) + len(entry.InstructionMode)
+	entry.Bytes = len(shared.JSON(entry.Response)) + len(entry.Affinity) + len(entry.InstructionMode)
 	toolBytes := 0
 	if entry.Tools != nil {
 		entry.Bytes += len(shared.JSON(entry.ToolOptions))

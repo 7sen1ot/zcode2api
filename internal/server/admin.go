@@ -44,6 +44,9 @@ func (a *App) AdminHandler() http.Handler {
 			}
 			authorized, err := a.adminAuth(r.Context(), token)
 			if err != nil {
+				if r.Context().Err() != nil {
+					return
+				}
 				a.log.Printf("check admin session: %v", err)
 				writeJSON(w, http.StatusServiceUnavailable, shared.M{"ok": false, "error": "暂时无法验证登录状态，请重试"})
 				return
@@ -81,6 +84,9 @@ func (a *App) AdminHandler() http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		result, status, e := a.adminRoute(r, b)
+		if r.Context().Err() != nil {
+			return
+		}
 		if e != nil {
 			a.log.Printf("admin %s: %v", r.URL.Path, e)
 			status, body := http.StatusBadGateway, shared.M{"ok": false, "error": e.Error()}
@@ -135,7 +141,7 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		return wrap(ok, err)
 	case "GET /api/runtime-info":
 		cfg := a.config("host", "poll_interval_sec")
-		return shared.M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": settings.ZCodeFingerprintVersion, "version": a.version, "inference_driver": "http", "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"], "account_operation_concurrency": shared.AccountOperationConcurrency}, 200, nil
+		return shared.M{"web_port": a.webPort, "gateway_port": a.gatewayPort, "host": cfg["host"], "app_version": wire.ZCodeVersion(), "version": a.version, "inference_driver": settings.InferenceDriver, "backend": "go", "poll_interval_sec": cfg["poll_interval_sec"], "account_operation_concurrency": shared.AccountOperationConcurrency}, 200, nil
 	case "GET /api/accounts":
 		if r.URL.Query().Get("view") == "groups" {
 			return wrap(storage.Query(a.db, "SELECT id,label,customer_id,family,group_id,status FROM accounts ORDER BY created_at,id"))
@@ -191,7 +197,7 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		}
 		until := shared.NowMS()
 		_, offset := time.UnixMilli(until).In(time.Local).Zone()
-		cacheTrend := a.rows("SELECT strftime('%Y-%m-%dT%H:00:00',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", until-86400000, until)
+		cacheTrend := a.rowsContext(ctx, "SELECT strftime('%Y-%m-%dT%H:00:00',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", until-86400000, until)
 		cache := shared.M{"cached_tokens": float64(0), "input_tokens": float64(0)}
 		for _, value := range cacheTrend {
 			row := shared.Obj(value)
@@ -199,17 +205,35 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 			cache["input_tokens"] = shared.Num(cache["input_tokens"]) + shared.Num(row["tin"])
 		}
 		usageColumns := "COALESCE(SUM(tokens_in),0) input_tokens,COALESCE(SUM(tokens_out),0) output_tokens,COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)),0) total_tokens"
-		usage := a.row("SELECT "+usageColumns+",COALESCE(SUM(ts>?),0) busy_total,COALESCE(SUM(ts>? AND status='busy'),0) busy_count FROM usage_log", until-86400000, until-86400000)
+		usage := firstRow(a.rowsContext(ctx, "SELECT "+usageColumns+",COALESCE(SUM(ts>?),0) busy_total,COALESCE(SUM(ts>? AND status='busy'),0) busy_count FROM usage_log", until-86400000, until-86400000))
+		if usage == nil {
+			if err := ctx.Err(); err != nil {
+				return nil, 0, err
+			}
+			return nil, 0, errors.New("无法读取用量汇总")
+		}
 		busy := shared.M{"total": usage["busy_total"], "busy": usage["busy_count"]}
 		delete(usage, "busy_total")
 		delete(usage, "busy_count")
 		period := usage
 		if hours > 0 {
-			period = a.row("SELECT "+usageColumns+" FROM usage_log WHERE ts>=? AND ts<=?", until-hours*3600000, until)
+			period = firstRow(a.rowsContext(ctx, "SELECT "+usageColumns+" FROM usage_log WHERE ts>=? AND ts<=?", until-hours*3600000, until))
 		}
-		summary := a.summary(ctx)
+		result := shared.M{
+			"busy_24h":        busy,
+			"cache_24h":       cache,
+			"cache_trend_24h": shared.M{"hours": 24, "time_unit": "hour", "range_start": until - 86400000, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": cacheTrend},
+			"usage_total":     usage,
+			"usage_period":    shared.Merge(period, shared.M{"hours": hours}),
+		}
+		if r.URL.Query().Get("view") == "overview" {
+			result["summary"] = a.accountOverview(ctx, until)
+			return result, 200, nil
+		}
+		result["summary"] = a.summary(ctx)
 		groups := a.groups()
-		return shared.M{"summary": summary, "groups": groups, "busy_24h": busy, "cache_24h": cache, "cache_trend_24h": shared.M{"hours": 24, "time_unit": "hour", "range_start": until - 86400000, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": cacheTrend}, "usage_total": usage, "usage_period": shared.Merge(period, shared.M{"hours": hours}), "default_chain": defaultGroupChain(groups)}, 200, nil
+		result["groups"], result["default_chain"] = groups, defaultGroupChain(groups)
+		return result, 200, nil
 	case "GET /api/claims/discover":
 		return wrap(a.discover(ctx, r.URL.Query().Get("account_id"), r.URL.Query().Get("scope") == "daily"))
 	case "GET /api/claims/verification":
@@ -251,7 +275,7 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		if r.URL.Query().Has("page") {
 			return a.pagedUsageLogs(r)
 		}
-		rows := a.rows("SELECT u.*,k.name key_name,a.label account_label FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id LEFT JOIN accounts a ON a.id=u.account_id ORDER BY u.ts DESC LIMIT ?", limitQuery(r, 100, 500))
+		rows := a.rows("SELECT "+usageLogColumns+" FROM "+usageLogWithLabels+" ORDER BY u.ts DESC LIMIT ?", limitQuery(r, 100, 500))
 		return publicUsageLogs(rows), 200, nil
 	case "GET /api/performance":
 		return a.performance(limitQuery(r, 100, 1000)), 200, nil
@@ -291,7 +315,8 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		over := shared.Obj(a.setting("config_overrides", shared.M{}))
 		delete(over, "notify_webhook")
 		out["overrides"] = over
-		out["zcode_fingerprint_version"] = settings.ZCodeFingerprintVersion
+		out["inference_driver"] = settings.InferenceDriver
+		out["zcode_fingerprint_version"] = wire.ZCodeVersion()
 		return out, 200, nil
 	case "GET /api/settings/captcha/runtime", "POST /api/settings/captcha/browser/install":
 		install := r.Method == "POST"
@@ -555,6 +580,8 @@ func percentiles(values []float64) shared.M {
 }
 
 func (a *App) usageStats(r *http.Request) shared.M {
+	ctx := r.Context()
+	readRows := func(q string, args ...any) []any { return a.rowsContext(ctx, q, args...) }
 	hours := shared.Num(r.URL.Query().Get("hours"))
 	if hours <= 0 {
 		hours = 24
@@ -567,13 +594,25 @@ func (a *App) usageStats(r *http.Request) shared.M {
 	if hours > 24 {
 		unit, format = "day", "%Y-%m-%d"
 	}
-	byHour := a.rows("SELECT strftime('"+format+"',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_reasoning),0) treason,AVG(ttft_ms) avg_ttft FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", since, until)
+	byHour := readRows("SELECT strftime('"+format+"',ts/1000,'unixepoch','localtime') bucket,COUNT(*) reqs,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(cache_read),0) cached_tokens,COALESCE(SUM(tokens_reasoning),0) treason,AVG(ttft_ms) avg_ttft FROM usage_log WHERE ts>=? AND ts<=? GROUP BY bucket ORDER BY bucket", since, until)
 	ttfts := []float64{}
-	for _, v := range a.rows("SELECT ttft_ms FROM usage_log WHERE ts>=? AND ts<=? AND status='success' AND ttft_ms IS NOT NULL", since, until) {
+	for _, v := range readRows("SELECT ttft_ms FROM usage_log WHERE ts>=? AND ts<=? AND status='success' AND ttft_ms IS NOT NULL", since, until) {
 		ttfts = append(ttfts, shared.Num(shared.Obj(v)["ttft_ms"]))
 	}
 	ttft := percentiles(ttfts)
-	return shared.M{"hours": hours, "time_unit": unit, "range_start": since, "range_end": until, "utc_offset_minutes": offset / 60, "byHour": byHour, "byModel": a.rows("SELECT model,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok FROM usage_log WHERE ts>=? AND ts<=? GROUP BY model ORDER BY reqs DESC", since, until), "byKey": a.rows("SELECT k.name,u.key_id,COUNT(*) reqs,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id WHERE u.ts>=? AND u.ts<=? GROUP BY u.key_id ORDER BY reqs DESC", since, until), "byAccount": a.rows("SELECT a.label,u.account_id,COUNT(*) reqs,SUM(CASE WHEN u.status='success' THEN 1 ELSE 0 END) ok,SUM(CASE WHEN u.status='busy' THEN 1 ELSE 0 END) busy,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN accounts a ON a.id=u.account_id WHERE u.ts>=? AND u.ts<=? GROUP BY u.account_id ORDER BY reqs DESC", since, until), "byStatus": a.rows("SELECT status,COUNT(*) n FROM usage_log WHERE ts>=? AND ts<=? GROUP BY status", since, until), "ttft": ttft}
+	return shared.M{
+		"hours":              hours,
+		"time_unit":          unit,
+		"range_start":        since,
+		"range_end":          until,
+		"utc_offset_minutes": offset / 60,
+		"byHour":             byHour,
+		"byModel":            readRows("SELECT model,COUNT(*) reqs,COALESCE(SUM(tokens_in),0) tin,COALESCE(SUM(tokens_out),0) tout,COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) ok FROM usage_log WHERE ts>=? AND ts<=? GROUP BY model ORDER BY reqs DESC", since, until),
+		"byKey":              readRows("SELECT k.name,u.key_id,COUNT(*) reqs,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN keys k ON k.id=u.key_id WHERE u.ts>=? AND u.ts<=? GROUP BY u.key_id ORDER BY reqs DESC", since, until),
+		"byAccount":          readRows("SELECT a.label,u.account_id,COUNT(*) reqs,SUM(CASE WHEN u.status='success' THEN 1 ELSE 0 END) ok,SUM(CASE WHEN u.status='busy' THEN 1 ELSE 0 END) busy,COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)),0) tokens FROM usage_log u LEFT JOIN accounts a ON a.id=u.account_id WHERE u.ts>=? AND u.ts<=? GROUP BY u.account_id ORDER BY reqs DESC", since, until),
+		"byStatus":           readRows("SELECT status,COUNT(*) n FROM usage_log WHERE ts>=? AND ts<=? GROUP BY status", since, until),
+		"ttft":               ttft,
+	}
 }
 
 func (a *App) performance(limit int) shared.M {

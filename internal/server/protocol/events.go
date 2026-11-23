@@ -55,6 +55,7 @@ type Event struct {
 	Type, Text, Delta, ID, Name string
 	Index                       int
 	Frame                       Frame
+	Block                       shared.M
 }
 
 func (e Event) HasText() bool {
@@ -65,14 +66,50 @@ func (e Event) StartsStream(protocol string) bool {
 	if protocol == "anthropic" {
 		return e.Type == "native_event"
 	}
-	return e.HasText() || e.Type == "tool_start"
+	return e.HasText() || e.Type == "tool_start" || protocol == "responses" && e.Type == "web_search_start"
 }
 
 type Result struct {
 	Text, Reasoning, FinishReason string
 	TraceID, UsageWarning         string
 	Native, Usage                 shared.M
-	Calls                         []any
+	Calls, Output                 []any
+	IncompleteCalls               map[string]bool
 	Attempts                      int
 	HTTPStatus                    int `json:"-"`
+}
+
+// Only in-memory gateway history can carry native blocks into ResponseMessages.
+type nativeAssistantHistory struct {
+	Content []any
+}
+
+func (r *Result) ContinuationItem() any {
+	content := []any{}
+	hasMessage := false
+	for _, value := range shared.Arr(r.Native["content"]) {
+		block := shared.Obj(value)
+		if block["tool_use_id"] != nil && r.IncompleteCalls[shared.Str(block["tool_use_id"])] {
+			continue
+		}
+		switch shared.Str(block["type"]) {
+		case "thinking":
+			if !shared.Truth(block["signature"]) {
+				continue
+			}
+		case "redacted_thinking":
+		case "tool_use", "server_tool_use":
+			if r.IncompleteCalls[shared.Str(block["id"])] {
+				continue
+			}
+			hasMessage = true
+		default:
+			hasMessage = true
+		}
+		content = append(content, block)
+	}
+	if !hasMessage {
+		return nil
+	}
+	return nativeAssistantHistory{Content: content}
 }

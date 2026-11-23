@@ -15,12 +15,13 @@ type toolDefinition struct {
 }
 
 type ToolCatalog struct {
-	Tools      []any
-	ByName     map[string]toolDefinition `json:"-"`
-	byIdentity map[string]toolDefinition
-	ctx        context.Context
-	root       string
-	protocol   string
+	Tools                []any
+	ByName               map[string]toolDefinition `json:"-"`
+	byIdentity           map[string]toolDefinition
+	ctx                  context.Context
+	root                 string
+	protocol             string
+	includeSearchSources bool
 }
 
 func toolIdentity(namespace, name string) string {
@@ -57,13 +58,13 @@ func NewToolCatalog(ctx context.Context, root string, value any, protocol string
 				return nil, fault.Invalid("namespace 必须包含有效名称和工具数组")
 			}
 			for _, child := range children {
-				if e := c.add(shared.Obj(child), protocol, namespace, shared.Str(t["description"])); e != nil {
+				if e := c.add(shared.Obj(child), namespace, shared.Str(t["description"])); e != nil {
 					return nil, e
 				}
 			}
 			continue
 		}
-		if e := c.add(t, protocol, "", ""); e != nil {
+		if e := c.add(t, "", ""); e != nil {
 			return nil, e
 		}
 	}
@@ -84,15 +85,19 @@ func compareToolNames(a, b any) int {
 	return strings.Compare(shared.Str(shared.Obj(a)["name"]), shared.Str(shared.Obj(b)["name"]))
 }
 
-func (c *ToolCatalog) add(t shared.M, protocol, namespace, namespaceDescription string) error {
+func (c *ToolCatalog) add(t shared.M, namespace, namespaceDescription string) error {
 	f, kind := t, shared.Str(t["type"])
-	if protocol == "chat" {
+	hostedSearch := c.protocol == "responses" && namespace == "" && isWebSearch(kind)
+	if c.protocol == "chat" {
 		f = shared.Obj(t[kind])
 	}
-	if protocol != "anthropic" && kind != "function" && kind != "custom" {
+	if c.protocol != "anthropic" && kind != "function" && kind != "custom" && !hostedSearch {
 		return fault.Invalid(fmt.Sprintf("当前协议转换不支持 %s 类型工具", kind))
 	}
 	name := shared.Str(f["name"])
+	if hostedSearch {
+		name, kind = webSearchName, webSearchName
+	}
 	identity := toolIdentity(namespace, name)
 	upstreamName := upstreamToolName(namespace, name)
 	if !toolName.MatchString(name) {
@@ -106,8 +111,14 @@ func (c *ToolCatalog) add(t shared.M, protocol, namespace, namespaceDescription 
 	}
 	definition := toolDefinition{Name: name, Namespace: namespace, Kind: kind, UpstreamName: upstreamName}
 	var converted shared.M
-	if protocol == "anthropic" {
+	if c.protocol == "anthropic" {
 		converted = shared.Clone(t)
+	} else if hostedSearch {
+		var err error
+		converted, err = convertWebSearch(t)
+		if err != nil {
+			return err
+		}
 	} else {
 		description := shared.Str(f["description"])
 		if namespace != "" {
@@ -126,7 +137,7 @@ func (c *ToolCatalog) add(t shared.M, protocol, namespace, namespaceDescription 
 			switch shared.Str(format["type"]) {
 			case "", "text":
 			case "grammar":
-				if protocol == "chat" {
+				if c.protocol == "chat" {
 					format = shared.Obj(format["grammar"])
 				}
 				grammar, e := newToolGrammar(c.ctx, c.root, format)
@@ -143,6 +154,9 @@ func (c *ToolCatalog) add(t shared.M, protocol, namespace, namespaceDescription 
 		if strict, ok := f["strict"]; ok && kind == "function" {
 			converted["strict"] = strict
 		}
+	}
+	if control := shared.First(f["cache_control"], t["cache_control"]); control != nil {
+		converted["cache_control"] = control
 	}
 	c.ByName[upstreamName], c.byIdentity[identity] = definition, definition
 	c.Tools = append(c.Tools, converted)
@@ -184,6 +198,10 @@ func (c *ToolCatalog) definition(name string) toolDefinition {
 		return definition
 	}
 	return toolDefinition{Name: name, Kind: "function", UpstreamName: name}
+}
+
+func (c *ToolCatalog) HasWebSearch() bool {
+	return c != nil && c.protocol == "responses" && c.ByName[webSearchName].Kind == webSearchName
 }
 
 func (c *ToolCatalog) ValidateCall(ctx context.Context, name string, arguments any) error {
@@ -239,6 +257,22 @@ func (d toolDefinition) startItem(id, callID string) shared.M {
 		item["type"], item["input"] = "custom_tool_call", ""
 	} else {
 		item["type"], item["arguments"] = "function_call", ""
+	}
+	return item
+}
+
+func (d toolDefinition) responseItemID() string {
+	if d.Kind == "custom" {
+		return "ctc_" + shared.UUID()
+	}
+	return "fc_" + shared.UUID()
+}
+
+func (d toolDefinition) incompleteItem(id, callID, partial string) shared.M {
+	item := d.startItem(id, callID)
+	item["status"] = "incomplete"
+	if d.Kind != "custom" {
+		item["arguments"] = partial
 	}
 	return item
 }

@@ -15,11 +15,11 @@ import (
 	"zcode2api/internal/server/fault"
 	wire "zcode2api/internal/server/protocol"
 	"zcode2api/internal/server/shared"
+	"zcode2api/internal/server/storage"
 )
 
 const adminSessionTTL = 24 * time.Hour
-
-var apiKeyColumnNames = strings.Split(apiKeyColumns, ",")
+const apiKeyLastUsedInterval = 30 * time.Second
 
 func bearer(r *http.Request) string {
 	s := r.Header.Get("Authorization")
@@ -105,24 +105,14 @@ func ipAllowed(ip string, patterns []any) bool {
 }
 
 func (a *App) gatewayKey(ctx context.Context, hash string) (shared.M, error) {
-	values := make([]any, len(apiKeyColumnNames))
-	dest := make([]any, len(values))
-	for i := range values {
-		dest[i] = &values[i]
-	}
-	err := a.db.QueryRowContext(ctx, "SELECT "+apiKeyColumns+" FROM keys WHERE key_hash=?", hash).Scan(dest...)
+	rows, err := storage.QueryContext(ctx, a.db, "SELECT "+apiKeyColumns+" FROM keys WHERE key_hash=?", hash)
 	if err != nil {
 		return nil, err
 	}
-	key := make(shared.M, len(values))
-	for i, column := range apiKeyColumnNames {
-		value := values[i]
-		if b, ok := value.([]byte); ok {
-			value = string(b)
-		}
-		key[column] = value
+	if len(rows) == 0 {
+		return nil, sql.ErrNoRows
 	}
-	return key, nil
+	return shared.Obj(rows[0]), nil
 }
 
 func (a *App) authenticate(r *http.Request) (shared.M, *fault.Failure) {
@@ -156,7 +146,11 @@ func (a *App) authenticate(r *http.Request) (shared.M, *fault.Failure) {
 	if len(ips) > 0 && !ipAllowed(a.ip(r), ips) {
 		return nil, &fault.Failure{Status: 403, Code: "ip_not_allowed", Message: "IP 不在白名单"}
 	}
-	_ = a.exec("UPDATE keys SET last_used_at=? WHERE id=?", shared.NowMS(), k["id"])
+	now := shared.NowMS()
+	cutoff := now - apiKeyLastUsedInterval.Milliseconds()
+	if k["last_used_at"] == nil || shared.Integer(k["last_used_at"]) <= cutoff {
+		_ = a.exec("UPDATE keys SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at<=?)", now, k["id"], cutoff)
+	}
 	return k, nil
 }
 

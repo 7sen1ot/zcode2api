@@ -3,7 +3,9 @@
 globalThis.Z2ALogs = (() => {
   const fields = ['q', 'hours', 'status', 'error_code', 'model', 'account', 'key', 'since', 'until'];
   const defaults = () => Object.fromEntries(fields.map(name => [name, ['q', 'since', 'until'].includes(name) ? '' : 'all']));
+  const refreshInterval = 3000, fullRefreshInterval = 15000;
   let filters = defaults(), logPage = 1, logSnapshot = null, logLive = true;
+  let lastFullRefreshAt = 0;
   function errorText(row) {
     const summary = String(row.error_message ?? '').trim();
     const detail = String(row.error_detail?.message ?? '').trim();
@@ -64,7 +66,7 @@ globalThis.Z2ALogs = (() => {
     const live = logLive && logPage === 1;
     button.classList.remove('is-reconnecting');
     button.setAttribute('aria-pressed', String(live));
-    button.title = live ? '约每 1 秒刷新；编辑筛选、查看详情时暂缓' : !logLive ? '开启实时刷新' : '查看历史时暂停；点击返回最新记录';
+    button.title = live ? `约每 ${refreshInterval / 1000} 秒刷新；编辑筛选、查看详情时暂缓` : !logLive ? '开启实时刷新' : '查看历史时暂停；点击返回最新记录';
     button.lastChild.textContent = live ? '实时' : '已暂停';
   }
   function queryFor(fresh = false) {
@@ -88,16 +90,19 @@ globalThis.Z2ALogs = (() => {
     const active = main.ownerDocument.activeElement;
     const focused = active?.matches('#lf-q') ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const advancedOpen = main.querySelector('#log-advanced')?.open;
-    const data = await api(url);
+    const checkSnapshot = options.live && logSnapshot && Date.now() - lastFullRefreshAt < fullRefreshInterval;
+    const data = await api(checkSnapshot ? url + '&known_snapshot=' + encodeURIComponent(logSnapshot.snapshot) : url, { cache: 'no-store' });
     if (queryFor(options.live) !== url) return;
     if (options.live && (!previousPanel?.isConnected || !canAutoRefresh(main))) return;
+    if (data.unchanged) { updateLiveButton(main); return; }
+    lastFullRefreshAt = Date.now();
+    logPage = data.page;
+    logSnapshot = { snapshot: data.snapshot, as_of: data.as_of };
     const fingerprint = JSON.stringify([data.items, data.total, data.pages, data.page_size, data.summary, data.filters]);
     if (options.live && main.dataset.logFingerprint === fingerprint) { updateLiveButton(main); return; }
     const view = main.ownerDocument.defaultView, scroll = { x: view.scrollX, y: view.scrollY, tableX: main.querySelector('.log-calls')?.scrollLeft || 0 };
     const focusedID = options.live && main.contains(view.document.activeElement) ? view.document.activeElement.id : '';
     main.dataset.logFingerprint = fingerprint;
-    logPage = data.page;
-    logSnapshot = { snapshot: data.snapshot, as_of: data.as_of };
     const f = filters, rows = data.items, choices = data.filters || {}, summary = data.summary || {};
     const statusLabel = value => ({ success: '成功', busy: '忙碌', canceled: '已取消', failed: '失败', error: '失败' })[value] || '失败';
     const badge = value => `<span class="badge ${value === 'success' ? 'ok' : value === 'busy' ? 'busy' : value === 'canceled' ? 'plain' : 'err'}">${statusLabel(value)}</span>`;
@@ -200,5 +205,5 @@ globalThis.Z2ALogs = (() => {
     main.querySelector('.log-calls')?.scrollTo({ left: scroll.tableX, behavior: 'instant' });
     if (options.live && (view.scrollX !== scroll.x || view.scrollY !== scroll.y)) view.scrollTo({ left: scroll.x, top: scroll.y, behavior: 'instant' });
   }
-  return Object.freeze({ routeValues, restoreRoute, render, canAutoRefresh, refreshFailed });
+  return Object.freeze({ routeValues, restoreRoute, render, canAutoRefresh, refreshFailed, refreshInterval });
 })();

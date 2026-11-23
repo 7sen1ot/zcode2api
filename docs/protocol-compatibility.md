@@ -1,15 +1,27 @@
-# OpenAI 协议转换与限制
+# 推理协议转换与限制
 
 [返回 README](../README.md) · [配置与重试](configuration.md) · [代理与安全验证](network.md)
 
-网关转换工具声明、调用历史、工具选择、结果和 SSE，工具执行仍由客户端负责。
+网关接受 `POST /v1/chat/completions`、`POST /v1/responses` 和 `POST /v1/messages`。前两者转换为 Anthropic Messages 请求。客户端声明的 function 和 custom 工具由客户端执行，Responses 内置的网页搜索交由上游执行。
 
 | 协议 | 工具声明 | custom 原始输入 |
 | --- | --- | --- |
 | Chat Completions | `tools[].function`、`tools[].custom` | `tool_calls[].custom.input` |
-| Responses | 平铺的 `function`、`custom`，以及 `namespace` 内的这两类工具 | `custom_tool_call.input` |
+| Responses | 顶层 `function`、`custom`、`web_search`，以及 `namespace` 内的 function 和 custom 工具 | `custom_tool_call.input` |
 
 `namespace` 仅用于 Responses。custom 文本在上游通过对象的 `input` 字符串传递，返回时解包为原始文本。
+
+网关按上游工具名排列未标记缓存断点的工具定义。每个显式 `cache_control` 断点保留在原工具上，排序仅在断点之间进行，以保留各段包含的工具并减少顺序变化对缓存前缀的影响。
+
+## Responses 网页搜索
+
+在顶层 `tools` 中声明 `{"type":"web_search"}` 即可请求实时文本搜索，也接受 `web_search_2025_08_26`。每次请求默认最多搜索 8 次，可用正整数 `max_tool_calls` 调低上限。仅查缓存、仅查索引或指定非文本搜索会返回请求错误。域名过滤可选 `filters.allowed_domains` 或 `filters.blocked_domains`，两者互斥。`user_location.type` 省略时默认为 `approximate`。[搜索参数转换](../internal/server/protocol/web_search.go)
+
+响应中的 `web_search_call` 记录搜索状态和查询。需要来源列表时，发送 `"include":["web_search_call.action.sources"]`。正文引用独立放在对应 `output_text.annotations` 中。引用范围覆盖上游标注的整个文本块，索引从该块的 0 开始，按 Unicode 码点计数。流式和非流式响应使用相同的输出项结构。[输出项与引用](../internal/server/protocol/response_output.go)
+
+## Anthropic 输入 Token 估算
+
+`POST /v1/messages/count_tokens` 对经过网关模板和工具转换的请求做本地估算，在 JSON 整数字段 `input_tokens` 中返回结果，并带有响应头 `X-Zcode-Token-Count: estimated`。估算包括系统文本、消息、工具定义及工具结果，图片和文档按可获取的信息折算。当前工具调用轮次的可见思考计入估算，已结束轮次的思考及加密思考块跳过。此接口不发起上游推理，实际用量以推理响应的 `usage` 为准。[计数入口](../internal/server/gateway.go) · [估算规则](../internal/server/protocol/token_count.go)
 
 ## Grammar 实际校验
 
@@ -57,7 +69,7 @@ Chat 的语法位于 `custom.format.grammar.{syntax,definition}`，Responses 位
 | `main` | 三个内置文本块 | 合并到第三块末尾 |
 | `subagent` | 固定身份和可选正文，共两个文本块 | 合并到第二块末尾。四项正文默认关闭，此时只保留调用方提供的正文。 |
 
-合并时可保留一致的 `cache_control`。非文本块、未支持的字段或相互冲突的缓存策略会返回请求错误。请求头 `X-Zcode-Template-Mode` 可覆盖全局模板，同时提供的 `X-Zcode-Session-Type` 须与所选模板一致。[模板实现](../internal/server/protocol/zcode_system.go)
+合并上游 system 文本块时可保留一致的 `cache_control`。传到合并步骤的非文本块、额外字段或相互冲突的缓存策略会返回请求错误。OpenAI developer 和中途指令经过角色转换，原块的缓存标记不会随指令文本转入新块。请求头 `X-Zcode-Template-Mode` 可覆盖全局模板，同时提供的 `X-Zcode-Session-Type` 须与所选模板一致。[模板实现](../internal/server/protocol/zcode_system.go) · [角色转换](../internal/server/protocol/instruction_context.go)
 
 去重按已知完整内容匹配，兼容默认段落内的空白差异和身份末尾句号：
 
@@ -75,7 +87,7 @@ Chat 的语法位于 `custom.format.grammar.{syntax,definition}`，Responses 位
 
 Anthropic 上游只有顶层 `system`，无法原生表达独立的 developer 角色或中途 system 更新，因此不能保证等价保留 OpenAI 的角色优先级、冲突处理和历史作用域。
 
-通过请求体 `instruction_mode` 或请求头 `X-Zcode-Instruction-Mode` 选择模式，请求头优先：
+Chat Completions 和 Responses 按以下顺序选择模式。优先读取请求头 `X-Zcode-Instruction-Mode`，其次是请求体 `instruction_mode`，再使用 Responses 父记录中的 `history` 模式、API 密钥的「OpenAI 指令模式」和默认的 `scoped`。
 
 | 模式 | 行为 |
 | --- | --- |
@@ -90,7 +102,7 @@ X-Zcode-Instruction-Mode: scoped-system
 X-Zcode-Compatibility: instruction-roles-and-scope-approximated
 ```
 
-history 模式始终返回 `X-Zcode-Instruction-Mode: history`；发生角色转换时，同样返回上述 `X-Zcode-Compatibility` 提示头。请求体设置 `"instruction_mode": "history"` 或发送请求头 `X-Zcode-Instruction-Mode: history` 即可启用；它是请求级选择，续聊时也需指定。
+history 模式返回 `X-Zcode-Instruction-Mode: history`，发生角色转换时同时返回上述 `X-Zcode-Compatibility` 提示头。
 
 初始指令、工具定义和已有历史保持稳定时，history 模式追加中途指令不会改写顶层 system；初始指令或工具定义真实变化、切换指令模式仍可能影响缓存复用。该模式不保证具体缓存命中率。
 
@@ -100,8 +112,18 @@ history 模式始终返回 `X-Zcode-Instruction-Mode: history`；发生角色转
 
 Responses 按以下优先级确定会话亲和标识：按既有规则识别的有效显式会话标识（`X-Session-Id` 优先，其次 `metadata.user_id`）→ `previous_response_id` 对应响应保存的标识 → 为首次请求生成的独立标识。首次标识结合当前密钥与网关生成的响应 ID，避免同一密钥的独立对话混用会话。
 
-续聊及从同一父响应分出的分支默认继承父会话。显式会话标识可覆盖继承值，覆盖后的标识保存在子响应中，不修改父响应。`previous_response_id` 恢复历史和会话身份，不自动沿用父请求的 `instruction_mode`、顶层 `instructions` 或工具定义。
+续聊及从同一父响应分出的分支默认继承父会话。显式会话标识可覆盖继承值，覆盖后的标识保存在子响应中，父响应保留原标识。`previous_response_id` 可恢复对话历史、会话身份及已保存的 `history` 模式。需要沿用顶层 `instructions` 时，在续聊请求中重新提交。
 
-Responses 会话的账号粘性使用当前 `conversation_affinity_minutes`，设为 0 时关闭账号粘性。绑定过期、账号不可用或并发满额时，仍按原有调度规则选择可用账号；成功后更新会话绑定。
+### 工具继承
 
-响应记录及其亲和标识仅保存在内存中，继续受最近 100 条、总计 64 MiB 的容量限制；删除、淘汰或重启后不能再使用对应响应续聊。`store:false` 不保存本次响应；无效或属于其他密钥的 `previous_response_id` 仍返回 `404 response_not_found`。Chat Completions 与原生 Messages 的亲和规则不变。
+在有工具定义且会保存响应的请求上发送 `X-Zcode-Reuse-Tools: true`，网关会把工具定义及当轮的 `tool_choice`、`parallel_tool_calls` 保存到响应记录。续聊省略 `tools` 时，网关默认继承父记录中已保存的工具定义，并填入本轮省略的工具选项。发生继承时，响应包含 `X-Zcode-Tools-Reused: true`。
+
+续聊显式提交 `tools` 时以该字段为准，`tools: []` 可清空工具。发送 `X-Zcode-Reuse-Tools: false` 可跳过继承，并停止为本轮响应保存工具定义。
+
+### 存储与调度
+
+Responses 会话的账号粘性使用当前 `conversation_affinity_minutes`，设为 `0` 时关闭。绑定过期、账号不可用或并发满额时，调度器可以选择其他可用账号。成功后更新会话绑定。Chat Completions 和原生 Messages 在未识别到显式会话时使用密钥的 `sticky_minutes`。账号绑定全局最多保留 8,192 条，达到上限后优先淘汰最久未成功更新的绑定。
+
+响应记录及其亲和标识仅保存在内存中，最多 100 条，按内容计量的总容量上限为 64 MiB。分支与续聊共享已有历史，继承的工具定义也共享存储。流式请求会在发送终态事件前处理保存。若单条响应连同历史和工具已超过 64 MiB，网关仍返回生成结果，但会跳过保存。`store: false` 也会跳过保存。[响应缓存](../internal/server/gateway.go)
+
+同一密钥可用 `GET /v1/responses/{id}` 获取已保存的响应，用 `DELETE /v1/responses/{id}` 删除。未保存、已删除、被淘汰或服务重启前的 ID，以及属于其他密钥的 ID，均无法用于读取或续聊，此时返回 `404 response_not_found`。通过 `previous_response_id` 续聊可复用服务端保存的原生搜索和带签名的思考块。手动回传输出项时，搜索动作和可用链接转为历史文本，仅供展示的 `reasoning` 项会跳过。[历史转换](../internal/server/protocol/request.go)

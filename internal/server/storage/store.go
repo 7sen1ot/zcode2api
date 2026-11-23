@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	_ "modernc.org/sqlite"
@@ -49,7 +50,14 @@ type Executor interface {
 }
 
 func Query(d Executor, q string, args ...any) ([]any, error) {
-	rows, e := d.Query(q, args...)
+	return scanRows(d.Query(q, args...))
+}
+
+func QueryContext(ctx context.Context, d *sql.DB, q string, args ...any) ([]any, error) {
+	return scanRows(d.QueryContext(ctx, q, args...))
+}
+
+func scanRows(rows *sql.Rows, e error) ([]any, error) {
 	if e != nil {
 		return nil, e
 	}

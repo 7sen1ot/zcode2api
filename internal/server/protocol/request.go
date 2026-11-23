@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"zcode2api/internal/server/fault"
 	"zcode2api/internal/server/shared"
@@ -134,9 +135,6 @@ func chatMessage(m shared.M, instructions *InstructionContext, tools *ToolCatalo
 	if e != nil {
 		return nil, e
 	}
-	if shared.Truth(m["reasoning_content"]) {
-		content = append([]any{shared.M{"type": "thinking", "thinking": m["reasoning_content"], "signature": ""}}, content...)
-	}
 	for _, v := range shared.Arr(m["tool_calls"]) {
 		call := shared.Obj(v)
 		kind := shared.Str(shared.Fallback(call["type"], "function"))
@@ -146,6 +144,10 @@ func chatMessage(m shared.M, instructions *InstructionContext, tools *ToolCatalo
 			return nil, e
 		}
 		content = append(content, shared.M{"type": "tool_use", "id": call["id"], "name": tools.historyName(f), "input": input})
+	}
+	// A display-only reasoning message has no signed content to replay.
+	if role == "assistant" && len(content) == 0 && shared.Truth(m["reasoning_content"]) {
+		return nil, nil
 	}
 	return shared.M{"role": role, "content": content}, nil
 }
@@ -181,9 +183,17 @@ func ResponseMessages(input any, instructions *InstructionContext, tools *ToolCa
 	out := []any{}
 	conversation := false
 	for _, v := range shared.Arr(input) {
+		if history, ok := v.(nativeAssistantHistory); ok {
+			out = append(out, shared.M{"role": "assistant", "content": shared.CloneValue(history.Content)})
+			conversation = true
+			continue
+		}
 		m := shared.Obj(v)
 		switch shared.Str(m["type"]) {
 		case "function_call", "custom_tool_call":
+			if m["status"] == "incomplete" {
+				continue
+			}
 			kind := "function"
 			if shared.Str(m["type"]) == "custom_tool_call" {
 				kind = "custom"
@@ -199,20 +209,33 @@ func ResponseMessages(input any, instructions *InstructionContext, tools *ToolCa
 				return nil, e
 			}
 			out = append(out, shared.M{"role": "user", "content": []any{shared.M{"type": "tool_result", "tool_use_id": m["call_id"], "content": content}}})
+		case "web_search_call":
+			// Responses history carries the action and URLs, not Anthropic's
+			// encrypted result blocks. Preserve the available context as text.
+			if text := webSearchHistory(m); text != "" {
+				out = append(out, shared.M{"role": "assistant", "content": []any{shared.M{"type": "text", "text": text}}})
+			}
 		case "reasoning":
-			text := ""
-			for _, v := range shared.Arr(m["summary"]) {
-				text += shared.Str(shared.Obj(v)["text"])
-			}
-			if text != "" {
-				out = append(out, shared.M{"role": "assistant", "content": []any{shared.M{"type": "thinking", "thinking": text, "signature": ""}}})
-			}
+			// Only gateway-stored history carries the original signed blocks.
+			continue
 		case "", "message":
 			message, e := chatMessage(m, instructions, tools, conversation)
 			if e != nil {
 				return nil, e
 			}
 			if message != nil {
+				if m["role"] == "assistant" {
+					var annotations []any
+					for _, value := range shared.Arr(m["content"]) {
+						block := shared.Obj(value)
+						if block["type"] == "output_text" {
+							annotations = append(annotations, shared.Arr(block["annotations"])...)
+						}
+					}
+					if links := webSearchLinks(annotations, "url_citation"); links != "" {
+						message["content"] = append(shared.Arr(message["content"]), shared.M{"type": "text", "text": links})
+					}
+				}
 				out = append(out, message)
 			}
 		default:
@@ -264,6 +287,23 @@ func BuildRequest(body shared.M, protocol, model, level string, catalog *ToolCat
 		if protocol == "chat" {
 			messages, e = ChatMessages(body["messages"], instructions, catalog)
 		} else {
+			if body["conversation"] != nil {
+				return nil, fault.Invalid("当前网关不支持 conversation，请使用 previous_response_id 或显式提交历史")
+			}
+			catalog.includeSearchSources = slices.Contains(shared.Arr(body["include"]), "web_search_call.action.sources")
+			if limit := body["max_tool_calls"]; limit != nil {
+				if !shared.IntegerInRange(limit, 1, 1<<53-1) {
+					return nil, fault.Invalid("max_tool_calls 必须为正整数")
+				}
+				for i, value := range tools {
+					tool := shared.Obj(value)
+					if tool["type"] == nativeWebSearchType {
+						tools = slices.Clone(tools)
+						tools[i] = shared.Merge(tool, shared.M{"max_uses": min(shared.Integer(tool["max_uses"]), shared.Integer(limit))})
+						break
+					}
+				}
+			}
 			messages, e = ResponseMessages(body["input"], instructions, catalog)
 		}
 		if e != nil {
@@ -290,10 +330,21 @@ func BuildRequest(body shared.M, protocol, model, level string, catalog *ToolCat
 			case "none":
 				c["type"] = "none"
 			case "required":
+				if len(tools) == 0 {
+					return nil, fault.Invalid("tool_choice=required 需要至少一个工具")
+				}
 				c["type"] = "any"
 			default:
 				m := shared.Obj(choice)
-				if shared.Str(m["type"]) != "function" && shared.Str(m["type"]) != "custom" {
+				kind := shared.Str(m["type"])
+				if protocol == "responses" && isWebSearch(kind) {
+					if !catalog.HasWebSearch() {
+						return nil, fault.Invalid("tool_choice 未匹配到已声明的 web_search")
+					}
+					c = shared.M{"type": "tool", "name": webSearchName}
+					break
+				}
+				if kind != "function" && kind != "custom" {
 					return nil, fault.Invalid("无法转换 tool_choice")
 				}
 				name, e := catalog.choiceName(m)
@@ -305,7 +356,9 @@ func BuildRequest(body shared.M, protocol, model, level string, catalog *ToolCat
 			if parallel != nil && shared.Str(c["type"]) != "none" {
 				c["disable_parallel_tool_use"] = !shared.Truth(parallel)
 			}
-			request["tool_choice"] = c
+			if len(tools) > 0 {
+				request["tool_choice"] = c
+			}
 		}
 		format := shared.Obj(shared.First(body["response_format"], shared.Obj(body["text"])["format"]))
 		if len(format) > 0 && shared.Str(format["type"]) != "text" {

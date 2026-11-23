@@ -122,15 +122,24 @@ function bindSettingsSections(main, onSectionChange) {
   showSettingsSection();
 }
 
-async function pageSettings(main) {
-  const [s, mihomo] = await Promise.all([api('/api/settings'), api('/api/settings/proxy/mihomo').catch(() => ({ unavailable: true }))]);
+async function pageSettings(main, read) {
+  const [s, mihomo] = await Promise.all([read('/api/settings'), read('/api/settings/proxy/mihomo').catch(error => {
+    if (error.name === 'AbortError') throw error;
+    return { unavailable: true };
+  })]);
   const [mihomoOS, mihomoArch] = (mihomo.platform || '').split('/');
   const mihomoTarget = mihomo.platform ? `${({ windows: 'Windows', linux: 'Linux', darwin: 'macOS' })[mihomoOS] || mihomoOS} / ${({ amd64: 'x64', arm64: 'ARM64' })[mihomoArch] || mihomoArch}` : '';
   const httpParams = { ...s.http };
   const captcha = { mode: 'off', browser_backend: 'auto', browser_headless: true, browser_display: '', playwright_path: '', browser_path: '', node_path: 'node', jsdom_path: '', simulate_canvas_webgl: true, timeout_ms: 30000, ticket_ttl_ms: 75000, ...s.http.captcha };
   const proxy = { enabled: false, source: 'manual', urls: [], subscription_url: '', preferred_node: '', mihomo_path: 'mihomo', refresh_interval_sec: 3600, ...s.outbound_proxy };
-  const subagentFields = { zcode_subagent_insert_enabled: 's-subagent-insert', zcode_subagent_harness_enabled: 's-subagent-harness', zcode_subagent_files_enabled: 's-subagent-files', zcode_subagent_comments_enabled: 's-subagent-comments' };
-  delete httpParams.client_version;
+  const subagentFields = {
+    zcode_subagent_insert_enabled: 's-subagent-insert',
+    zcode_subagent_harness_enabled: 's-subagent-harness',
+    zcode_subagent_files_enabled: 's-subagent-files',
+    zcode_subagent_comments_enabled: 's-subagent-comments',
+    zcode_subagent_finishing_work_enabled: 's-subagent-finishing-work',
+    zcode_subagent_memory_notes_enabled: 's-subagent-memory-notes',
+  };
   delete httpParams.captcha;
   main.innerHTML = `<header class="pagehead settings-header">
       <h1 class="tt" id="settings-title">设置</h1>
@@ -154,7 +163,7 @@ async function pageSettings(main) {
         </div>
       </div>`)}
       ${settingsPanel('template', `
-        <div class="settings-fields"><label class="f" for="s-template-mode"><span>模板类型 ${infoTip('main 固定使用原始三段式模板。subagent 可独立勾选正文内容；保存后同时切换模板与请求头。', '请求模板')}</span><select id="s-template-mode" required><option value="main">main（默认）</option><option value="subagent">subagent</option></select></label></div>
+        <div class="settings-fields"><label class="f" for="s-template-mode"><span>模板类型 ${infoTip(`main 使用 ZCode ${s.zcode_fingerprint_version} 的默认提示词。subagent 可勾选要添加的段落。`, '请求模板')}</span><select id="s-template-mode" required><option value="main">main（默认）</option><option value="subagent">subagent</option></select></label></div>
         <div class="settings-stack template-custom-fields" id="s-subagent-options" hidden>
           <div class="template-identity"><code aria-label="固定身份标识">You are ZCode, an interactive agent</code>${infoTip('全部取消勾选时，模板正文为空。', '固定身份标识')}</div>
           <div class="settings-fields" role="group" aria-label="subagent 可选正文">
@@ -162,6 +171,8 @@ async function pageSettings(main) {
             <label class="settings-check"><input id="s-subagent-harness" type="checkbox"><span>Harness</span></label>
             <label class="settings-check"><input id="s-subagent-files" type="checkbox"><span>Files &amp; URLs</span></label>
             <label class="settings-check"><input id="s-subagent-comments" type="checkbox"><span>Inline Code Comments</span></label>
+            <label class="settings-check"><input id="s-subagent-finishing-work" type="checkbox"><span>Finishing work</span></label>
+            <label class="settings-check"><input id="s-subagent-memory-notes" type="checkbox"><span>Memory, notes and feedback</span></label>
           </div>
           <div class="code-field template-custom-fields" id="s-template-custom-fields" hidden><label class="f" for="s-subagent-template"><span>插入内容 ${infoTip('插入内容排在所选固定段落之前，客户端指令追加在末尾。', '插入内容')}</span></label><textarea id="s-subagent-template" class="code-input" rows="10" spellcheck="false" maxlength="262144" placeholder="留空使用 internal/server/system-prompt.md">${esc(s.zcode_subagent_template || '')}</textarea></div>
         </div>
@@ -210,7 +221,7 @@ async function pageSettings(main) {
       `)}
       ${settingsPanel('gateway', `
         <div class="settings-fields"><label class="f" for="s-level"><span>默认思考强度 ${infoTip('优先级为客户端、密钥、此处设置。低强度仍开启思考，客户端关闭思考时不覆盖。始终思考的模型可能返回 1210，此时请在客户端开启思考。', '思考强度')}</span><select id="s-level" required><option value="low">低（low）</option><option value="high">高（high）</option><option value="max">最高（max）</option></select></label></div>
-        <div class="settings-fields"><label class="f">ZCode 请求指纹版本<input value="${esc(s.zcode_fingerprint_version)}" readonly></label></div>
+        <div class="settings-fields"><label class="f">ZCode 上游版本<input value="${esc(s.zcode_fingerprint_version)}" readonly></label></div>
         <div class="settings-subsection"><h3>高级参数</h3>
           <div class="settings-fields">
             <div class="code-field">
@@ -288,7 +299,9 @@ async function pageSettings(main) {
     if (draft && typeof draft === 'object' && !Array.isArray(draft)) {
       if (draft['s-template-mode'] === 'subagent_custom') {
         draft['s-template-mode'] = 'subagent';
-        for (const id of Object.values(subagentFields)) if (!Object.hasOwn(draft, id)) draft[id] = true;
+        for (const id of ['s-subagent-insert', 's-subagent-harness', 's-subagent-files', 's-subagent-comments']) {
+          if (!Object.hasOwn(draft, id)) draft[id] = true;
+        }
       }
       try {
         const oldHttp = parseSettingsJSON(draft['s-http']);
@@ -312,7 +325,7 @@ async function pageSettings(main) {
       try {
         const parsed = parseSettingsJSON(box.value);
         if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('请输入 JSON 对象，而非数组或其他值');
-        if (id === 's-http' && Object.hasOwn(parsed, 'client_version')) throw new Error('ZCode 版本随请求指纹代码固定更新，请移除 client_version');
+        if (id === 's-http' && Object.hasOwn(parsed, 'client_version')) throw new Error('ZCode 版本由内置上游配置决定，请移除 client_version');
         if (id === 's-http' && Object.hasOwn(parsed, 'captcha')) throw new Error('请在“上游安全验证”设置验证码，并从此处移除 captcha');
         box.classList.remove('invalid'); box.setAttribute('aria-invalid', 'false'); hint.textContent = ''; hint.classList.remove('error');
       } catch (error) {

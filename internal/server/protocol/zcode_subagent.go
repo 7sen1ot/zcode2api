@@ -41,6 +41,12 @@ func subagentSystem(template SystemTemplate) string {
 	if template.CommentsEnabled {
 		parts = append(parts, subagentComments)
 	}
+	if template.FinishingWorkEnabled {
+		parts = append(parts, zcodeRelease.FinishingWork)
+	}
+	if template.MemoryNotesEnabled {
+		parts = append(parts, zcodeRelease.MemoryNotes)
+	}
 	if len(parts) == 0 {
 		return ""
 	}

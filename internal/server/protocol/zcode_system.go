@@ -2,23 +2,39 @@ package protocol
 
 import (
 	_ "embed"
+	"encoding/json"
 	"strings"
 	"zcode2api/internal/server/fault"
 	"zcode2api/internal/server/shared"
 )
 
 //go:embed zcode_system.json
-var zcodeSystemJSON []byte
+var zcodeReleaseJSON []byte
 
-// Keep the upstream client template separate from caller instructions. Omitting
-// it causes otherwise valid inference requests to be rejected with code 3012.
-var zcodeUpstreamSystemPrefix = func() []any {
-	blocks := shared.Arr(shared.Parse(string(zcodeSystemJSON), nil))
-	if len(blocks) != 3 {
-		panic("zcode_system.json must contain exactly three system blocks")
+type zcodeReleaseProfile struct {
+	Version       string `json:"version"`
+	MainSystem    []any  `json:"main_system"`
+	FinishingWork string `json:"finishing_work"`
+	MemoryNotes   string `json:"memory_notes"`
+}
+
+// The main template always includes both sections. Subagent can include each independently.
+var zcodeRelease = func() zcodeReleaseProfile {
+	var release zcodeReleaseProfile
+	if err := json.Unmarshal(zcodeReleaseJSON, &release); err != nil {
+		panic(err)
 	}
-	return blocks
+	if release.Version == "" || len(release.MainSystem) != 3 {
+		panic("zcode_system.json must contain a version and exactly three main system blocks")
+	}
+	dynamic := shared.Obj(release.MainSystem[2])
+	dynamic["text"] = strings.Join([]string{shared.Str(dynamic["text"]), release.FinishingWork, release.MemoryNotes}, "\n\n")
+	return release
 }()
+
+func ZCodeVersion() string {
+	return zcodeRelease.Version
+}
 
 const (
 	TemplateMain           = "main"
@@ -27,12 +43,14 @@ const (
 )
 
 type SystemTemplate struct {
-	Mode            string
-	Custom          string
-	InsertEnabled   bool
-	HarnessEnabled  bool
-	FilesEnabled    bool
-	CommentsEnabled bool
+	Mode                 string
+	Custom               string
+	InsertEnabled        bool
+	HarnessEnabled       bool
+	FilesEnabled         bool
+	CommentsEnabled      bool
+	FinishingWorkEnabled bool
+	MemoryNotesEnabled   bool
 }
 
 func NewSystemTemplate(mode, custom string) (SystemTemplate, error) {
@@ -66,7 +84,7 @@ func (t SystemTemplate) QuerySource() string {
 }
 
 func upstreamSystemBlocks(client []any, template SystemTemplate) ([]any, error) {
-	prefix := zcodeUpstreamSystemPrefix
+	prefix := zcodeRelease.MainSystem
 	if template.SessionType() == "subagent" {
 		// Identity is fixed; disabling every optional section leaves an empty body.
 		prefix = []any{

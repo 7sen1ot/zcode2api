@@ -14,7 +14,6 @@ import (
 	"time"
 	accountdata "zcode2api/internal/server/account"
 	captchasdk "zcode2api/internal/server/captcha"
-	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
 	childproc "zcode2api/internal/server/process"
 	wire "zcode2api/internal/server/protocol"
@@ -54,10 +53,7 @@ type requestTiming struct {
 
 func newTiming() *requestTiming { return &requestTiming{start: time.Now()} }
 
-func (t *requestTiming) observe(e wire.Event) {
-	if !e.HasText() && e.Type != "tool_start" {
-		return
-	}
+func (t *requestTiming) observeOutput(e wire.Event) {
 	v := time.Since(t.start).Milliseconds()
 	if t.first == nil {
 		t.first = &v
@@ -86,7 +82,7 @@ func (t *requestTiming) snapshot() shared.M {
 }
 
 func (a *App) upstreamHeaders(token, session, id string, source inferenceSource) http.Header {
-	version := settings.ZCodeFingerprintVersion
+	version := wire.ZCodeVersion()
 	clientPlatform := platform()
 	osCategory := runtime.GOOS
 	if osCategory == "darwin" {
@@ -263,6 +259,7 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 		session,
 	)
 	upstreamBody := shared.Merge(o.Upstream, shared.M{"metadata": metadata})
+	webSearchBeta := wire.NeedsWebSearchBeta(upstreamBody, o.Protocol)
 	requestID := shared.UUID()
 	ctx, release, e := a.pinOutboundProxy(ctx, account)
 	if e != nil {
@@ -306,6 +303,9 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 			return nil, failure
 		}
 		req.Header = a.upstreamHeaders(token, session, requestID, o.Source)
+		if webSearchBeta {
+			req.Header.Add("Anthropic-Beta", wire.NativeWebSearchBeta)
+		}
 		// Keep the source header and metadata tied to the account's existing
 		// device identity, as the official client does.
 		if device := shared.Str(account["device_mid"]); device != "" {
@@ -386,22 +386,35 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 		return nil, &fault.Failure{Status: 502, Code: "upstream_invalid_content_type", Message: "上游未返回 SSE 响应", Detail: detail}
 	}
 	content := map[int]shared.M{}
-	buffers := map[int]*contentBuffer{}
+	openBlocks := map[int]*contentBuffer{}
+	calls := map[int]shared.M{}
 	var text, reasoning strings.Builder
-	open := map[int]bool{}
 	usage := shared.M{}
 	nativePending := []wire.Frame{}
 	pendingBytes := 0
 	nativeStarted, stopped := false, false
 	hasOutput := false
+	lastContentIndex := -1
+	emptyCallIndices := []int{}
+	var incompleteEvents []wire.Event
+	// A retried non-streaming request starts with a fresh output. Streaming
+	// requests feed the same assembler through Stream.OnEvent.
+	var responseOutput *wire.ResponseOutput
+	if o.Protocol == "responses" && !o.Stream {
+		responseOutput = wire.NewResponseOutput(o.Tools)
+	}
 	emit := func(ev wire.Event) error {
-		o.Timing.observe(ev)
-		visibleOutput := ev.HasText() || ev.Type == "tool_start"
-		if visibleOutput || ev.Type == "tool_delta" && ev.Delta != "" || ev.Type == "tool_end" {
+		visibleOutput := ev.HasText() || ev.Type == "tool_start" || ev.Type == "web_search_start"
+		if visibleOutput {
+			o.Timing.observeOutput(ev)
+			refreshIdle()
+			admit()
+		} else if ev.Type == "tool_delta" && ev.Delta != "" || ev.Type == "tool_end" ||
+			ev.Type == "web_search_query" || ev.Type == "web_search_result" {
 			refreshIdle()
 		}
-		if visibleOutput {
-			admit()
+		if responseOutput != nil {
+			return responseOutput.OnEvent(ev)
 		}
 		if o.OnEvent == nil {
 			return nil
@@ -410,6 +423,31 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 			committed = true
 		}
 		return o.OnEvent(ev)
+	}
+	finishTool := func(idx int, block shared.M, raw string) error {
+		arguments := shared.First(block["input"], shared.M{})
+		if o.Tools != nil {
+			if err := o.Tools.ValidateCall(ctx, shared.Str(block["name"]), arguments); err != nil {
+				return err
+			}
+		}
+		if raw == "" {
+			raw = shared.JSON(arguments)
+			if err := emit(wire.Event{Type: "tool_delta", Index: idx, Delta: raw}); err != nil {
+				return err
+			}
+		}
+		calls[idx] = shared.M{"id": block["id"], "name": block["name"], "arguments": arguments}
+		return emit(wire.Event{Type: "tool_end", Index: idx, Delta: raw, Block: block})
+	}
+	markIncompleteTool := func(idx int, block shared.M, partial string) {
+		if r.IncompleteCalls == nil {
+			r.IncompleteCalls = map[string]bool{}
+		}
+		r.IncompleteCalls[shared.Str(block["id"])] = true
+		if block["type"] == "tool_use" {
+			incompleteEvents = append(incompleteEvents, wire.Event{Type: "tool_incomplete", Index: idx, Delta: partial})
+		}
 	}
 	e = wire.ReadSSE(res.Body, func(f wire.Frame) error {
 		if err := ctx.Err(); err != nil {
@@ -438,57 +476,71 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 			}
 		}
 		if typ == "content_block_start" {
-			if open[idx] {
-				return fault.Invalid("上游内容块重复开始")
+			if _, exists := content[idx]; exists {
+				return fault.ProviderFailure(shared.M{"message": "上游内容块重复开始"}, 502, "")
 			}
-			open[idx] = true
+			lastContentIndex = idx
 			b := shared.Clone(shared.Obj(event["content_block"]))
 			content[idx] = b
 			buffer := &contentBuffer{}
 			buffer.text.WriteString(shared.Str(b["text"]))
 			buffer.thinking.WriteString(shared.Str(b["thinking"]))
 			buffer.signature.WriteString(shared.Str(b["signature"]))
-			buffers[idx] = buffer
+			openBlocks[idx] = buffer
 			if shared.Str(b["type"]) == "tool_use" {
 				if e := emit(wire.Event{Type: "tool_start", Index: idx, ID: shared.Str(b["id"]), Name: shared.Str(b["name"])}); e != nil {
 					return e
 				}
 			}
+			if o.Protocol == "responses" && webSearchBeta && b["type"] == "server_tool_use" && b["name"] == "web_search" {
+				id := shared.Str(b["id"])
+				if id == "" {
+					return fault.ProviderFailure(shared.M{"message": "上游网页搜索调用缺少 ID"}, 502, "")
+				}
+				hasOutput = true
+				if e := emit(wire.Event{Type: "web_search_start", ID: id}); e != nil {
+					return e
+				}
+			}
+			if o.Protocol == "anthropic" && b["type"] == "server_tool_use" {
+				refreshIdle()
+				admit()
+			}
 			if shared.Truth(b["text"]) {
 				s := shared.Str(b["text"])
 				text.WriteString(s)
-				if e := emit(wire.Event{Type: "text_delta", Text: s}); e != nil {
+				if e := emit(wire.Event{Type: "text_delta", Index: idx, Text: s}); e != nil {
 					return e
 				}
 			}
 			if shared.Truth(b["thinking"]) {
 				s := shared.Str(b["thinking"])
 				reasoning.WriteString(s)
-				if e := emit(wire.Event{Type: "reasoning_delta", Text: s}); e != nil {
+				if e := emit(wire.Event{Type: "reasoning_delta", Index: idx, Text: s}); e != nil {
 					return e
 				}
 			}
 		}
 		if typ == "content_block_delta" {
-			b := content[idx]
-			if b == nil || !open[idx] {
+			buffer := openBlocks[idx]
+			if buffer == nil {
 				return fault.ProviderFailure(shared.M{"message": "上游内容块缺少 start 事件"}, 502, "")
 			}
+			b := content[idx]
 			d := shared.Obj(event["delta"])
-			buffer := buffers[idx]
 			switch shared.Str(d["type"]) {
 			case "text_delta":
 				s := shared.Str(d["text"])
 				buffer.text.WriteString(s)
 				text.WriteString(s)
-				if e := emit(wire.Event{Type: "text_delta", Text: s}); e != nil {
+				if e := emit(wire.Event{Type: "text_delta", Index: idx, Text: s}); e != nil {
 					return e
 				}
 			case "thinking_delta":
 				s := shared.Str(d["thinking"])
 				buffer.thinking.WriteString(s)
 				reasoning.WriteString(s)
-				if e := emit(wire.Event{Type: "reasoning_delta", Text: s}); e != nil {
+				if e := emit(wire.Event{Type: "reasoning_delta", Index: idx, Text: s}); e != nil {
 					return e
 				}
 			case "signature_delta":
@@ -498,44 +550,67 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 			case "input_json_delta":
 				s := shared.Str(d["partial_json"])
 				buffer.partial.WriteString(s)
-				if e := emit(wire.Event{Type: "tool_delta", Index: idx, Delta: s}); e != nil {
-					return e
+				if b["type"] == "server_tool_use" && s != "" {
+					refreshIdle()
+				}
+				if b["type"] == "tool_use" {
+					if e := emit(wire.Event{Type: "tool_delta", Index: idx, Delta: s}); e != nil {
+						return e
+					}
 				}
 			}
 		}
 		if typ == "content_block_stop" {
-			delete(open, idx)
+			buffer := openBlocks[idx]
+			if buffer == nil {
+				return fault.ProviderFailure(shared.M{"message": "上游内容块缺少 start 事件"}, 502, "")
+			}
+			delete(openBlocks, idx)
 			b := content[idx]
-			buffer := buffers[idx]
-			if buffer != nil {
-				for field, value := range map[string]*strings.Builder{"text": &buffer.text, "thinking": &buffer.thinking, "signature": &buffer.signature} {
-					if value.Len() > 0 || b[field] != nil {
-						b[field] = value.String()
-					}
+			for field, value := range map[string]*strings.Builder{"text": &buffer.text, "thinking": &buffer.thinking, "signature": &buffer.signature} {
+				if value.Len() > 0 || b[field] != nil {
+					b[field] = value.String()
 				}
 			}
-			if shared.Str(b["type"]) == "tool_use" {
-				partial := buffer.partial.String()
-				if partial == "" {
-					if e := emit(wire.Event{Type: "tool_delta", Index: idx, Delta: shared.JSON(shared.First(b["input"], shared.M{}))}); e != nil {
-						return e
-					}
-				} else {
-					input := shared.Parse(partial, nil)
-					if input == nil {
-						return fault.ProviderFailure(shared.M{"message": "上游工具参数 JSON 不完整"}, 502, "")
-					}
+			kind := shared.Str(b["type"])
+			partial := buffer.partial.String()
+			inputComplete := true
+			if (kind == "tool_use" || kind == "server_tool_use") && partial != "" {
+				if input, ok := shared.Parse(partial, nil).(map[string]any); ok {
 					b["input"] = input
+				} else {
+					// The stop reason arrives after the block. A token limit can
+					// leave valid deltas without a complete JSON object.
+					inputComplete = false
+					markIncompleteTool(idx, b, partial)
 				}
-				arguments := shared.First(b["input"], shared.M{})
-				if o.Tools != nil {
-					if e := o.Tools.ValidateCall(ctx, shared.Str(b["name"]), arguments); e != nil {
+			}
+			if kind == "tool_use" && inputComplete {
+				if partial == "" && len(shared.Obj(b["input"])) == 0 {
+					// An empty start block can be a no-argument call or a
+					// placeholder truncated before the first argument delta.
+					emptyCallIndices = append(emptyCallIndices, idx)
+				} else if e := finishTool(idx, b, partial); e != nil {
+					return e
+				}
+			}
+			if o.Protocol == "responses" {
+				switch kind {
+				case "server_tool_use":
+					if b["name"] != "web_search" || !inputComplete {
+						break
+					}
+					if e := emit(wire.Event{Type: "web_search_query", ID: shared.Str(b["id"]), Text: shared.Str(shared.Obj(b["input"])["query"])}); e != nil {
 						return e
 					}
-				}
-				r.Calls = append(r.Calls, shared.M{"id": b["id"], "name": b["name"], "arguments": arguments})
-				if e := emit(wire.Event{Type: "tool_end", Index: idx}); e != nil {
-					return e
+				case "web_search_tool_result":
+					if e := emit(wire.Event{Type: "web_search_result", ID: shared.Str(b["tool_use_id"]), Block: b}); e != nil {
+						return e
+					}
+				case "text", "thinking":
+					if e := emit(wire.Event{Type: "content_end", Index: idx, Block: b}); e != nil {
+						return e
+					}
 				}
 			}
 		}
@@ -550,10 +625,26 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 			if r.Native == nil {
 				return &fault.Failure{Status: http.StatusBadGateway, Code: "truncated_stream", Message: "上游事件流缺少 message_start"}
 			}
-			if len(open) > 0 {
+			if len(openBlocks) > 0 {
 				return fault.ProviderFailure(shared.M{"message": "上游事件流提前结束，内容块未关闭"}, 502, "")
 			}
-			hasOutput = text.Len() > 0 || reasoning.Len() > 0 || len(r.Calls) > 0
+			r.FinishReason = shared.Str(r.Native["stop_reason"])
+			if len(r.IncompleteCalls) > 0 && !r.Incomplete() {
+				return fault.ProviderFailure(shared.M{"message": "上游工具参数 JSON 不完整"}, 502, "")
+			}
+			for _, idx := range emptyCallIndices {
+				if idx == lastContentIndex && r.Incomplete() {
+					markIncompleteTool(idx, content[idx], "")
+				} else if e := finishTool(idx, content[idx], ""); e != nil {
+					return e
+				}
+			}
+			for _, event := range incompleteEvents {
+				if e := emit(event); e != nil {
+					return e
+				}
+			}
+			hasOutput = hasOutput || text.Len() > 0 || reasoning.Len() > 0 || len(calls) > 0
 			if !hasOutput && o.Protocol == "anthropic" {
 				for _, block := range content {
 					switch shared.Str(block["type"]) {
@@ -566,20 +657,15 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 					}
 				}
 			}
-			if !hasOutput {
-				switch reason := shared.Str(r.Native["stop_reason"]); reason {
-				case "max_tokens", "stop_sequence", "refusal", "pause_turn":
-					// An explicit stop can legitimately end a turn without content.
-				default:
-					return &fault.Failure{Status: http.StatusBadGateway, Code: "upstream_empty_response", Message: "上游结束响应，但未返回任何内容", Detail: shared.M{"stop_reason": reason}}
-				}
+			if !hasOutput && !r.Incomplete() && r.FinishReason != "stop_sequence" {
+				return &fault.Failure{Status: http.StatusBadGateway, Code: "upstream_empty_response", Message: "上游结束响应，但未返回任何内容", Detail: shared.M{"stop_reason": r.FinishReason}}
 			}
 			stopped = true
 			admit()
 		}
 		if o.Stream && o.Protocol == "anthropic" {
 			b, d := shared.Obj(event["content_block"]), shared.Obj(event["delta"])
-			visible := stopped || shared.Str(b["type"]) == "tool_use" || shared.Truth(b["text"]) || shared.Truth(b["thinking"]) || shared.Truth(d["text"]) || shared.Truth(d["thinking"])
+			visible := stopped || b["type"] == "tool_use" || b["type"] == "server_tool_use" || shared.Truth(b["text"]) || shared.Truth(b["thinking"]) || shared.Truth(d["text"]) || shared.Truth(d["thinking"])
 			nativeStarted = nativeStarted || visible
 			nativePending = append(nativePending, f)
 			pendingBytes += len(f.Raw)
@@ -618,10 +704,15 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 	blocks := []any{}
 	for _, i := range indices {
 		blocks = append(blocks, content[i])
+		if call := calls[i]; call != nil {
+			r.Calls = append(r.Calls, call)
+		}
 	}
 	r.Native["content"], r.Native["usage"] = blocks, usage
 	r.Text, r.Reasoning = text.String(), reasoning.String()
-	r.FinishReason = shared.Str(r.Native["stop_reason"])
+	if responseOutput != nil {
+		r.Output = responseOutput.Finish(r)
+	}
 	inputUsage := shared.First(usage["inputTokens"], usage["input_tokens"], usage["prompt_tokens"])
 	outputUsage := shared.First(usage["outputTokens"], usage["output_tokens"], usage["completion_tokens"])
 	if usage["input_tokens"] != nil || inputUsage == nil {

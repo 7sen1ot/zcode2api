@@ -24,15 +24,29 @@ func responsesUsage(u shared.M) shared.M {
 
 func lengthFinish(s string) bool {
 	s = strings.ToLower(s)
-	return strings.Contains(s, "length") || strings.Contains(s, "max_tokens") || strings.Contains(s, "max_output_tokens")
+	return s == "model_context_window_exceeded" || strings.Contains(s, "length") || strings.Contains(s, "max_tokens") || strings.Contains(s, "max_output_tokens")
+}
+
+func (r *Result) Incomplete() bool {
+	return lengthFinish(r.FinishReason) || r.FinishReason == "refusal" || r.FinishReason == "pause_turn"
+}
+
+func (r *Result) outputStatus() string {
+	if r.Incomplete() {
+		return "incomplete"
+	}
+	return "completed"
 }
 
 func chatFinishReason(r *Result) string {
+	if r.FinishReason == "refusal" {
+		return "content_filter"
+	}
+	if r.Incomplete() {
+		return "length"
+	}
 	if len(r.Calls) > 0 {
 		return "tool_calls"
-	}
-	if lengthFinish(r.FinishReason) {
-		return "length"
 	}
 	return "stop"
 }
@@ -60,37 +74,22 @@ func BuildResponse(protocol string, r *Result, model, id string, tools *ToolCata
 		}
 		return shared.M{"id": id, "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{shared.M{"index": 0, "message": m, "finish_reason": chatFinishReason(r)}}, "usage": chatUsage(r.Usage)}, nil
 	}
-	output := []any{}
-	if r.Reasoning != "" {
-		output = append(output, shared.M{"id": "rs_" + shared.UUID(), "type": "reasoning", "summary": []any{shared.M{"type": "summary_text", "text": r.Reasoning}}})
-	}
-	if r.Text != "" {
-		output = append(output, shared.M{"id": "msg_" + shared.UUID(), "type": "message", "role": "assistant", "status": "completed", "content": []any{shared.M{"type": "output_text", "text": r.Text, "annotations": []any{}}}})
-	}
-	for _, v := range r.Calls {
-		c := shared.Obj(v)
-		definition := tools.definition(shared.Str(c["name"]))
-		prefix := "fc_"
-		if definition.Kind == "custom" {
-			prefix = "ctc_"
-		}
-		item, e := definition.completedItem(prefix+shared.UUID(), shared.Str(c["id"]), c["arguments"])
-		if e != nil {
-			return nil, e
-		}
-		output = append(output, item)
-	}
-	return responsesResult(r, model, id, time.Now().Unix(), output), nil
+	return responsesResult(r, model, id, time.Now().Unix(), r.Output), nil
 }
 
 func responsesResult(r *Result, model, id string, created int64, output []any) shared.M {
-	status := "completed"
 	var incomplete any
-	if lengthFinish(r.FinishReason) {
-		status = "incomplete"
-		incomplete = shared.M{"reason": "max_output_tokens"}
+	if r.Incomplete() {
+		details := shared.M{}
+		switch {
+		case r.FinishReason == "refusal":
+			details["reason"] = "content_filter"
+		case lengthFinish(r.FinishReason):
+			details["reason"] = "max_output_tokens"
+		}
+		incomplete = details
 	}
-	return shared.M{"id": id, "object": "response", "created_at": created, "status": status, "model": model, "output": output, "output_text": r.Text, "incomplete_details": incomplete, "usage": responsesUsage(r.Usage)}
+	return shared.M{"id": id, "object": "response", "created_at": created, "status": r.outputStatus(), "model": model, "output": output, "output_text": r.Text, "incomplete_details": incomplete, "usage": responsesUsage(r.Usage)}
 }
 
 func ErrorShape(f *fault.Failure, protocol string) (int, shared.M) {
@@ -119,9 +118,14 @@ func ErrorShape(f *fault.Failure, protocol string) (int, shared.M) {
 	}
 	if f.Status > 0 && f.Kind == "" {
 		status = f.Status
-		typ = "authentication_error"
+		if status == 401 {
+			typ = "authentication_error"
+		}
 	}
 	if protocol == "anthropic" {
+		if typ == "server_error" {
+			typ = "api_error"
+		}
 		switch f.Kind {
 		case "exhausted", "busy", "overload":
 			typ = "overloaded_error"

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 	accountdata "zcode2api/internal/server/account"
-	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
+	wire "zcode2api/internal/server/protocol"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
 )
@@ -159,7 +159,7 @@ func (a *App) insertAccountRow(db storage.Executor, fields shared.M, tokens map[
 		}
 	}
 	id := "acc_" + shared.Random(8)
-	_, err := db.Exec("INSERT INTO accounts(id,label,family,customer_id,group_id,status,enc_tokens,device_mid,app_version,web_cookie_expires_at,business_token_expires_at,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, shared.Fallback(fields["label"], "账号"), shared.Fallback(fields["family"], "bigmodel"), fields["customer_id"], group, shared.Fallback(fields["status"], "unverified"), shared.JSON(enc), shared.Fallback(fields["device_mid"], shared.UUID()), settings.ZCodeFingerprintVersion, fields["web_cookie_expires_at"], fields["business_token_expires_at"], shared.Fallback(fields["source"], "local"), shared.NowMS())
+	_, err := db.Exec("INSERT INTO accounts(id,label,family,customer_id,group_id,status,enc_tokens,device_mid,app_version,web_cookie_expires_at,business_token_expires_at,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, shared.Fallback(fields["label"], "账号"), shared.Fallback(fields["family"], "bigmodel"), fields["customer_id"], group, shared.Fallback(fields["status"], "unverified"), shared.JSON(enc), shared.Fallback(fields["device_mid"], shared.UUID()), wire.ZCodeVersion(), fields["web_cookie_expires_at"], fields["business_token_expires_at"], shared.Fallback(fields["source"], "local"), shared.NowMS())
 	return id, err
 }
 
@@ -196,7 +196,7 @@ func (a *App) fetchBalanceUpstream(ctx context.Context, r shared.M) (shared.M, e
 	if accountdata.LoginJWTExpired(t) {
 		return shared.M{"ok": false, "authFailed": true, "httpStatus": 401, "failure_kind": "auth", "error_code": "login_expired", "reason": "ZCode 登录已过期，请重新授权"}, nil
 	}
-	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/balance?app_version="+settings.ZCodeFingerprintVersion, shared.Str(t["zcode_jwt"]), nil, shared.M{"X-Device-Mid": r["device_mid"], "X-Request-Id": shared.UUID()}, a.jar(shared.Str(r["id"])))
+	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/balance?app_version="+wire.ZCodeVersion(), shared.Str(t["zcode_jwt"]), nil, shared.M{"X-Device-Mid": r["device_mid"], "X-Request-Id": shared.UUID()}, a.jar(shared.Str(r["id"])))
 	if e != nil {
 		return nil, e
 	}
@@ -360,16 +360,30 @@ func (a *App) verify(ctx context.Context, r shared.M) (shared.M, error) {
 	return shared.M{"ok": false, "status": status, "reason": reason}, nil
 }
 
+func (a *App) accountOverview(ctx context.Context, now int64) shared.M {
+	var remaining float64
+	active := 0
+	rows := a.rowsContext(ctx, "SELECT status,last_balance FROM accounts")
+	for _, v := range rows {
+		r := shared.Obj(v)
+		if shared.Str(r["status"]) == "active" {
+			active++
+		}
+		remaining += accountdata.RemainingBalance(accountdata.BalanceData(r), now)
+	}
+	return shared.M{"count": len(rows), "activeCount": active, "totalRemaining": remaining}
+}
+
 func (a *App) summary(ctx context.Context) shared.M {
 	out := shared.M{"accounts": []any{}, "totalRemaining": 0, "totalUsed": 0, "totalGranted": 0, "totalPending": 0, "activeCount": 0, "count": 0}
 	accounts := []any{}
 	now := shared.NowMS()
 	deltas := map[string]any{}
-	for _, v := range a.rows("SELECT account_id,SUM(delta) n FROM (SELECT account_id,MAX(0,MAX(used_units)-MIN(used_units)) delta FROM quota_snapshots WHERE ts>=? GROUP BY account_id,bucket_id) GROUP BY account_id", now-86400000) {
+	for _, v := range a.rowsContext(ctx, "SELECT account_id,SUM(delta) n FROM (SELECT account_id,MAX(0,MAX(used_units)-MIN(used_units)) delta FROM quota_snapshots WHERE ts>=? GROUP BY account_id,bucket_id) GROUP BY account_id", now-86400000) {
 		r := shared.Obj(v)
 		deltas[shared.Str(r["account_id"])] = r["n"]
 	}
-	rows := a.rows("SELECT * FROM accounts ORDER BY created_at")
+	rows := a.rowsContext(ctx, "SELECT * FROM accounts ORDER BY created_at")
 	a.addPlatformNames(ctx, rows)
 	for _, v := range rows {
 		r := shared.Obj(v)

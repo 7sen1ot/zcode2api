@@ -317,7 +317,7 @@ function setupTimeField(main, hooks) {
   return { highlight, close };
 }
 
-async function pageClaims(main) {
+function pageClaims(main) {
   let previews = [], accounts = [], accountsError = '', batchRunning = false, loading = false, page = 1;
   let batchStopped = false, batchRemaining = 0;
   let schedule = null, scheduleSaving = false, scheduleError = '';
@@ -727,5 +727,5 @@ async function pageClaims(main) {
   });
   removalObserver.observe(main, { childList: true, subtree: true });
   removalObserver.observe($('#app-view'), { attributes: true, attributeFilter: ['class'] });
-  await load();
+  void load();
 }

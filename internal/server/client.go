@@ -12,8 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
+	wire "zcode2api/internal/server/protocol"
 	routing "zcode2api/internal/server/proxy"
 	"zcode2api/internal/server/shared"
 )
@@ -165,7 +165,7 @@ func (a *App) api(ctx context.Context, account shared.M, method, path, token str
 	if e != nil {
 		return fault.ApiResult{}, e
 	}
-	version := settings.ZCodeFingerprintVersion
+	version := wire.ZCodeVersion()
 	req.Header.Set("User-Agent", "ZCode/"+version)
 	req.Header.Set("X-ZCode-App-Version", version)
 	req.Header.Set("X-Platform", platform())

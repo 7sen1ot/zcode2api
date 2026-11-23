@@ -20,8 +20,15 @@ import (
 //go:embed src/web/*
 var assets embed.FS
 
-// version is set by release builds; app_version configures the upstream API.
+// version is set by release builds.
 var version = "dev"
+
+func dataDirectory(root string) string {
+	if data := os.Getenv("ZCODE2API_DATA_DIR"); data != "" {
+		return data
+	}
+	return filepath.Join(root, "data")
+}
 
 func main() {
 	root := flag.String("root", ".", "配置文件所在目录")
@@ -52,11 +59,7 @@ func main() {
 	}
 	if *health != "" {
 		if *health == "auto" {
-			data := os.Getenv("ZCODE2API_DATA_DIR")
-			if data == "" {
-				data = filepath.Join(*root, "data")
-			}
-			b, e := os.ReadFile(filepath.Join(data, "ports.json"))
+			b, e := os.ReadFile(filepath.Join(dataDirectory(*root), "ports.json"))
 			var info struct {
 				Port int `json:"gateway_port"`
 			}
@@ -81,12 +84,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
 	}
-	data := os.Getenv("ZCODE2API_DATA_DIR")
-	if data == "" {
-		data = filepath.Join(abs, "data")
-	}
 	web, _ := fs.Sub(assets, "src/web")
-	app, e := server.New(abs, data, web, version)
+	app, e := server.New(abs, dataDirectory(abs), web, version)
 	if e != nil {
 		fmt.Fprintln(os.Stderr, "启动失败:", e)
 		os.Exit(1)

@@ -11,8 +11,8 @@ import (
 	"time"
 	accountdata "zcode2api/internal/server/account"
 	captchasdk "zcode2api/internal/server/captcha"
-	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
+	wire "zcode2api/internal/server/protocol"
 	routing "zcode2api/internal/server/proxy"
 	"zcode2api/internal/server/shared"
 	"zcode2api/internal/server/storage"
@@ -65,7 +65,7 @@ func (a *App) preview(ctx context.Context, r shared.M, dailyOnly bool) (shared.M
 }
 
 func (a *App) billingPreview(ctx context.Context, r shared.M) (shared.M, error) {
-	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/preview?app_version="+settings.ZCodeFingerprintVersion+"&platform="+url.QueryEscape(platform()), shared.Str(a.tokens(shared.Str(r["id"]))["zcode_jwt"]), nil, shared.M{"X-Device-Mid": r["device_mid"]}, a.jar(shared.Str(r["id"])))
+	res, e := a.api(ctx, r, "GET", "/api/v1/zcode-plan/billing/preview?app_version="+wire.ZCodeVersion()+"&platform="+url.QueryEscape(platform()), shared.Str(a.tokens(shared.Str(r["id"]))["zcode_jwt"]), nil, shared.M{"X-Device-Mid": r["device_mid"]}, a.jar(shared.Str(r["id"])))
 	if e != nil {
 		return nil, e
 	}

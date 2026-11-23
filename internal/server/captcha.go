@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 	captchasdk "zcode2api/internal/server/captcha"
-	settings "zcode2api/internal/server/config"
 	"zcode2api/internal/server/fault"
 	childproc "zcode2api/internal/server/process"
+	wire "zcode2api/internal/server/protocol"
 	routing "zcode2api/internal/server/proxy"
 	"zcode2api/internal/server/shared"
 )
@@ -49,7 +49,7 @@ type captchaManager struct {
 
 // Scene configuration is shared by exit. Tickets have a separate, narrower scope.
 func (a *App) captchaSceneKey(ctx context.Context) string {
-	return a.origin + "|" + settings.ZCodeFingerprintVersion + "|" + routing.SelectedProxy(ctx)
+	return a.origin + "|" + wire.ZCodeVersion() + "|" + routing.SelectedProxy(ctx)
 }
 
 func (a *App) captchaSlot() chan struct{} {
@@ -399,7 +399,7 @@ func (a *App) refreshCaptchaScene(key, proxyURL string) {
 func (a *App) fetchCaptchaScene(ctx context.Context, account shared.M) (shared.M, *fault.Failure) {
 	configCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	endpoint := "/api/v1/client/configs?app_version=" + settings.ZCodeFingerprintVersion + "&platform=" + url.QueryEscape(platform())
+	endpoint := "/api/v1/client/configs?app_version=" + wire.ZCodeVersion() + "&platform=" + url.QueryEscape(platform())
 	response, err := a.api(configCtx, account, "GET", endpoint, "", nil, nil, nil)
 	if err != nil {
 		var failure *fault.Failure

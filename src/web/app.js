@@ -155,6 +155,8 @@ document.addEventListener('submit', (e) => {
 }, true);
 
 function showLogin() {
+  pendingRender = null;
+  renderTask?.controller.abort();
   keySecretDialog?.close();
   $('#login-view').classList.remove('hidden');
   $('#app-view').classList.add('hidden');
@@ -200,23 +202,16 @@ const themeToggle = createPixelThemeToggle($('#theme-btn'), {
   checked: !document.documentElement.classList.contains('dark'),
   onChange: checked => setTheme(checked ? 'light' : 'dark'),
 });
-function applyThemeBtn() {
-  const button = $('#theme-btn');
-  const dark = document.documentElement.classList.contains('dark');
-  themeToggle.setChecked(!dark);
-  button.title = dark ? '切换为浅色主题' : '切换为深色主题';
-}
 function setTheme(mode) {
   if (mode === 'system') localStorage.removeItem('z2a_theme');
   else localStorage.setItem('z2a_theme', mode);
   const dark = mode === 'dark' || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.classList.toggle('dark', dark);
-  applyThemeBtn();
+  themeToggle.setChecked(!dark);
 }
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (!localStorage.getItem('z2a_theme')) setTheme('system');
 });
-applyThemeBtn();
 
 function routeValues() {
   if (currentPage === 'dashboard') return {
@@ -259,9 +254,10 @@ async function navigateTo(page) {
   delete $('#main').dataset.fp;
   syncRoute(false);
   renderNav();
-  await render();
+  const task = render();
   window.scrollTo({ top: 0, behavior: 'instant' });
-  return true;
+  await task;
+  return page === currentPage;
 }
 window.addEventListener('hashchange', async () => {
   if (location.hash === '#main' || location.hash === routeURL) return;
@@ -314,17 +310,27 @@ let pendingRender = null;
 let renderTask = null;
 let lastRefreshAt = 0;
 function render(opts = {}) {
-  if (renderTask) { pendingRender = opts; return renderTask; }
-  renderTask = renderPage(opts).finally(async () => {
+  if (renderTask) {
+    pendingRender = opts;
+    if (renderTask.page !== currentPage || renderTask.token !== TOKEN) renderTask.controller.abort();
+    return renderTask.promise;
+  }
+  const task = { page: currentPage, token: TOKEN, controller: new AbortController() };
+  renderTask = task;
+  task.promise = renderPage(opts, task).finally(async () => {
     renderTask = null;
     if (pendingRender) { const next = pendingRender; pendingRender = null; await render(next); }
   });
-  return renderTask;
+  return task.promise;
 }
-async function renderPage(opts = {}) {
+async function renderPage(opts, { page, token, controller: { signal } }) {
   const refreshStartedAt = Date.now();
   const main = $('#main');
-  const page = currentPage;
+  const read = async (path, options) => {
+    const data = await api(path, { ...options, token, signal });
+    if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+    return data;
+  };
   const previousMinHeight = main.style.minHeight;
   const preserveHeight = main.dataset.page === page && main.hasChildNodes();
   // Chart measurement forces layout during a rebuild. Keep the document from
@@ -334,19 +340,23 @@ async function renderPage(opts = {}) {
   if (activeHint && main.contains(activeHint)) closeHint();
   main.querySelector('.page-error')?.remove();
   const previous = main.dataset.page === page ? [...main.childNodes] : [];
-  if (!previous.length) main.innerHTML = `${pagehead(PAGES.find(p => p[0] === page)?.[1] || '控制台')}<span class="visually-hidden" role="status">正在加载…</span>${Z2AEffects.skeleton(page)}`;
+  if (!previous.length) {
+    main.dataset.page = page;
+    main.innerHTML = `${pagehead(PAGES.find(p => p[0] === page)?.[1] || '控制台')}<span class="visually-hidden" role="status">正在加载…</span>${Z2AEffects.skeleton(page)}`;
+  }
   main.dataset.loading = '1';
   main.setAttribute('aria-busy', 'true');
   main.classList.toggle('no-anim', !!opts.swap);
   try {
-    if (currentPage === 'dashboard') await pageDashboard(main);
-    else if (currentPage === 'accounts') await pageAccounts(main);
-    else if (currentPage === 'claims') await pageClaims(main);
-    else if (currentPage === 'usage') await pageUsage(main);
-    else if (currentPage === 'keys') await pageKeys(main);
-    else if (currentPage === 'groups') await pageGroups(main);
-    else if (currentPage === 'settings') await pageSettings(main);
-    else if (currentPage === 'logs') await pageLogs(main, opts);
+    if (page === 'dashboard') await pageDashboard(main, read);
+    else if (page === 'accounts') await pageAccounts(main, read);
+    else if (page === 'claims') pageClaims(main);
+    else if (page === 'usage') await pageUsage(main, read);
+    else if (page === 'keys') await pageKeys(main, read);
+    else if (page === 'groups') await pageGroups(main, read);
+    else if (page === 'settings') await pageSettings(main, read);
+    else if (page === 'logs') await pageLogs(main, read, opts);
+    if (signal.aborted || page !== currentPage) return;
     enhanceSelects(main);
     enhanceTables(main);
     main.querySelectorAll('.section-tabs').forEach(Z2AEffects.tabs);
@@ -354,7 +364,7 @@ async function renderPage(opts = {}) {
     main.dataset.page = page;
     if (page === currentPage) syncRoute();
   } catch (e) {
-    if (page !== currentPage) return;
+    if (signal.aborted || page !== currentPage) return;
     if (opts.live) { Z2ALogs.refreshFailed(main); return; }
     if (previous.length) main.replaceChildren(...previous);
     else main.innerHTML = pagehead(PAGES.find(p => p[0] === page)?.[1] || '控制台');
@@ -389,7 +399,7 @@ function syncSelect(select) { selectControls.get(select)?.sync(); }
 // Both menus and hints stay inside the visible viewport, including short
 // windows and the on-screen keyboard. Dimensions come from the shared tokens.
 function positionFloatingPanel(panel, trigger, matchWidth = false) {
-  panel.style.width = panel.style.minWidth = panel.style.maxHeight = panel.style.maxWidth = '';
+  panel.style.width = panel.style.maxHeight = panel.style.maxWidth = '';
   const styles = getComputedStyle(panel), rect = trigger.getBoundingClientRect();
   const edge = parseFloat(styles.getPropertyValue('--popover-edge'));
   const gap = parseFloat(styles.getPropertyValue('--popover-gap'));
@@ -398,10 +408,8 @@ function positionFloatingPanel(panel, trigger, matchWidth = false) {
   const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
   const availableWidth = Math.max(0, width - edge * 2);
   const availableHeight = Math.max(0, height - edge * 2);
-  const naturalWidth = panel.getBoundingClientRect().width;
+  const preferredWidth = matchWidth ? rect.width : panel.getBoundingClientRect().width;
   panel.style.maxWidth = `${availableWidth}px`;
-  const preferredWidth = matchWidth === 'exact' ? rect.width : matchWidth ? Math.max(rect.width, naturalWidth) : naturalWidth;
-  if (matchWidth === 'exact') panel.style.minWidth = '0';
   panel.style.width = `${Math.min(availableWidth, preferredWidth)}px`;
   const preferredHeight = panel.getBoundingClientRect().height;
   const below = Math.max(0, Math.min(availableHeight, top + height - rect.bottom - gap - edge));
@@ -511,13 +519,13 @@ function enhanceSelects(root) {
       if (list.hasAttribute('popover')) list.showPopover();
       else {
         const styles = getComputedStyle(wrapper);
-        for (const name of ['--control-height', '--control-font-size', '--control-padding', '--control-gap']) list.style.setProperty(name, styles.getPropertyValue(name));
+        for (const name of ['--control-height', '--control-font-size', '--control-padding']) list.style.setProperty(name, styles.getPropertyValue(name));
         document.body.appendChild(list);
       }
       trigger.setAttribute('aria-expanded', 'true');
       openSelection = { trigger, wrapper, list, close };
       paint();
-      positionFloatingPanel(list, trigger, select.hasAttribute('data-match-width') ? 'exact' : true);
+      positionFloatingPanel(list, trigger, true);
       scrollActiveOption();
     };
     const choose = (index) => {
@@ -709,9 +717,9 @@ function accountNameMarkup(a, action = 'detail') {
   return `<button type="button" class="account-name-button" data-act="${action}" data-id="${esc(a.id)}" title="${esc(name)} · ${esc(officialID)}">${avatarMarkup(a.platform_name, a.id)}<span class="account-identity"><span class="account-row-name">${esc(name)}</span><span class="account-row-id">${esc(officialID)}</span></span><span class="account-row-family">${family}</span></button>`;
 }
 
-async function pageDashboard(main) {
+async function pageDashboard(main, read) {
   const hours = window._dashboardHours || 'all';
-  const d = await api('/api/dashboard?' + new URLSearchParams({ hours }));
+  const d = await read('/api/dashboard?' + new URLSearchParams({ hours, view: 'overview' }));
   if (currentPage !== 'dashboard' || hours !== (window._dashboardHours || 'all')) return;
   const usage = d.usage_period || d.usage_total || {};
   const fp = JSON.stringify([d.summary, d.busy_24h, d.cache_24h, d.cache_trend_24h?.byHour, usage, hours, Math.floor(Date.now() / 60000)]);
@@ -789,8 +797,8 @@ function accountQuotaMarkup(account) {
     ${live || pending ? `<details class="quota-details"><summary class="disclosure-link">查看 ${buckets.length + pendingBuckets.length} 项额度</summary><div class="quota-ledger">${live}${pending}</div></details>` : `<p class="quiet-message">${account.has_zcode_jwt ? account.last_balance ? '暂无生效额度' : '等待余额查询' : '网页账号不参与推理'}</p>`}`;
 }
 
-async function pageAccounts(main) {
-  const [accounts, groups] = await Promise.all([api('/api/accounts'), api('/api/groups')]);
+async function pageAccounts(main, read) {
+  const [accounts, groups] = await Promise.all([read('/api/accounts'), read('/api/groups')]);
   window._accCache = accounts;
   const gmap = Object.fromEntries(groups.map((g) => [g.id, g.name]));
   const f = window._accFilter;
@@ -1249,9 +1257,9 @@ function policyLabel(policy) {
   return ({ balanced: '均衡调度', expiring_first: '临期优先', remaining_desc: '剩余额度优先' })[policy] || policy || '未指定';
 }
 
-async function pageUsage(main) {
+async function pageUsage(main, read) {
   const hours = window._usageHours || 24;
-  const s = await api('/api/usage/stats?hours=' + hours);
+  const s = await read('/api/usage/stats?hours=' + hours);
   if (currentPage !== 'usage' || hours !== (window._usageHours || 24)) return;
   let requests = 0, success = 0, input = 0, output = 0;
   for (const row of s.byHour || []) {
@@ -1441,10 +1449,10 @@ function openKeyForm(groups, key) {
       <label class="dialog-field">配额（Token）<input name="quota_limit" inputmode="numeric" value="${esc(values.quota_limit)}" placeholder="留空不限"></label>
       <div class="dialog-field key-field-wide">
         <div class="field-label"><label for="key-chain-mode">分组链</label>${infoTip('指定分组时按列表从上到下尝试，跳过停用的分组。指定列表为空时，这把密钥无分组可用。', '分组链')}</div>
-        <select id="key-chain-mode" name="chain_mode" data-match-width><option value="default">使用默认链</option><option value="custom">指定分组与顺序</option></select>
+        <select id="key-chain-mode" name="chain_mode"><option value="default">使用默认链</option><option value="custom">指定分组与顺序</option></select>
         <div class="key-chain-custom" data-chain-custom hidden>
           <ol class="key-chain-list" aria-label="分组调度顺序"></ol>
-          <div class="key-chain-add"><select name="chain_add" aria-label="选择要加入的分组" data-match-width></select><button type="button" class="btn" data-chain-add>加入</button></div>
+          <div class="key-chain-add"><select name="chain_add" aria-label="选择要加入的分组"></select><button type="button" class="btn" data-chain-add>加入</button></div>
         </div>
       </div>
       <label class="dialog-field">默认思考档位<select name="default_level">
@@ -1534,8 +1542,8 @@ async function copyKey(key, button) {
   }
 }
 
-async function pageKeys(main) {
-  const [keys, groups] = await Promise.all([api('/api/keys'), api('/api/groups')]);
+async function pageKeys(main, read) {
+  const [keys, groups] = await Promise.all([read('/api/keys'), read('/api/groups')]);
   const groupsById = new Map(groups.map(group => [group.id, group]));
   main.innerHTML = `
   ${pagehead('API 密钥',
@@ -1582,7 +1590,7 @@ const GROUP_ROLE_LABELS = { primary: '主力', backup: '备用' };
 function openGroupForm(group) {
   const values = group ?? { role: 'primary', policy: 'balanced', urgent_window_min: 180, enabled: 1 };
   const field = (name, label, control) => `<div class="dialog-field"><div class="field-label"><label for="group-${name}">${label}</label></div>${control}</div>`;
-  const select = (name, options) => `<select id="group-${name}" name="${name}" data-match-width>${options.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select>`;
+  const select = (name, options) => `<select id="group-${name}" name="${name}">${options.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select>`;
   const form = h(`<form class="dialog-form group-form" autocomplete="off">
     <fieldset class="group-fields">
       <legend>基础信息</legend>
@@ -1647,7 +1655,7 @@ async function openGroupAccounts(id) {
   const form = h(`<div class="group-members">
     <div class="management-toolbar">
       <div class="searchbox">${icon('search', 14)}<input data-search aria-label="搜索账号" placeholder="搜索账号或 ID"></div>
-      <select aria-label="关联状态" data-membership data-match-width><option value="all">全部账号</option><option value="member">已在本组</option><option value="eligible">可加入</option><option value="incompatible">类型不符</option></select>
+      <select aria-label="关联状态" data-membership><option value="all">全部账号</option><option value="member">已在本组</option><option value="eligible">可加入</option><option value="incompatible">类型不符</option></select>
     </div>
     <div data-accounts></div>
     <div class="modal-actions"><button type="button" class="btn" data-close>完成</button></div>
@@ -1735,8 +1743,8 @@ async function openGroupAccounts(id) {
   });
 }
 
-async function pageGroups(main) {
-  const { groups, default_chain: defaultChain } = await api('/api/groups?details=1');
+async function pageGroups(main, read) {
+  const { groups, default_chain: defaultChain } = await read('/api/groups?details=1');
   const byId = new Map(groups.map(group => [group.id, group]));
   main.innerHTML = `
   ${pagehead('分组调度链',
@@ -1783,8 +1791,8 @@ async function pageGroups(main) {
   });
 }
 
-async function pageLogs(main, options = {}) {
-  await Z2ALogs.render(main, { api, esc, icon, pagehead, fmtTime, fmtCompactTime, fmtInt, rerender: () => render({ swap: true }) }, options);
+async function pageLogs(main, read, options = {}) {
+  await Z2ALogs.render(main, { api: read, esc, icon, pagehead, fmtTime, fmtCompactTime, fmtInt, rerender: () => render({ swap: true }) }, options);
 }
 async function boot() {
   if (!TOKEN) return showLogin();
@@ -1814,7 +1822,7 @@ async function boot() {
   if (window._refreshTimer) clearInterval(window._refreshTimer);
   window._refreshTimer = setInterval(() => {
     if (session !== TOKEN || document.hidden || $('#app-view').classList.contains('hidden')) return;
-    const period = currentPage === 'logs' ? 1000 : ['dashboard', 'accounts'].includes(currentPage) ? 5000 : 0;
+    const period = currentPage === 'logs' ? Z2ALogs.refreshInterval : ['dashboard', 'accounts'].includes(currentPage) ? 5000 : 0;
     if (!period || Date.now() - lastRefreshAt < period) return;
     const main = $('#main');
     if (document.querySelector('.modal-bg') || main.dataset.loading === '1' || openSelection) return;
