@@ -312,9 +312,7 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		return a.updateStatus(), 202, nil
 	case "GET /api/settings":
 		out := a.config(strings.Fields(settings.EditableSettings + " web_port gateway_port")...)
-		over := shared.Obj(a.setting("config_overrides", shared.M{}))
-		delete(over, "notify_webhook")
-		out["overrides"] = over
+		out["overrides"] = shared.Obj(a.setting("config_overrides", shared.M{}))
 		out["inference_driver"] = settings.InferenceDriver
 		out["zcode_fingerprint_version"] = wire.ZCodeVersion()
 		return out, 200, nil
@@ -389,16 +387,13 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		}
 		a.configMu.Lock()
 		over := shared.Obj(a.setting("config_overrides", shared.M{}))
-		delete(over, "notify_webhook")
 		next := shared.Clone(a.cfg)
-		for _, k := range strings.Fields(settings.EditableSettings) {
+		for k := range strings.FieldsSeq(settings.EditableSettings) {
 			v, present := b[k]
 			if !present {
 				continue
 			}
-			if k == "retry" || k == "http" || k == "outbound_proxy" {
-				v = settings.DeepMerge(shared.Obj(next[k]), shared.Obj(v), false)
-			}
+			v = settings.MergeOverride(k, next[k], v)
 			over[k] = v
 			next[k] = v
 		}

@@ -160,9 +160,6 @@ func watchStreamIdle(timeout time.Duration, cancel context.CancelCauseFunc) (fun
 }
 
 func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions) (result *wire.Result, failure *fault.Failure) {
-	if o.Timing == nil {
-		o.Timing = newTiming()
-	}
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
 	params := shared.Obj(a.configValue("http"))
@@ -179,13 +176,7 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 	firstTimer := timer("first_token_timeout", "上游首字超时", shared.Ms(params["first_token_timeout_ms"]))
 	refreshIdle, stopIdle := watchStreamIdle(shared.Ms(params["idle_timeout_ms"]), cancel)
 	defer stopIdle()
-	var admission *time.Timer
-	if o.Admission > 0 {
-		admission = time.AfterFunc(o.Admission, func() {
-			cancel(&fault.Failure{Kind: "timeout", Code: "retry_budget_exhausted", Message: "故障重试超时"})
-		})
-		timers = append(timers, admission)
-	}
+	admission := timer("retry_budget_exhausted", "故障重试超时", o.Admission)
 	defer func() {
 		for _, t := range timers {
 			t.Stop()
@@ -713,15 +704,11 @@ func (a *App) inferHTTP(parent context.Context, account shared.M, o inferOptions
 	if responseOutput != nil {
 		r.Output = responseOutput.Finish(r)
 	}
-	inputUsage := shared.First(usage["inputTokens"], usage["input_tokens"], usage["prompt_tokens"])
-	outputUsage := shared.First(usage["outputTokens"], usage["output_tokens"], usage["completion_tokens"])
-	if usage["input_tokens"] != nil || inputUsage == nil {
-		usage = shared.Merge(usage, shared.M{"input_tokens": shared.Num(usage["input_tokens"]) + shared.Num(usage["cache_read_input_tokens"]) + shared.Num(usage["cache_creation_input_tokens"])})
-	}
-	r.Usage = wire.NormalizeUsage(usage)
+	var hasInputAndOutput bool
+	r.Usage, hasInputAndOutput = wire.NormalizeUpstreamUsage(usage)
 	if hasOutput {
 		switch {
-		case inputUsage == nil || outputUsage == nil:
+		case !hasInputAndOutput:
 			r.UsageWarning = "upstream_usage_missing"
 		case shared.Num(r.Usage["outputTokens"]) == 0:
 			r.UsageWarning = "upstream_usage_zero"

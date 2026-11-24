@@ -8,10 +8,22 @@ import (
 	"zcode2api/internal/server/shared"
 )
 
-func NormalizeUsage(u shared.M) shared.M {
-	input := shared.Num(shared.First(u["inputTokens"], u["input_tokens"], u["prompt_tokens"], 0))
-	output := shared.Num(shared.First(u["outputTokens"], u["output_tokens"], u["completion_tokens"], 0))
-	return shared.M{"inputTokens": input, "outputTokens": output, "totalTokens": shared.Num(shared.First(u["totalTokens"], u["total_tokens"], input+output)), "reasoningTokens": shared.Num(shared.First(u["reasoningTokens"], shared.Obj(u["output_tokens_details"])["reasoning_tokens"], shared.Obj(u["completion_tokens_details"])["reasoning_tokens"], 0)), "cacheReadTokens": shared.Num(shared.First(u["cacheReadTokens"], u["cachedInputTokens"], u["cache_read_input_tokens"], shared.Obj(u["input_tokens_details"])["cached_tokens"], shared.Obj(u["prompt_tokens_details"])["cached_tokens"], 0)), "cacheWriteTokens": shared.Num(shared.First(u["cacheWriteTokens"], u["cacheCreationTokens"], u["cache_creation_input_tokens"], 0))}
+func NormalizeUpstreamUsage(u shared.M) (usage shared.M, hasInputAndOutput bool) {
+	inputValue := shared.First(u["inputTokens"], u["input_tokens"], u["prompt_tokens"])
+	outputValue := shared.First(u["outputTokens"], u["output_tokens"], u["completion_tokens"])
+	input, output := shared.Num(inputValue), shared.Num(outputValue)
+	// Anthropic reports uncached input and cache usage separately.
+	if u["inputTokens"] == nil && (u["input_tokens"] != nil || inputValue == nil) {
+		input = input + shared.Num(u["cache_read_input_tokens"]) + shared.Num(u["cache_creation_input_tokens"])
+	}
+	return shared.M{
+		"inputTokens":      input,
+		"outputTokens":     output,
+		"totalTokens":      shared.Num(shared.First(u["totalTokens"], u["total_tokens"], input+output)),
+		"reasoningTokens":  shared.Num(shared.First(u["reasoningTokens"], shared.Obj(u["output_tokens_details"])["reasoning_tokens"], shared.Obj(u["completion_tokens_details"])["reasoning_tokens"])),
+		"cacheReadTokens":  shared.Num(shared.First(u["cacheReadTokens"], u["cachedInputTokens"], u["cache_read_input_tokens"], shared.Obj(u["input_tokens_details"])["cached_tokens"], shared.Obj(u["prompt_tokens_details"])["cached_tokens"])),
+		"cacheWriteTokens": shared.Num(shared.First(u["cacheWriteTokens"], u["cacheCreationTokens"], u["cache_creation_input_tokens"])),
+	}, inputValue != nil && outputValue != nil
 }
 
 func chatUsage(u shared.M) shared.M {

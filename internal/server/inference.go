@@ -32,9 +32,6 @@ func (a *App) state(id string) *accountState {
 }
 
 func (a *App) infer(ctx context.Context, o inferOptions) (*wire.Result, *fault.Failure) {
-	if o.Timing == nil {
-		o.Timing = newTiming()
-	}
 	o.Recovery = &poolRecoveryLease{}
 	defer a.releasePoolRecovery(o.Recovery)
 	p := a.retryParams()
@@ -113,7 +110,7 @@ func (a *App) infer(ctx context.Context, o inferOptions) (*wire.Result, *fault.F
 		for id, t := range throttled {
 			if throttleDeadline.IsZero() || t.After(now) || round[id] {
 				skip[id] = true
-				if o.RecheckAt.IsZero() || t.Before(o.RecheckAt) {
+				if t.Before(o.RecheckAt) {
 					o.RecheckAt = t
 				}
 			}

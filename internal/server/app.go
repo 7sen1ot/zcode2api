@@ -30,32 +30,6 @@ type accountState struct {
 	QuotaExhausted  bool
 }
 
-type responseEntry struct {
-	Key             string
-	Affinity        string
-	InstructionMode string
-	History         *responseHistory
-	Tools           *responseToolSet
-	ToolOptions     shared.M
-	Response        shared.M
-	Bytes           int
-}
-
-type responseToolSet struct {
-	definitions []any
-	bytes       int
-	refs        int // Stored entries, guarded by App.mu.
-}
-
-type responseHistory struct {
-	parent     *responseHistory
-	items      []any
-	count      int
-	bytes      int
-	totalBytes int
-	refs       int // Stored entries and child nodes, guarded by App.mu.
-}
-
 type profileEntry struct {
 	Key   string
 	Name  any
@@ -82,9 +56,7 @@ type App struct {
 	scheduleMu            sync.Mutex
 	waiters               []*accountWaiter
 	sticky                stickyAccounts
-	responses             map[string]responseEntry
-	responseOrder         []string
-	responseBytes         int
+	responses             responseStore
 	clients               map[string]*http.Client
 	jars                  map[string]*diskJar
 	claimLocks            map[string]bool
@@ -143,13 +115,33 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 		out = io.MultiWriter(os.Stdout, lf)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &App{db: d, data: data, secret: secret, log: log.New(out, "", log.LstdFlags), logfile: lf, web: web, cfg: cfg, ctx: ctx, cancel: cancel, states: map[string]*accountState{}, responses: map[string]responseEntry{}, clients: map[string]*http.Client{}, jars: map[string]*diskJar{}, claimLocks: map[string]bool{}, claimReschedule: make(chan struct{}, 1), flowLocks: map[string]bool{}, reauth: map[string]int64{}, pollDue: map[string]int64{}, polling: map[string]bool{}, origin: "https://zcode.z.ai"}
-	a.root = root
-	a.version = buildVersion
-	a.proxyHealthReschedule = make(chan struct{}, 1)
-	a.pollWake = make(chan struct{}, 1)
-	a.usageLogCleanupWake = make(chan struct{}, 1)
-	a.claimPreviewSlots = make(chan struct{}, shared.AccountOperationConcurrency)
+	a := &App{
+		db:                    d,
+		data:                  data,
+		secret:                secret,
+		root:                  root,
+		version:               buildVersion,
+		log:                   log.New(out, "", log.LstdFlags),
+		logfile:               lf,
+		web:                   web,
+		cfg:                   cfg,
+		ctx:                   ctx,
+		cancel:                cancel,
+		origin:                "https://zcode.z.ai",
+		states:                make(map[string]*accountState),
+		clients:               make(map[string]*http.Client),
+		jars:                  make(map[string]*diskJar),
+		claimLocks:            make(map[string]bool),
+		claimPreviewSlots:     make(chan struct{}, shared.AccountOperationConcurrency),
+		claimReschedule:       make(chan struct{}, 1),
+		flowLocks:             make(map[string]bool),
+		reauth:                make(map[string]int64),
+		pollDue:               make(map[string]int64),
+		polling:               make(map[string]bool),
+		pollWake:              make(chan struct{}, 1),
+		usageLogCleanupWake:   make(chan struct{}, 1),
+		proxyHealthReschedule: make(chan struct{}, 1),
+	}
 	a.balances.slots = make(chan struct{}, shared.AccountOperationConcurrency)
 	saved := shared.Obj(a.setting("config_overrides", shared.M{}))
 	migrateBalancePoll := !shared.Truth(a.setting("balance_poll_30s_migrated", false))
@@ -162,10 +154,7 @@ func New(root, data string, web fs.FS, buildVersion string) (*App, error) {
 	}
 	settings.MigrateTemplateSettings(clean)
 	for k, v := range clean {
-		if k == "http" || k == "retry" || k == "outbound_proxy" {
-			v = settings.DeepMerge(shared.Obj(cfg[k]), shared.Obj(v), false)
-		}
-		a.cfg[k] = v
+		a.cfg[k] = settings.MergeOverride(k, cfg[k], v)
 	}
 	// Migrate the previous five-second default once. Preserve custom intervals
 	// and allow later explicit edits, including opting back into five seconds.
@@ -320,10 +309,11 @@ func readBody(w http.ResponseWriter, r *http.Request) (shared.M, error) {
 	if e != nil {
 		return nil, &fault.Failure{Status: 413, Kind: "invalid", Code: "body_too_large", Message: "请求体超过限制"}
 	}
-	if len(strings.TrimSpace(string(b))) == 0 {
+	body := string(b)
+	if strings.TrimSpace(body) == "" {
 		return shared.M{}, nil
 	}
-	v := shared.Parse(string(b), nil)
+	v := shared.Parse(body, nil)
 	m, ok := v.(map[string]any)
 	if !ok {
 		return nil, fault.Invalid("请求体必须为 JSON 对象")

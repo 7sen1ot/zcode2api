@@ -1463,7 +1463,7 @@ function openKeyForm(groups, key) {
       </select></label>
       <label class="dialog-field">黏住分钟<input name="sticky_minutes" type="number" min="0" step="any" value="${esc(values.sticky_minutes)}" placeholder="0"></label>
       <label class="dialog-field key-field-wide">OpenAI 指令模式<select name="default_instruction_mode">
-        <option value="">协议默认（scoped）</option>
+        <option value="">协议默认（history）</option>
         <option value="history">history（保留指令位置）</option>
         <option value="scoped">scoped（顶层系统指令）</option>
         <option value="strict">strict（严格转换）</option>

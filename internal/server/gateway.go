@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	settings "zcode2api/internal/server/config"
@@ -75,25 +74,16 @@ func (a *App) GatewayHandler() http.Handler {
 			return
 		case strings.HasPrefix(path, "/v1/responses/") && (r.Method == "GET" || r.Method == "DELETE"):
 			id := strings.TrimPrefix(path, "/v1/responses/")
-			a.mu.Lock()
-			entry, ok := a.responses[id]
-			ok = ok && entry.Key == shared.Str(k["id"])
+			keyID := shared.Str(k["id"])
 			if r.Method == "DELETE" {
-				if ok {
-					a.forgetResponse(id)
-				}
-				a.mu.Unlock()
-				writeJSON(w, 200, shared.M{"id": id, "object": "response", "deleted": ok})
+				writeJSON(w, 200, shared.M{"id": id, "object": "response", "deleted": a.responses.delete(id, keyID)})
 				return
 			}
+			entry, ok := a.responses.get(id, keyID, true)
 			if ok {
-				a.touchResponse(id)
-			}
-			a.mu.Unlock()
-			if !ok {
-				writeJSON(w, 404, shared.M{"error": shared.M{"type": "invalid_request_error", "code": "response_not_found", "message": "响应不存在（仅保留最近 100 条，重启后失效）"}})
-			} else {
 				writeJSON(w, 200, entry.Response)
+			} else {
+				writeJSON(w, 404, shared.M{"error": shared.M{"type": "invalid_request_error", "code": "response_not_found", "message": fmt.Sprintf("响应不存在（仅保留最近 %d 条，重启后失效）", maxStoredResponses)}})
 			}
 			return
 		case r.Method == "POST" && (path == "/v1/chat/completions" || path == "/v1/messages" || path == "/v1/responses" || path == "/v1/messages/count_tokens"):
@@ -102,9 +92,10 @@ func (a *App) GatewayHandler() http.Handler {
 				a.sendFailure(w, e.(*fault.Failure), protocol)
 				return
 			}
-			model := a.resolveModel(shared.Str(body["model"]))
+			requestedModel := shared.Str(body["model"])
+			model := a.resolveModel(requestedModel)
 			w.Header().Set("X-Upstream-Model", model)
-			if wire.ModelSuffix.MatchString(shared.Str(body["model"])) {
+			if wire.ModelSuffix.MatchString(requestedModel) {
 				w.Header().Set("X-Model-Context-Hint", "not-enforced")
 			}
 			if !a.modelAllowed(k, model) {
@@ -302,10 +293,8 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 			a.sendFailure(w, fault.Invalid("input 必须为字符串或数组").(*fault.Failure), protocol)
 			return
 		}
-		a.mu.Lock()
-		entry, ok := a.responses[shared.Str(body["previous_response_id"])]
-		a.mu.Unlock()
-		if !ok || entry.Key != shared.Str(k["id"]) {
+		entry, ok := a.responses.get(shared.Str(body["previous_response_id"]), shared.Str(k["id"]), false)
+		if !ok {
 			writeJSON(w, 404, shared.M{"error": shared.M{"type": "invalid_request_error", "code": "response_not_found", "message": "previous_response_id 不存在或不属于当前密钥"}})
 			return
 		}
@@ -414,8 +403,8 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	}
 	if protocol == "responses" && body["store"] != false {
 		entry := responseEntry{Key: shared.Str(k["id"]), Affinity: affinity, Response: response}
-		// Only the cache-friendly opt-in carries forward when the next turn omits a mode.
-		if instructions.Mode == "history" {
+		// Keep the instruction layout stable when the next turn omits a mode.
+		if instructions.Mode == "history" || instructions.Mode == "scoped" {
 			entry.InstructionMode = instructions.Mode
 		}
 		if keepTools {
@@ -428,7 +417,7 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 				shared.CopyFields(entry.ToolOptions, payload, "tool_choice", "parallel_tool_calls")
 			}
 		}
-		a.rememberResponse(entry, previous.History, inputItems(body["input"]), result.ContinuationItem())
+		a.responses.remember(entry, previous.History, inputItems(body["input"]), result.ContinuationItem())
 	}
 	if stream != nil {
 		stream.Complete(result, response)
@@ -436,107 +425,4 @@ func (a *App) handleInference(w http.ResponseWriter, r *http.Request, body, k sh
 	}
 	w.Header().Set("X-Retry-Attempts", fmt.Sprint(result.Attempts))
 	writeJSON(w, 200, response)
-}
-
-func (e responseEntry) reuseTools(payload shared.M) *responseToolSet {
-	// An explicit tools field, including an empty list, replaces the previous set.
-	if _, explicit := payload["tools"]; explicit || e.Tools == nil {
-		return nil
-	}
-	payload["tools"] = e.Tools.definitions
-	for field, value := range e.ToolOptions {
-		if _, explicit := payload[field]; !explicit {
-			payload[field] = value
-		}
-	}
-	return e.Tools
-}
-
-func (a *App) forgetResponse(id string) {
-	if e, ok := a.responses[id]; ok {
-		a.responseBytes -= e.Bytes
-		delete(a.responses, id)
-		if e.Tools != nil {
-			e.Tools.refs--
-			if e.Tools.refs == 0 {
-				a.responseBytes -= e.Tools.bytes
-			}
-		}
-		for h := e.History; h != nil; h = h.parent {
-			h.refs--
-			if h.refs > 0 {
-				break
-			}
-			a.responseBytes -= h.bytes
-		}
-	}
-	if i := slices.Index(a.responseOrder, id); i >= 0 {
-		a.responseOrder = slices.Delete(a.responseOrder, i, i+1)
-	}
-}
-
-func (a *App) touchResponse(id string) {
-	if i := slices.Index(a.responseOrder, id); i >= 0 {
-		a.responseOrder = slices.Delete(a.responseOrder, i, i+1)
-	}
-	a.responseOrder = append(a.responseOrder, id)
-}
-
-func (h *responseHistory) withInput(input []any) []any {
-	items := make([]any, h.count+len(input))
-	copy(items[h.count:], input)
-	for node := h; node != nil; node = node.parent {
-		copy(items[node.count-len(node.items):node.count], node.items)
-	}
-	return items
-}
-
-func (a *App) rememberResponse(entry responseEntry, parent *responseHistory, input []any, assistant any) {
-	const maxResponseBytes = 64 << 20
-	items := make([]any, 0, len(input)+1)
-	items = append(items, input...)
-	if assistant != nil {
-		items = append(items, assistant)
-	}
-	// Share history across continuations and branches, including when a parent
-	// response is later evicted or explicitly deleted.
-	itemBytes := len(shared.JSON(items))
-	history := &responseHistory{parent: parent, items: items, count: len(items), bytes: itemBytes, totalBytes: itemBytes}
-	if parent != nil {
-		history.count += parent.count
-		history.totalBytes += parent.totalBytes
-	}
-	entry.Bytes = len(shared.JSON(entry.Response)) + len(entry.Affinity) + len(entry.InstructionMode)
-	toolBytes := 0
-	if entry.Tools != nil {
-		entry.Bytes += len(shared.JSON(entry.ToolOptions))
-		toolBytes = entry.Tools.bytes
-	}
-	if entry.Bytes+history.totalBytes+toolBytes > maxResponseBytes {
-		return
-	}
-	entry.History = history
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	id := shared.Str(entry.Response["id"])
-	a.forgetResponse(id)
-	a.responses[id] = entry
-	a.responseOrder = append(a.responseOrder, id)
-	a.responseBytes += entry.Bytes
-	if entry.Tools != nil {
-		entry.Tools.refs++
-		if entry.Tools.refs == 1 {
-			a.responseBytes += toolBytes
-		}
-	}
-	for h := history; h != nil; h = h.parent {
-		h.refs++
-		if h.refs > 1 {
-			break
-		}
-		a.responseBytes += h.bytes
-	}
-	for len(a.responses) > 100 || a.responseBytes > maxResponseBytes {
-		a.forgetResponse(a.responseOrder[0])
-	}
 }

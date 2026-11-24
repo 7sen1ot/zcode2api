@@ -67,6 +67,15 @@ func DeepMerge(base, over shared.M, unknown bool) shared.M {
 	return out
 }
 
+func MergeOverride(key string, current, override any) any {
+	switch key {
+	case "http", "retry", "outbound_proxy":
+		return DeepMerge(shared.Obj(current), shared.Obj(override), false)
+	default:
+		return override
+	}
+}
+
 // Drop retired persisted settings while preserving sparse overrides and aliases.
 func KnownConfig(base, over shared.M) shared.M {
 	out := shared.M{}

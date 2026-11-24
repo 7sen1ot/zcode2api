@@ -24,7 +24,7 @@ type InstructionContext struct {
 
 func NewInstructionContext(mode string) (*InstructionContext, error) {
 	if mode == "" {
-		mode = "scoped"
+		mode = "history"
 	}
 	if mode != "scoped" && mode != "strict" && mode != "history" {
 		return nil, fault.Invalid("instruction_mode 只能为 scoped、strict 或 history")
