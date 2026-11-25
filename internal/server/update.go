@@ -224,7 +224,7 @@ func (a *App) checkSource(ctx context.Context) (*updater.SourceCheck, error) {
 		return nil, err
 	}
 	defer release()
-	return updater.CheckGitHubSource(ctx, client)
+	return updater.CheckGitHubSource(ctx, client, a.version)
 }
 
 func checkUpdateRelease(ctx context.Context, client *http.Client, cache updater.UpdateReleaseCache, mirror string) (updater.UpdateReleaseCache, error) {

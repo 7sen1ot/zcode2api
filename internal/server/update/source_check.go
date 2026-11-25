@@ -20,6 +20,7 @@ import (
 )
 
 var sourceCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var sourceVersionCommit = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 type SourceCheck struct {
 	LocalCommit  string `json:"local_commit,omitempty"`
@@ -181,7 +182,7 @@ func sourceAncestor(ctx context.Context, root, older, newer string) (bool, error
 	return false, fmt.Errorf("无法比较本地与远端的提交历史")
 }
 
-func CheckGitHubSource(ctx context.Context, client *http.Client) (*SourceCheck, error) {
+func CheckGitHubSource(ctx context.Context, client *http.Client, version string) (*SourceCheck, error) {
 	response, err := UpdateGET(ctx, client, "https://api.github.com/repos/"+UpdateRepository+"/commits?per_page=1", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("无法查询 GitHub 默认分支的提交：%w", err)
@@ -203,8 +204,45 @@ func CheckGitHubSource(ctx context.Context, client *http.Client) (*SourceCheck, 
 			}
 		}
 	}
-	if result.LocalCommit == result.RemoteCommit {
+	if result.LocalCommit == "" && sourceVersionCommit.MatchString(version) {
+		result.LocalCommit = version
+	}
+	if result.LocalCommit == "" {
+		return result, nil
+	}
+	if strings.HasPrefix(result.RemoteCommit, result.LocalCommit) {
+		result.LocalCommit = result.RemoteCommit
 		result.Relation = "current"
+		return result, nil
+	}
+	comparison, err := UpdateGET(ctx, client, "https://api.github.com/repos/"+UpdateRepository+"/compare/"+result.LocalCommit+"..."+result.RemoteCommit, "", "")
+	if err != nil {
+		return nil, fmt.Errorf("无法比较本地构建与远端提交：%w", err)
+	}
+	defer comparison.Body.Close()
+	var compared struct {
+		Status     string `json:"status"`
+		BaseCommit struct {
+			SHA string `json:"sha"`
+		} `json:"base_commit"`
+	}
+	if err := json.NewDecoder(io.LimitReader(comparison.Body, 2<<20)).Decode(&compared); err != nil ||
+		!sourceCommit.MatchString(compared.BaseCommit.SHA) || !strings.HasPrefix(compared.BaseCommit.SHA, result.LocalCommit) {
+		return nil, fmt.Errorf("GitHub 未返回有效的提交比较结果")
+	}
+	result.LocalCommit = compared.BaseCommit.SHA
+	// GitHub describes the remote head relative to the local base.
+	switch compared.Status {
+	case "identical":
+		result.Relation = "current"
+	case "ahead":
+		result.Relation = "behind"
+	case "behind":
+		result.Relation = "ahead"
+	case "diverged":
+		result.Relation = "diverged"
+	default:
+		return nil, fmt.Errorf("GitHub 未返回有效的提交关系")
 	}
 	return result, nil
 }

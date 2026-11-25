@@ -40,7 +40,7 @@ func DetectUpdateSupport(version string) UpdateSupport {
 		Mode:        "manual",
 		Reason:      "当前部署支持检查版本，请使用发行包手动更新",
 		CanCheck:    validVersion && !localVersion,
-		SourceBuild: version == "dev" || strings.HasPrefix(version, "src-") || localVersion,
+		SourceBuild: version == "dev" || strings.HasPrefix(version, "src-") || localVersion || sourceVersionCommit.MatchString(version),
 	}
 	if !support.CanCheck {
 		support.Reason = "当前构建请通过原部署方式手动更新"

@@ -32,7 +32,7 @@ func defaults() shared.M {
 		"usage_log_retention_days": DefaultUsageLogRetentionDays,
 		"github_update_mirror":     "",
 		"retry":                    shared.M{"rate_limit_retry_interval_ms": 1000, "max_attempts": 10, "base_delay_ms": 2000, "backoff_factor": 2, "max_delay_ms": 60000, "jitter": true, "busy_wait_sec": 60, "total_budget_ms": 120000, "min_request_window_sec": 60},
-		"aliases":                  shared.M{"glm-flash": "GLM-5.3-Flash", "glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3"}, "bind_public": false, "proxy_url": "", "outbound_proxy": routing.ProxyDefaults(), "trust_proxy": false, "admin_bind_public": false,
+		"aliases":                  shared.M{"glm-flash": "GLM-5.3-Flash", "glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3", "glm-5.4": "GLM-5.4", "glm-5.5": "GLM-5.5"}, "bind_public": false, "proxy_url": "", "outbound_proxy": routing.ProxyDefaults(), "trust_proxy": false, "admin_bind_public": false,
 	}
 }
 
