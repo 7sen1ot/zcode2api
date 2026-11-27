@@ -123,9 +123,9 @@ func (a *App) newClaimCaptchaSession(ctx context.Context, scope captchaTicketSco
 	return token, nil
 }
 
-func (a *App) cancelClaimVerification(token string) {
+func (a *App) cancelClaimVerification(token string) *claimCaptchaSession {
 	if !routing.HexIDPattern.MatchString(token) {
-		return
+		return nil
 	}
 	key := shared.Hash(token)
 	a.captcha.mu.Lock()
@@ -138,6 +138,7 @@ func (a *App) cancelClaimVerification(token string) {
 	if session != nil {
 		session.release()
 	}
+	return session
 }
 
 // The nonce is local request binding, not a claim about the browser's public IP.

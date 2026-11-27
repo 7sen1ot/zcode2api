@@ -79,6 +79,9 @@ func (a *App) reconcilePendingClaim(parent context.Context, account shared.M, pl
 		}
 		end := accountdata.SecondsMS(owned["ends_at"])
 		detail := shared.M{"stage": "claim_confirmation", "reconciled": true}
+		if diagnostic, ok := parent.Value(claimCaptchaDiagnosticKey{}).(shared.M); ok {
+			detail = claimLogDetail(detail, diagnostic)
+		}
 		tx, err := a.db.BeginTx(ctx, nil)
 		if err != nil {
 			return nil, claimResultUnknown(started)

@@ -240,8 +240,8 @@ func (a *App) adminRoute(r *http.Request, b shared.M) (any, int, error) {
 		query := r.URL.Query()
 		return wrap(a.claimVerification(ctx, query.Get("account_id"), query.Get("plan_id"), query.Get("config_only") == "1"))
 	case "POST /api/claims/verification/cancel":
-		a.cancelClaimVerification(shared.Str(b["verification_session"]))
-		return ok, 200, nil
+		session := a.cancelClaimVerification(shared.Str(b["verification_session"]))
+		return ok, 200, a.logBrowserClaimVerification(session, b)
 	case "GET /api/claims/schedule":
 		return a.dailyClaimSchedule(), 200, nil
 	case "POST /api/claims/claim":

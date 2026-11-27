@@ -1082,6 +1082,7 @@ details[open] > .disclosure-heading::before { transform: translateY(-.125rem) ro
 .daily-claim-status { display: flex; grid-column: 2; grid-row: 1; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
 .daily-claim-action { display: flex; grid-column: -2; grid-row: 1; align-items: center; justify-content: flex-end; gap: 8px; }
 .daily-claim-action > .btn { min-width: 5rem; min-height: 30px; height: 30px; padding: 0 12px; font-size: var(--font-size-caption); }
+.daily-claim-action > [data-claim] { width: 6rem; }
 .daily-claim-feedback { min-width: 0; margin: 0; color: var(--muted-fg); font-size: var(--font-size-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .daily-claim-feedback:empty, #claims-summary:empty { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .daily-claim-feedback.error { color: var(--destructive); }

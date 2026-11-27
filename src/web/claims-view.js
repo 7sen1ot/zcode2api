@@ -69,7 +69,7 @@ function loadClaimCaptchaScript() {
   return claimCaptchaScript;
 }
 
-function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss }) {
+function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss, diagnostic = {} }) {
   if (signal.aborted) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
     const mountID = `claim-captcha-${++claimCaptchaSequence}`;
@@ -77,14 +77,27 @@ function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss })
     const trigger = $('button', host);
     document.body.append(host);
     let instance, settled = false, traceless = false, waitingForChallenge = false, readyTimer, initializationTimer;
+    const startedAt = performance.now();
+    let initializedAt, readyAt, verificationStartedAt;
+    Object.assign(diagnostic, { sdk_stage: 'sdk_load', sdk_initialized: false, sdk_executed: false });
     const validFor = config.expires_at - Date.now() - 1000;
-    const deadline = setTimeout(() => finish(null, new Error(
+    const fail = (message, code = 'captcha_runtime_error') => finish(null, Object.assign(new Error(message), { code }));
+    const deadline = setTimeout(() => fail(
       validFor < 120000 ? '验证会话已过期，请重新领取。' : '验证超时，请重新领取。',
-    )), Math.max(0, Math.min(120000, validFor)));
+      'captcha_timeout',
+    ), Math.max(0, Math.min(120000, validFor)));
     const cancel = () => finish(null);
     function finish(ticket, error) {
       if (settled) return;
       settled = true;
+      const finishedAt = performance.now();
+      diagnostic.sdk_total_ms = Math.round(finishedAt - startedAt);
+      if (diagnostic.sdk_stage === 'sdk_load') diagnostic.sdk_load_ms = diagnostic.sdk_total_ms;
+      if (diagnostic.sdk_stage === 'sdk_init') diagnostic.sdk_init_ms = Math.round(finishedAt - initializedAt);
+      if (readyAt !== undefined) diagnostic.sdk_ready_wait_ms = Math.round((verificationStartedAt ?? finishedAt) - readyAt);
+      diagnostic.browser_visibility = document.visibilityState;
+      if (verificationStartedAt !== undefined) diagnostic.sdk_verify_ms = Math.round(finishedAt - verificationStartedAt);
+      if (error && !error.code) error.code = 'captcha_runtime_error';
       clearTimeout(deadline);
       clearTimeout(readyTimer);
       clearTimeout(initializationTimer);
@@ -100,25 +113,36 @@ function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss })
     window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
     loadClaimCaptchaScript().then(() => {
       if (settled) return;
-      initializationTimer = setTimeout(() => finish(null, new Error('验证组件初始化超时，请重试。')), 15000);
+      diagnostic.sdk_load_ms = Math.round(performance.now() - startedAt);
+      diagnostic.sdk_stage = 'sdk_init';
+      initializedAt = performance.now();
+      initializationTimer = setTimeout(() => fail('验证组件初始化超时，请重试。', 'captcha_timeout'), 15000);
       return window.initAliyunCaptcha({
         SceneId: config.scene_id,
         mode: 'popup', language: 'cn', element: `#${mountID}`, button: `#${mountID}-start`, delayBeforeSuccess: false,
         getInstance(value) {
           if (settled) { try { value?.destroy?.(); } catch {} return; }
-          if (!value) { finish(null, new Error('验证组件初始化失败，请重试。')); return; }
+          if (!value) { fail('验证组件初始化失败，请重试。'); return; }
           clearTimeout(initializationTimer);
           const firstInstance = !instance;
           instance = value;
           if (!firstInstance) return;
+          diagnostic.sdk_initialized = true;
+          diagnostic.sdk_init_ms = Math.round(performance.now() - initializedAt);
+          diagnostic.sdk_stage = 'sdk_ready';
+          readyAt = performance.now();
           traceless = typeof value.startTracelessVerification === 'function';
           // The SDK needs time to become ready. Its trigger also handles scenes without a challenge.
           readyTimer = setTimeout(() => {
             if (settled) return;
             if (document.hidden) {
-              finish(null, new Error('请回到领卡页面后重试。'));
+              fail('请回到领卡页面后重试。', 'captcha_page_hidden');
               return;
             }
+            diagnostic.sdk_ready_wait_ms = Math.round(performance.now() - readyAt);
+            diagnostic.sdk_stage = 'sdk_verify';
+            diagnostic.sdk_executed = true;
+            verificationStartedAt = performance.now();
             onStart();
             trigger.click();
           }, 2100);
@@ -126,9 +150,9 @@ function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss })
         success(param) {
           if (settled) return;
           if (config.expires_at <= Date.now() + 1000) {
-            finish(null, new Error('验证会话已过期，请重新领取。'));
+            fail('验证会话已过期，请重新领取。', 'captcha_expired');
           } else if (typeof param !== 'string' || !param.trim()) {
-            finish(null, new Error('验证码结果无效，请重试。'));
+            fail('验证码结果无效，请重试。', 'captcha_invalid_result');
           } else {
             finish({ captcha_verify_param: param, captcha_region: config.region, verification_session: config.verification_session });
           }
@@ -137,10 +161,11 @@ function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss })
           if (settled) return;
           const result = value?.Result || value?.result || value || {};
           const code = String(result.VerifyCode || result.verifyCode || value?.verifyCode || '');
+          if (/^[FT][0-9]{3}$/.test(code)) diagnostic.verify_code = code;
           // The first traceless refusal can lead to the SDK's own interactive challenge.
           if (code === 'F001' && traceless && !waitingForChallenge) {
             waitingForChallenge = true;
-            onFeedback('请完成弹出的验证码。');
+            onFeedback('等待浏览器验证，如出现验证码请完成。');
             return;
           }
           if (code === 'F015') {
@@ -149,12 +174,12 @@ function requestClaimCaptcha(config, signal, { onStart, onFeedback, onDismiss })
           }
           const expired = ['F008', 'F014', 'F018', 'F019', 'F020'].includes(code);
           const suffix = /^[FT][0-9]{3}$/.test(code) ? `（${code}）` : '';
-          finish(null, new Error(expired ? '验证会话已失效，请重新领取。' : `安全验证未通过${suffix}，请重试。`));
+          finish(null, Object.assign(new Error(expired ? '验证会话已失效，请重新领取。' : `安全验证未通过${suffix}，请重试。`), { code: code || 'captcha_verification_failed' }));
         },
         onError(error) {
           if (settled) return;
           const code = String(error?.code || '');
-          finish(null, new Error(`验证组件出错${/^[A-Za-z0-9_.-]{1,64}$/.test(code) ? `（${code}）` : ''}，请重试。`));
+          finish(null, Object.assign(new Error(`验证组件出错${/^[A-Za-z0-9_.-]{1,64}$/.test(code) ? `（${code}）` : ''}，请重试。`), { code: 'captcha_runtime_error' }));
         },
         onClose(reason) {
           if (settled || reason !== 'userDismiss') return;
@@ -181,6 +206,29 @@ function queueClaimBrowserVerification(signal, verify) {
     if (signal.aborted) cancel();
     else signal.addEventListener('abort', cancel, { once: true });
     pending.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
+  });
+}
+
+function waitForClaimPage(signal) {
+  const ready = () => !document.hidden && !document.querySelector('.modal-bg:not(.closing)');
+  if (signal.aborted) return Promise.resolve(false);
+  if (ready()) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const observer = new MutationObserver(check);
+    function finish(value) {
+      observer.disconnect();
+      document.removeEventListener('visibilitychange', check);
+      signal.removeEventListener('abort', check);
+      resolve(value);
+    }
+    function check() {
+      if (signal.aborted) finish(false);
+      else if (ready()) finish(true);
+    }
+    document.addEventListener('visibilitychange', check);
+    signal.addEventListener('abort', check, { once: true });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    check();
   });
 }
 
@@ -339,17 +387,13 @@ function pageClaims(main) {
     return previews.map(preview => ({ ...preview, plans: (preview.plans || []).filter(plan => !records.get(claimJobKey({ account_id: preview.account_id, plan_id: plan.plan_id }))?.ok) }));
   };
   const jobs = () => visiblePreviews().flatMap(preview => claimablePlans(preview).map(plan => ({ account_id: preview.account_id, plan_id: plan.plan_id })));
-  const batchJobs = () => {
-    const results = manualClaimResults();
-    return jobs().filter(job => !claimNeedsVerification(results.get(claimJobKey(job))));
-  };
   const accountFor = id => accounts.find(account => account.id === id) || { label: previews.find(preview => preview.account_id === id)?.label };
   const syncBusy = () => {
     if (!active()) return;
     const busy = batchRunning || pendingClaims.size > 0;
     const pendingAccounts = new Set([...pendingClaims.values()].map(entry => entry.job.account_id));
     const results = manualClaimResults();
-    const total = busy ? 0 : batchJobs().length;
+    const total = busy ? 0 : jobs().length;
     const refreshButton = $('#claims-refresh', main);
     refreshButton.disabled = busy || loading || scheduleSaving;
     refreshButton.classList.toggle('loading', loading);
@@ -372,13 +416,15 @@ function pageClaims(main) {
       const phase = entry?.controller.signal.aborted ? '正在停止…' : claimPhaseLabels[entry?.phase];
       const account = accountFor(accountID);
       const name = account.platform_name || account.label || '当前账号';
-      const label = phase || (needsVerification ? '人工验证' : result && !result.canceled ? '重试' : '领取');
+      const label = phase || (needsVerification ? '浏览器验证' : result && !result.canceled ? '重试' : '领取');
       button.disabled = loading || scheduleSaving || batchRunning || pendingAccounts.has(accountID);
       button.textContent = label;
       button.setAttribute('aria-label', `${label} · ${name}`);
       button.setAttribute('aria-busy', String(!!entry));
       skip.hidden = !entry || entry.controller.signal.aborted || !['waiting', 'preparing', 'verifying'].includes(entry.phase);
-      const message = entry ? entry.feedback : needsVerification ? result.message || '需要人工验证' : result && !result.ok ? claimResultMessage(result) : '';
+      skip.textContent = entry?.batchId ? '跳过账号' : '取消验证';
+      skip.setAttribute('aria-label', `${entry?.batchId ? '跳过' : '取消验证'} · ${name}`);
+      const message = entry ? entry.feedback : needsVerification ? result.message || '等待浏览器验证' : result && !result.ok ? claimResultMessage(result) : '';
       const showError = entry ? entry.feedbackError : !result?.canceled && (!needsVerification || result?.manualVerificationFailed);
       if (feedback.textContent !== message) {
         feedback.textContent = message;
@@ -406,8 +452,8 @@ function pageClaims(main) {
     if (last?.started_at) {
       const date = new Date(last.finished_at || last.started_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
       const pending = last.pending_manual ?? (last.results || []).filter(result => result.requires_verification).length;
-      const state = { running: '执行中', retry_wait: '等待恢复', completed: '已完成', partial: '部分成功', failed: '领取失败', needs_verification: '需人工验证', interrupted: '已中断' }[last.status] || last.status;
-      details.push(`上次执行：${date}，${state}，已领取 ${last.claimed || 0} 张${last.failed ? `，失败 ${last.failed} 项` : ''}${pending ? `，${pending} 项需人工验证` : ''}。`);
+      const state = { running: '执行中', retry_wait: '等待恢复', completed: '已完成', partial: '部分成功', failed: '领取失败', needs_verification: '待浏览器验证', interrupted: '已中断' }[last.status] || last.status;
+      details.push(`上次执行：${date}，${state}，已领取 ${last.claimed || 0} 张${last.failed ? `，失败 ${last.failed} 项` : ''}${pending ? `，${pending} 项待浏览器验证` : ''}。`);
       if (last.next_retry_at && schedule.enabled) details.push('恢复时间：' + new Date(last.next_retry_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + '。');
       const reasons = [...new Set((last.results || []).filter(result => !result.ok && !result.no_cards).map(result => result.error || result.message).filter(Boolean))];
       if (reasons.length) details.push('未领取原因：' + reasons.join('；'));
@@ -512,11 +558,11 @@ function pageClaims(main) {
     syncBusy();
   }
 
-  function enqueueClaim(job, batch = false) {
+  function enqueueClaim(job, batchId = '') {
     const key = claimJobKey(job);
     const existing = pendingClaims.get(key);
     if (existing) return existing.promise;
-    const entry = { job, key, batch, day: claimDay(), phase: 'queued', feedback: '', controller: new AbortController() };
+    const entry = { job, key, batchId, day: claimDay(), phase: 'queued', feedback: '', controller: new AbortController() };
     entry.promise = new Promise(resolve => { entry.resolve = resolve; });
     pendingClaims.set(key, entry);
     claimQueue.push(entry);
@@ -532,7 +578,7 @@ function pageClaims(main) {
   }
 
   function cancelResult(entry) {
-    return entry.cancelMessage ? { ok: false, canceled: true, message: entry.cancelMessage } : null;
+    return entry.cancelMessage ? { ok: false, canceled: true, skipped: !!entry.skipped, code: 'canceled', message: entry.cancelMessage } : null;
   }
 
   function pumpClaims() {
@@ -555,10 +601,11 @@ function pageClaims(main) {
     syncBusy();
   }
 
-  function cancelClaimEntries(matches, message) {
+  function cancelClaimEntries(matches, message, skipped = false) {
     for (const entry of pendingClaims.values()) {
       if (!matches(entry) || entry.phase === 'submitting' || entry.controller.signal.aborted) continue;
       entry.cancelMessage = message;
+      entry.skipped = skipped;
       entry.controller.abort();
     }
     pumpClaims();
@@ -567,10 +614,11 @@ function pageClaims(main) {
   async function runClaim(entry) {
     const { job, controller: { signal } } = entry;
     let config, result;
-    const releaseConfig = (value = config) => {
+    const diagnostic = {};
+    const releaseConfig = (value = config, outcome) => {
       if (value === config) config = null;
       const session = value?.verification_session;
-      if (session) void api('/api/claims/verification/cancel', { method: 'POST', body: { verification_session: session } }).catch(() => {});
+      if (session) void api('/api/claims/verification/cancel', { method: 'POST', body: { verification_session: session, batch_id: entry.batchId, verification_diagnostics: diagnostic, verification_error: outcome ? { code: outcome.code || 'browser_verification_failed', message: outcome.message, canceled: !!outcome.canceled } : undefined } }).catch(() => {});
     };
     const readConfig = async forVerification => {
       if (!claimActive(entry)) return;
@@ -587,13 +635,12 @@ function pageClaims(main) {
       await readConfig(false);
       if (!claimActive(entry)) return;
       let ticket = {};
-      if (config.enabled && !entry.batch) {
+      if (config.enabled) {
         setClaimPhase(entry, 'waiting');
         ticket = await queueClaimBrowserVerification(signal, async () => {
           if (!claimActive(entry)) return null;
-          if (document.hidden || document.querySelector('.modal-bg:not(.closing)')) {
-            throw new Error('请保持领卡页面在前台并关闭其他弹层，然后重试。');
-          }
+          setClaimPhase(entry, 'waiting', document.hidden ? '等待回到领卡页面' : '等待浏览器验证');
+          if (!(await waitForClaimPage(signal)) || !claimActive(entry)) return null;
           await readConfig(true);
           if (!claimActive(entry)) return null;
           if (!config.enabled) return {};
@@ -603,28 +650,29 @@ function pageClaims(main) {
           return requestClaimCaptcha(config, signal, {
             onStart: () => setClaimPhase(entry, 'verifying'),
             onFeedback: (message, isError) => setClaimPhase(entry, 'verifying', message, isError),
-            onDismiss: () => { entry.cancelMessage = '已取消验证'; },
+            onDismiss: () => { entry.skipped = !!entry.batchId; entry.cancelMessage = entry.batchId ? '已跳过该账号' : '已取消验证'; },
+            diagnostic,
           });
         });
       }
       if (!ticket || !claimActive(entry)) return;
       setClaimPhase(entry, 'submitting');
-      const body = entry.batch ? { ...job, auto_verify: true } : { ...job, ...ticket };
+      const body = { ...job, ...ticket, batch_id: entry.batchId, verification_diagnostics: diagnostic };
       result = await api('/api/claims/claim', { method: 'POST', body });
       if (result && !result.ok && ticket.captcha_verify_param && result.httpStatus > 0) {
         result = { ...result, message: 'ZCode 领取失败：' + claimResultMessage(result), manualVerificationFailed: true };
       }
-      if (result && !result.ok && ((!entry.batch && claimNeedsVerification(result)) || result.retry_after_ms > 0 || ['auth', 'account_risk', 'network', 'rate_limit'].includes(result.failure_kind))) {
+      if (result && !result.ok && (claimNeedsVerification(result) || result.retry_after_ms > 0 || ['auth', 'account_risk', 'network', 'rate_limit'].includes(result.failure_kind))) {
         cancelClaimEntries(other => other !== entry && other.job.account_id === job.account_id, '等待重新领取');
       }
     } catch (error) {
       if (claimActive(entry)) {
-        const requiresVerification = claimNeedsVerification(manualClaimResults().get(entry.key));
-        result = { ok: false, code: error.code, message: error.message, error_reason: error.error_reason, error_detail: error.error_detail, http_status: error.http_status, gateway_status: error.status, requires_verification: requiresVerification, manualVerificationFailed: !entry.batch };
+        const requiresVerification = (entry.phase !== 'submitting' && !!config?.enabled) || claimNeedsVerification(manualClaimResults().get(entry.key));
+        result = { ok: false, code: error.code, message: error.message, error_reason: error.error_reason, error_detail: error.error_detail, http_status: error.http_status, gateway_status: error.status, requires_verification: requiresVerification, manualVerificationFailed: true };
       }
     } finally {
-      releaseConfig();
       result ||= cancelResult(entry);
+      releaseConfig(config, entry.phase === 'submitting' ? undefined : result);
       recordClaimResult(entry, result);
       claimRunning = false;
       pendingClaims.delete(entry.key);
@@ -674,7 +722,7 @@ function pageClaims(main) {
     if (!button) return;
     const job = { account_id: button.dataset.claim, plan_id: button.dataset.plan };
     if (skip) {
-      cancelClaimEntries(entry => entry.key === claimJobKey(job), '已取消验证');
+      cancelClaimEntries(entry => entry.key === claimJobKey(job), batchRunning ? '已跳过该账号' : '已取消验证', batchRunning);
       return;
     }
     if (button.disabled) return;
@@ -688,19 +736,27 @@ function pageClaims(main) {
   });
   $('#claims-all', main).addEventListener('click', async () => {
     if (batchRunning || pendingClaims.size || loading || scheduleSaving) return;
+    const queued = jobs();
+    if (!queued.length) return;
+    const batchId = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
     const summary = $('#claims-summary', main);
     summary.textContent = '';
     batchRunning = true;
     batchStopped = false;
-    const queued = batchJobs();
     batchRemaining = queued.length;
     syncBusy();
     try {
       let claimed = 0, confirmed = 0, alreadyClaimed = 0, needsVerification = 0, failed = 0, canceled = 0;
       const blockedAccounts = new Set();
       for (const job of queued) {
-        const result = !active() || batchStopped || blockedAccounts.has(job.account_id) ? { canceled: true } : await enqueueClaim(job, true);
-        if (result && !result.ok && (result.requires_confirmation || result.retry_after_ms > 0 || ['auth', 'account_risk', 'network', 'rate_limit'].includes(result.failure_kind))) {
+        let result = { canceled: true };
+        if (active() && !batchStopped && !blockedAccounts.has(job.account_id)) {
+          const index = visiblePreviews().filter(preview => claimablePlans(preview).length).findIndex(preview => preview.account_id === job.account_id);
+          const targetPage = Math.floor(Math.max(0, index) / pageSize) + 1;
+          if (targetPage !== page) { page = targetPage; paint(); }
+          result = await enqueueClaim(job, batchId);
+        }
+        if (result && !result.ok && (result.skipped || claimNeedsVerification(result) || result.requires_confirmation || result.retry_after_ms > 0 || ['auth', 'account_risk', 'network', 'rate_limit'].includes(result.failure_kind))) {
           blockedAccounts.add(job.account_id);
         }
         batchRemaining--;
@@ -713,7 +769,7 @@ function pageClaims(main) {
         else failed++;
       }
       if (!active()) return;
-      summary.textContent = `本次领取 ${claimed} 张${confirmed ? `，${confirmed} 张已核实持有` : ''}${alreadyClaimed ? `，${alreadyClaimed} 张此前已领` : ''}${needsVerification ? `，${needsVerification} 张需人工验证` : ''}${failed ? `，${failed} 张失败` : ''}${canceled ? `，${canceled} 张未继续` : ''}`;
+      summary.textContent = `本次领取 ${claimed} 张${confirmed ? `，${confirmed} 张已核实持有` : ''}${alreadyClaimed ? `，${alreadyClaimed} 张此前已领` : ''}${needsVerification ? `，${needsVerification} 张待浏览器验证` : ''}${failed ? `，${failed} 张失败` : ''}${canceled ? `，${canceled} 张未继续` : ''}`;
     } finally {
       batchRunning = false;
       batchRemaining = 0;

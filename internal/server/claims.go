@@ -252,13 +252,25 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if trigger != "scheduled" {
 		ctx = context.WithValue(ctx, claimBrowserContextKey{}, &a.manualClaimBrowser)
 	}
-	diagnostic := shared.M{"stage": "route", "sdk_attempted": false, "sdk_executed": false, "sdk_initialized": false, "ticket_attached": false, "browser_ticket": shared.Str(verification["captcha_verify_param"]) != "", "claim_request_started": false, "http_status": 0, "initial_http_status": 0}
+	diagnostic := shared.M{"stage": "route", "started_at": shared.NowMS(), "verification_mode": "server", "sdk_attempted": false, "sdk_executed": false, "sdk_initialized": false, "ticket_attached": false, "browser_ticket": shared.Str(verification["captcha_verify_param"]) != "", "claim_request_started": false, "claim_request_sent": false, "http_status": 0, "initial_http_status": 0}
+	if manual && !batch {
+		diagnostic["verification_mode"] = "browser"
+	}
+	if batchID := shared.Str(verification["batch_id"]); batchID != "" {
+		diagnostic["batch_id"] = batchID
+	} else if due, scheduled := ctx.Value(scheduledClaimContextKey{}).(int64); scheduled {
+		diagnostic["batch_id"] = fmt.Sprintf("scheduled-%d", due)
+	}
+	if browser := claimBrowserDiagnostics(verification["verification_diagnostics"]); len(browser) > 0 {
+		diagnostic["browser_verification"] = browser
+	}
 	ctx = context.WithValue(ctx, claimCaptchaDiagnosticKey{}, diagnostic)
 	var requestSent atomic.Bool
 	var failure *fault.Failure
 	requestContext := ctx
 	defer func() {
 		diagnostic["claim_request_sent"] = requestSent.Load()
+		diagnostic["total_ms"] = shared.NowMS() - shared.Integer(diagnostic["started_at"])
 		if err != nil {
 			failure = routing.TransportFailure(context.WithoutCancel(ctx), err)
 			if failure.Code == "network" {
@@ -271,8 +283,8 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			if requestContext.Err() != nil && failure.Code != "claim_result_unknown" {
 				failure = &fault.Failure{Kind: "canceled", Code: "canceled", Message: "请求已取消"}
 			}
-			claimDetail := fault.FailureDetail(failure)
-			claimDetail["stage"], claimDetail["claim_request_sent"] = diagnostic["stage"], requestSent.Load()
+			diagnostic["failure_stage"] = diagnostic["stage"]
+			claimDetail := claimLogDetail(fault.FailureDetail(failure), diagnostic)
 			reason := fault.FailureReason(failure)
 			_ = a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, 0, failure.Code, reason, trigger, shared.JSON(claimDetail))
 			result = shared.Merge(result, shared.M{"ok": false, "code": failure.Code, "message": fault.ConciseFailureMessage(failure), "error_reason": reason, "error_detail": claimDetail, "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "verification": diagnostic})
@@ -308,6 +320,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 		return nil, e
 	}
 	defer release()
+	a.claimDiagnosticRoute(ctx, diagnostic)
 	diagnostic["stage"] = "admission"
 	ctx, finish, gateFailure := a.beginUpstreamRequest(ctx, a.upstreamScope(ctx, r, a.origin, true))
 	if gateFailure != nil {
@@ -375,6 +388,7 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			}
 		}})
 		res, e = a.api(ctx, r, "POST", "/api/v1/zcode-plan/billing/claim", token, shared.M{"plan_id": plan}, headers, a.jar(id))
+		diagnostic["claim_request_sent"] = requestSent.Load()
 		if e != nil {
 			if confirmed, confirmErr := a.reconcilePendingClaim(context.WithoutCancel(ctx), r, plan, trigger); confirmErr != nil || confirmed != nil {
 				return confirmed, confirmErr
@@ -430,12 +444,12 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 			requiresVerification = verificationFailure.Code == "coding_plan_security_verification_required"
 			if batch && verificationFailure.Kind != "account_risk" && captchasdk.ClaimBrowserFallback(verificationFailure) {
 				requiresVerification = true
-				message = "需要人工验证后领取"
+				message = "等待浏览器验证后领取"
 			}
 		} else {
 			requiresVerification = captchasdk.ClaimBrowserFallback(verificationFailure)
 			if requiresVerification {
-				message = shared.Str(message) + "，请完成浏览器验证后领取"
+				message = shared.Str(message) + "，可在领卡页面继续浏览器验证"
 			}
 		}
 	} else if requiresVerification {
@@ -463,7 +477,15 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	if failure != nil {
 		claimDetail = fault.FailureDetail(failure)
 	}
-	claimDetail["stage"], claimDetail["claim_request_sent"] = diagnostic["stage"], requestSent.Load()
+	diagnostic["claim_request_sent"] = requestSent.Load()
+	diagnostic["initial_http_status"], diagnostic["http_status"], diagnostic["requires_verification"] = res.Status, res.Status, requiresVerification
+	if verificationFailure != nil {
+		diagnostic["sdk_error"] = verificationFailure.Code
+	}
+	if !completed {
+		diagnostic["failure_stage"] = diagnostic["stage"]
+	}
+	claimDetail = claimLogDetail(claimDetail, diagnostic)
 	if res.Status > 0 {
 		claimDetail["http_status"], claimDetail["upstream_code"] = res.Status, code
 	}
@@ -473,10 +495,6 @@ func (a *App) claim(ctx context.Context, id, plan, trigger string, verification 
 	}
 	if logErr := a.exec("INSERT INTO claim_log(account_id,ts,plan_id,ok,code,message,user_plan_id,ends_at,trigger,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?)", id, shared.NowMS(), plan, shared.Integer(completed), code, reason, p["user_plan_id"], end, trigger, shared.JSON(claimDetail)); logErr == nil && shared.Truth(diagnostic["claim_request_started"]) {
 		_ = a.clearPendingClaim(r, plan)
-	}
-	diagnostic["initial_http_status"], diagnostic["http_status"], diagnostic["requires_verification"] = res.Status, res.Status, requiresVerification
-	if verificationFailure != nil {
-		diagnostic["sdk_error"] = verificationFailure.Code
 	}
 	if ok {
 		a.acceptCaptchaVerification(ctx, &sdkVerification)

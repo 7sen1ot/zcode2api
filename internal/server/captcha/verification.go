@@ -21,6 +21,11 @@ func ValidCaptchaParam(param string) bool {
 }
 
 func ValidateClaimVerification(value shared.M) error {
+	if raw, present := value["batch_id"]; present {
+		if id, ok := raw.(string); !ok || (id != "" && !routing.HexIDPattern.MatchString(id)) {
+			return fmt.Errorf("batch_id 必须为空或 64 位十六进制标识")
+		}
+	}
 	if automatic, present := value["auto_verify"]; present {
 		if _, ok := automatic.(bool); !ok {
 			return fmt.Errorf("auto_verify 必须为布尔值")
