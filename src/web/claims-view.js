@@ -190,9 +190,9 @@ function claimAccountMarkup(preview, account = {}) {
     const details = preview.stale ? `显示上次有效结果。${preview.error || ''}` : '';
     return `<div class="daily-claim-row${preview.stale ? ' query-stale' : ''}">
     ${accountNameMarkup({ ...account, id: preview.account_id }, 'claim-account')}
-    <div class="daily-claim-grants">${(plan.entitlements || []).map(entitlement => `<div><strong title="${esc(fmtInt(entitlement.grant_units))} ${esc(entitlement.unit_type || 'Token')}">${fmtQuota(entitlement.grant_units)}<small> ${esc(entitlement.unit_type || 'Token')}</small></strong><span>${esc(entitlement.show_name || entitlement.meter || '')}</span></div>`).join('')}</div>
-    <div class="daily-claim-action">${details ? infoTip(details, '查询状态') : ''}<button type="button" class="btn" data-claim-skip aria-label="取消 ${esc(name)} 的验证" hidden>取消验证</button><button type="button" class="btn primary" data-claim="${esc(preview.account_id)}" data-plan="${esc(plan.plan_id)}" aria-label="领取 ${esc(name)} 的每日免费 Token">领取</button></div>
-    <p class="daily-claim-feedback" role="status"></p>
+    <div class="daily-claim-status"><p class="daily-claim-feedback" role="status"></p>${details ? infoTip(details, '查询状态') : ''}</div>
+    <div class="daily-claim-grants">${(plan.entitlements || []).map(entitlement => `<div><strong title="${esc(fmtInt(entitlement.grant_units))} ${esc(entitlement.unit_type || 'Token')}">${fmtQuota(entitlement.grant_units)}<small> ${esc(entitlement.unit_type || 'Token')}</small></strong><span title="${esc(entitlement.show_name || entitlement.meter || '')}">${esc(entitlement.show_name || entitlement.meter || '')}</span></div>`).join('')}</div>
+    <div class="daily-claim-action"><button type="button" class="btn" data-claim-skip aria-label="取消 ${esc(name)} 的验证" hidden>取消验证</button><button type="button" class="btn primary" data-claim="${esc(preview.account_id)}" data-plan="${esc(plan.plan_id)}" aria-label="领取 ${esc(name)} 的每日免费 Token">领取</button></div>
   </div>`;
   }).join('');
 }
@@ -328,8 +328,8 @@ function pageClaims(main) {
   main.innerHTML = `${pagehead('领卡中心', '<button type="button" class="btn" id="claims-refresh">' + icon('refresh', 14) + '刷新</button>')}
     <section class="daily-claim-card fade-up" aria-labelledby="daily-claim-title">
       <header class="daily-claim-header"><div class="daily-claim-title"><span class="daily-claim-icon">${icon('gift', 22)}</span><h2 id="daily-claim-title">每日免费 Token</h2></div><div class="daily-claim-actions"><div class="daily-claim-schedule"><span class="time-field control-compact" id="claims-time-field"><input id="claims-time" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="5" value="19:02" disabled aria-label="每日浏览器定时领取时间（北京时间）"><button type="button" class="time-field-trigger" id="claims-time-trigger" aria-label="选择定时领取时间" aria-expanded="false" aria-haspopup="dialog" aria-controls="claims-time-pop" disabled>${icon('timer', 13)}</button><span class="time-field-pop control-compact" id="claims-time-pop" hidden role="dialog" aria-label="选择定时领取时间"><span class="time-field-col" data-unit="hour" role="group" aria-label="小时"></span><span class="time-field-col" data-unit="minute" role="group" aria-label="分钟"></span></span></span><label for="claims-schedule">定时领取（北京时间）<input id="claims-schedule" type="checkbox" role="switch" disabled></label><span id="claims-schedule-info">${infoTip('服务需保持运行，浏览器依赖在「设置 → 上游安全验证」配置。', '定时领取')}</span></div><button type="button" class="btn" id="claims-stop" hidden>停止剩余领取</button><button type="button" class="btn primary" id="claims-all" disabled>全部领取</button></div></header>
-      <div id="claims-content" aria-busy="true"><div class="skeleton-block"></div></div>
-      <footer class="daily-claim-footer"><span id="claims-update" class="result-count" aria-live="polite">正在查询…</span><span id="claims-summary" class="result-count" role="status"></span><div id="claims-notice"></div><nav class="pager" id="claims-pages" aria-label="可领取账号分页" hidden></nav></footer>
+      <div id="claims-content" class="daily-claim-list" aria-busy="true"><div class="skeleton-block"></div></div>
+      <footer class="daily-claim-footer"><span id="claims-update" class="result-count" aria-live="polite">正在查询…</span><span id="claims-summary" class="result-count" role="status"></span><div class="daily-claim-footer-end"><div id="claims-notice"></div><nav class="pager" id="claims-pages" aria-label="可领取账号分页" hidden></nav></div></footer>
     </section>`;
   const content = $('#claims-content', main);
   const token = TOKEN;
@@ -380,7 +380,10 @@ function pageClaims(main) {
       skip.hidden = !entry || entry.controller.signal.aborted || !['waiting', 'preparing', 'verifying'].includes(entry.phase);
       const message = entry ? entry.feedback : needsVerification ? result.message || '需要人工验证' : result && !result.ok ? claimResultMessage(result) : '';
       const showError = entry ? entry.feedbackError : !result?.canceled && (!needsVerification || result?.manualVerificationFailed);
-      if (feedback.textContent !== message) feedback.textContent = message;
+      if (feedback.textContent !== message) {
+        feedback.textContent = message;
+        feedback.title = message;
+      }
       row.classList.toggle('needs-verification', !!needsVerification);
       feedback.classList.toggle('error', Boolean(message && showError));
     });
