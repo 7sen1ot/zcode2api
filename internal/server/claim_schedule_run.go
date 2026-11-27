@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 	captchasdk "zcode2api/internal/server/captcha"
 	"zcode2api/internal/server/fault"
@@ -95,7 +96,48 @@ func scheduledClaimError(ctx context.Context, err error) shared.M {
 		failure = routing.TransportFailure(context.WithoutCancel(ctx), err)
 	}
 	failure = fault.Classify(failure)
-	return shared.M{"ok": false, "code": failure.Code, "error": fault.ConciseFailureMessage(failure), "message": fault.ConciseFailureMessage(failure), "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "requires_verification": captchasdk.ClaimBrowserFallback(failure)}
+	detail := fault.FailureDetail(failure)
+	if due, scheduled := ctx.Value(scheduledClaimContextKey{}).(int64); scheduled {
+		detail["batch_id"], detail["verification_mode"] = fmt.Sprintf("scheduled-%d", due), "server"
+	}
+	return shared.M{"ok": false, "code": failure.Code, "error": fault.ConciseFailureMessage(failure), "message": fault.ConciseFailureMessage(failure), "failure_kind": failure.Kind, "retryable": failure.Retryable, "retry_after_ms": failure.RetryAfter.Milliseconds(), "requires_verification": captchasdk.ClaimBrowserFallback(failure), "error_detail": detail}
+}
+
+// Read existing guards without admitting a request or recording another claim failure.
+// The claim path still performs admission, covering cooldowns published after this check.
+func (a *App) scheduledClaimCooldown(ctx context.Context, account shared.M) shared.M {
+	scope := a.upstreamScope(ctx, account, a.origin, true)
+	now := time.Now()
+	key := a.captchaSceneKey(ctx)
+	a.captcha.mu.Lock()
+	if scene, ok := a.captcha.scenes[key]; ok && now.Before(scene.Expires) && shared.Truth(scene.Value["enabled"]) {
+		scope = a.captchaRequestScope(ctx, account, scene.Value)
+	}
+	a.captcha.mu.Unlock()
+	var failure *fault.Failure
+	a.mu.Lock()
+	for _, key := range scope.keys() {
+		if entry := a.upstreamCooldowns[key]; entry != nil && (now.Before(entry.until) || entry.probing) {
+			failure = entry.refusal()
+			break
+		}
+	}
+	a.mu.Unlock()
+	if failure == nil {
+		return nil
+	}
+	result := scheduledClaimError(ctx, failure)
+	diagnostic := shared.M{"stage": "admission", "sdk_stage": "admission", "sdk_executed": false, "claim_request_started": false, "claim_request_sent": false}
+	a.claimDiagnosticRoute(ctx, diagnostic)
+	result["message"], result["verification"] = "等待上游冷却结束", diagnostic
+	result["error_detail"] = claimLogDetail(shared.Obj(result["error_detail"]), diagnostic)
+	return result
+}
+
+func scheduledClaimExitMatches(ctx context.Context, saved string) bool {
+	// Existing checkpoints used temporary listener ports. Migrate only when
+	// that original address can still be identified; never guess another node.
+	return saved == claimProxyExitHash(ctx) || saved == shared.Hash(routing.SelectedProxy(ctx))
 }
 
 func scheduledClaimRetryable(result shared.M) bool {
@@ -291,7 +333,7 @@ func (a *App) runScheduledClaims(ctx context.Context, due time.Time) (shared.M, 
 					continue
 				}
 				account.Result = scheduledClaimError(ctx, warmErr)
-				account.Result["requires_verification"] = false
+				shared.Obj(account.Result["error_detail"])["stage"] = "browser_launch"
 				if err := a.deferScheduledClaimAccount(&run, account, scheduledClaimRetryable(account.Result)); err != nil {
 					return nil, err
 				}
@@ -406,30 +448,31 @@ func (a *App) runScheduledClaimAccount(ctx context.Context, due time.Time, run *
 		} else if confirmErr != nil || !shared.Truth(confirmed["no_pending_claim"]) {
 			item.Result = confirmed
 			if confirmErr != nil {
-				item.Result = shared.Merge(confirmed, scheduledClaimError(ctx, confirmErr))
+				item.Result = shared.Merge(scheduledClaimError(ctx, confirmErr), confirmed)
 			}
 			item.Status = "retry_wait"
 			account.Attempts-- // Ownership queries do not consume another submission attempt.
 			return a.deferScheduledClaimAccount(run, account, scheduledClaimRetryable(item.Result) || item.Result["code"] == "in_progress")
 		}
 	}
-	if account.SameExit && account.ExitHash != shared.Hash(routing.SelectedProxy(pinned)) {
+	if account.SameExit && account.ExitHash != "" && !scheduledClaimExitMatches(pinned, account.ExitHash) {
 		// A different request may have moved the shared sticky selection. Reuse
 		// the original healthy endpoint if it is still in the configured pool.
 		if _, pooled := pinned.Value(routing.ProxySelectionKey{}).(routing.ProxySelection); pooled {
 			a.proxies.mu.Lock()
 			for _, endpoint := range a.proxies.endpoints {
-				if shared.Hash(endpoint.URL) == account.ExitHash && a.proxies.retryAt[endpoint.Identity()].IsZero() && a.proxies.blocked[endpoint.Identity()].IsZero() {
-					pinned = routing.PinnedProxyContext(pinned, endpoint.URL)
-					pinned = context.WithValue(pinned, routing.ProxySelectionKey{}, routing.ProxySelection{Generation: a.proxies.generation, Identity: endpoint.Identity()})
+				candidate := routing.PinnedProxyContext(pinned, endpoint.URL)
+				candidate = context.WithValue(candidate, routing.ProxySelectionKey{}, routing.ProxySelection{Generation: a.proxies.generation, Identity: endpoint.Identity()})
+				if scheduledClaimExitMatches(candidate, account.ExitHash) && a.proxies.retryAt[endpoint.Identity()].IsZero() && a.proxies.blocked[endpoint.Identity()].IsZero() {
+					pinned = candidate
 					break
 				}
 			}
 			a.proxies.mu.Unlock()
 		}
 	}
-	exit := shared.Hash(routing.SelectedProxy(pinned))
-	if account.SameExit && account.ExitHash != "" && account.ExitHash != exit {
+	exit := claimProxyExitHash(pinned)
+	if account.SameExit && account.ExitHash != "" && !scheduledClaimExitMatches(pinned, account.ExitHash) {
 		account.Result = shared.M{"ok": false, "message": "验证出口已变更，本次不再自动重试"}
 		finishScheduledAccount(account)
 		return nil
@@ -493,19 +536,25 @@ func (a *App) runScheduledClaimAccount(ctx context.Context, due time.Time, run *
 		} else if item.Attempts >= 2 {
 			item.Status = "failed"
 		} else {
-			item.Attempts++
-			item.Status = "running"
-			account.SameExit = true
-			if err := checkpoint(); err != nil {
-				return err
-			}
-			result, claimErr := a.claim(pinned, account.ID, item.PlanID, "scheduled", nil)
-			if claimErr != nil {
-				result = shared.Merge(result, scheduledClaimError(ctx, claimErr))
+			result := a.scheduledClaimCooldown(pinned, r)
+			if result == nil {
+				item.Attempts++
+				item.Status = "running"
+				account.SameExit = true
+				if err := checkpoint(); err != nil {
+					return err
+				}
+				var claimErr error
+				result, claimErr = a.claim(pinned, account.ID, item.PlanID, "scheduled", nil)
+				if claimErr != nil {
+					result = shared.Merge(scheduledClaimError(ctx, claimErr), result)
+				}
+				if scheduledClaimWaiting(result) {
+					item.Attempts--
+				}
 			}
 			item.Result = result
 			if scheduledClaimWaiting(result) {
-				item.Attempts--
 				if !attempted {
 					account.Attempts--
 				}

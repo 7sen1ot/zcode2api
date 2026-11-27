@@ -181,7 +181,7 @@ func (a *App) startDailyClaims() {
 			} else {
 				unavailableUntil = time.Time{}
 				if !shared.Truth(result["skipped"]) {
-					a.log.Printf("每日 %s 自动领卡状态 %v: 检查 %v 个账号，领取 %v 张，失败 %v 项，需人工 %v 项，待恢复 %v 个账号", at, result["status"], result["checked"], result["claimed"], result["failed"], result["pending_manual"], result["pending"])
+					a.log.Printf("每日 %s 自动领卡状态 %v: 检查 %v 个账号，领取 %v 张，失败 %v 项，待浏览器验证 %v 项，待恢复 %v 个账号", at, result["status"], result["checked"], result["claimed"], result["failed"], result["pending_manual"], result["pending"])
 				}
 			}
 		}

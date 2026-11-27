@@ -42,14 +42,21 @@ func claimLogDetail(detail, diagnostic shared.M) shared.M {
 	return out
 }
 
+func claimProxyExitHash(ctx context.Context) string {
+	if selection, ok := ctx.Value(routing.ProxySelectionKey{}).(routing.ProxySelection); ok {
+		return shared.Hash("pool|" + selection.Identity)
+	}
+	return shared.Hash(routing.SelectedProxy(ctx))
+}
+
 func (a *App) claimDiagnosticRoute(ctx context.Context, diagnostic shared.M) {
 	proxy := routing.SelectedProxy(ctx)
-	diagnostic["proxy_node"], diagnostic["proxy_exit_hash"] = "直连", shared.Hash("direct")
+	diagnostic["proxy_node"], diagnostic["proxy_exit_hash"] = "直连", claimProxyExitHash(ctx)
 	if proxy != "" {
-		diagnostic["proxy_node"], diagnostic["proxy_exit_hash"] = "账号代理", shared.Hash(proxy)
+		diagnostic["proxy_node"] = "账号代理"
 	}
 	if selection, ok := ctx.Value(routing.ProxySelectionKey{}).(routing.ProxySelection); ok {
-		diagnostic["proxy_node"], diagnostic["proxy_exit_hash"] = "代理节点", selection.Identity
+		diagnostic["proxy_node"] = "代理节点"
 		a.proxies.mu.Lock()
 		for _, endpoint := range a.proxies.endpoints {
 			if endpoint.Identity() == selection.Identity {
