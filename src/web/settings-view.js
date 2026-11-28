@@ -407,7 +407,7 @@ async function pageSettings(main, read) {
     try {
       const response = await api('/api/settings/captcha/browser/install', { method: 'POST', body: { ...paths, install_browser: installBrowser } });
       if (response.ok === false) throw new Error(response.error || '安装失败');
-      if (form.isConnected) toast(response.browser_ready ? '浏览器运行时已安装' : '驱动已安装，仍需配置浏览器', 'ok');
+      if (form.isConnected) toast(response.browser_ready ? '安装完成' : '驱动已装，请配置浏览器', 'ok');
     } catch (error) { if (form.isConnected) toast(error.message, 'err'); }
     finally { browserInstalling = false; btnLoading(browserInstall, false); if (form.isConnected) void checkCaptchaRuntime(); }
   });
@@ -580,7 +580,7 @@ async function pageSettings(main, read) {
       s.github_update_mirror = submittedMirror;
       fingerprint = JSON.stringify(submitted);
       savedAt = '已保存并生效 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      toast('设置已保存并生效', 'ok');
+      toast('设置已保存', 'ok');
     } catch (err) { error.textContent = '保存失败，修改已保留：' + err.message; error.classList.remove('hidden'); }
     finally { settingsSaving = false; btnLoading(save, false); updateDirty(); }
   });

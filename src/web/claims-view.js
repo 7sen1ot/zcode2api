@@ -690,7 +690,7 @@ function pageClaims(main) {
       const result = await api('/api/settings', { method: 'PUT', body: { daily_claim_enabled: enabled } });
       schedule = result.claim_schedule;
       scheduleError = '';
-      toast(enabled ? `已开启每日 ${schedule.time} 浏览器定时领取` : '已关闭定时领取', 'ok');
+      toast(enabled ? '定时已开启' : '定时已关闭', 'ok');
     } catch (error) { toast(error.message, 'err'); }
     finally { scheduleSaving = false; paintSchedule(); syncBusy(); }
   });
@@ -703,7 +703,7 @@ function pageClaims(main) {
         const result = await api('/api/settings', { method: 'PUT', body: { daily_claim_time: time } });
         schedule = result.claim_schedule;
         scheduleError = '';
-        toast(`浏览器定时领取已改为每日 ${time}`, 'ok');
+        toast('时间已保存', 'ok');
       } catch (error) { toast(error.message, 'err'); throw error; }
       finally { scheduleSaving = false; paintSchedule(); syncBusy(); }
     },
@@ -727,7 +727,7 @@ function pageClaims(main) {
     }
     if (button.disabled) return;
     void enqueueClaim(job).then(result => {
-      if (active() && result?.ok) toast(result.reconciled ? '已确认该账号持有此卡' : result.already_claimed ? '该账号已领取过' : '每日免费卡已领取', 'ok');
+      if (active() && result?.ok) toast(result.reconciled ? '已持有' : result.already_claimed ? '已领取过' : '已领取', 'ok');
     });
   });
   $('#claims-stop', main).addEventListener('click', () => {

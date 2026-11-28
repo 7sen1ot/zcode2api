@@ -122,7 +122,7 @@ function toast(msg, type = '') {
   Z2AEffects.toast(msg, type);
 }
 
-async function copyText(text, success = '已复制', failure = '复制失败，请手动复制', button = null) {
+async function copyText(text, success = '已复制', failure = '请手动复制', button = null) {
   try {
     await navigator.clipboard.writeText(text);
     if (!Z2AEffects.copyFeedback(button, success)) toast(success, 'ok');
@@ -243,7 +243,7 @@ function restoreRoute(route) {
   if (currentPage === 'logs') Z2ALogs.restoreRoute(q);
 }
 async function mayLeaveSettings() {
-  if (currentPage === 'settings' && settingsSaving) { toast('正在保存设置，请稍候'); return false; }
+  if (currentPage === 'settings' && settingsSaving) { toast('保存中'); return false; }
   return true;
 }
 async function navigateTo(page) {
@@ -926,7 +926,7 @@ function exportAccountsModal(accounts, filtered) {
     try { link.click(); }
     finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000); }
     dialog.close();
-    toast(`已导出 ${data.accounts.length} 个账号`, 'ok');
+    toast(`已导出 ${data.accounts.length}`, 'ok');
   });
 }
 
@@ -960,11 +960,11 @@ function importAccountsModal(groups) {
     return api('/api/accounts/import', { method: 'POST', body });
   }, result => {
     dialog.close();
-    toast(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个重复账号` : ''}`, 'ok');
+    toast(`已导入 ${result.imported}${result.skipped ? `，跳过 ${result.skipped}` : ''}`, 'ok');
     if (result.imported && currentPage === 'accounts') {
       window._accFilter = { q: '', status: 'all', sort: 'default', page: 1, size: window._accFilter?.size || 25 };
       syncRoute();
-      render({ swap: true }).catch(() => toast('账号已导入，请手动刷新列表', 'err'));
+      render({ swap: true }).catch(() => toast('已导入，请刷新', 'err'));
     }
   });
 }
@@ -984,12 +984,12 @@ async function onAccountAction(e) {
   if (!btn || btn.disabled) return;
   const id = btn.dataset.id;
   if (btn.dataset.act === 'copy') {
-    return copyText(id, '账号 ID 已复制', '复制失败，请手动选择账号 ID', btn);
+    return copyText(id, '账号 ID 已复制', '请手动复制 ID', btn);
   }
 
   if (btn.dataset.act === 'detail') {
     const a = (window._accCache || []).find(item => item.id === id);
-    if (!a) { toast('账号信息已更新，请刷新列表', 'err'); return; }
+    if (!a) { toast('请刷新列表', 'err'); return; }
     const form = h(`<div class="account-detail"><dl><div><dt>账号名称</dt><dd>${esc(a.platform_name || '未获取官方名称')}</dd></div><div><dt>备注</dt><dd>${esc(a.label)}</dd></div><div><dt>登录渠道</dt><dd>${esc(loginProviderLabel(a.login_provider || a.family))}</dd></div><div><dt>ZCode ID</dt><dd>${esc(a.customer_id || '未获取')}${a.customer_id ? `<button type="button" class="text-action" data-act="copy" data-id="${esc(a.customer_id)}">复制</button>` : ''}</dd></div>${a.business_customer_id ? `<div><dt>业务账号 ID</dt><dd>${esc(a.business_customer_id)}</dd></div>` : ''}<div><dt>状态</dt><dd>${esc(ACC_STATUS[a.status] || a.status)}</dd></div>${a.zcode_jwt_expires_at ? `<div><dt>登录有效期 ${infoTip('主登录到期后需重新授权。业务 token 更新不会延长此有效期。', '登录有效期')}</dt><dd>${esc(fmtTime(a.zcode_jwt_expires_at))}</dd></div>` : ''}${a.has_web_jwt ? `<div><dt>网页会话到期</dt><dd>${esc(fmtTime(a.web_cookie_expires_at))}</dd></div>` : ''}<div><dt>最近额度卡到期</dt><dd>${esc(fmtTime(a.card_expires_at))}</dd></div></dl>${a.last_error ? `<p class="inline-notice error">${esc(a.last_error)}</p>` : ''}<section class="account-detail-quota"><h3>模型额度明细</h3>${accountQuotaMarkup(a)}</section></div>`);
     const details = form.querySelector('.quota-details'); if (details) details.open = true;
     form.addEventListener('click', onAccountAction);
@@ -1011,7 +1011,7 @@ async function onAccountAction(e) {
   } else if (btn.dataset.act === 'verify') {
     await buttonAction(btn, async () => {
       const r = await api(`/api/accounts/${id}/verify`, { method: 'POST' });
-      toast(`验证：${r.status}${r.reason ? '（' + r.reason + '）' : ''}`, r.ok ? 'ok' : 'err');
+      toast(`${ACC_STATUS[r.status] || r.status}${r.reason ? '：' + r.reason : ''}`, r.ok ? 'ok' : 'err');
       render();
     }, '验证失败：');
   } else if (btn.dataset.act === 'edit') {
@@ -1094,9 +1094,9 @@ function addAccountModal(target = null) {
         const saved = r.updated ? '账号凭据已更新' : '账号已导入';
         if (currentPage === 'accounts') {
           delete $('#main').dataset.fp;
-          render({ swap: true }).catch(() => toast('账号已保存，请手动刷新列表', 'err'));
+          render({ swap: true }).catch(() => toast('已保存，请刷新', 'err'));
         }
-        if (!form.isConnected || form.closest('.modal-bg')?.classList.contains('closing')) { toast(saved + (r.verified ? '，验证通过' : r.status === 'disabled' ? '，保持停用' : '，' + (ACC_STATUS[r.status] || '待验证')), r.verified ? 'ok' : ''); return; }
+        if (!form.isConnected || form.closest('.modal-bg')?.classList.contains('closing')) { toast((r.updated ? '凭据已更新' : '账号已导入') + (r.verified ? '' : '，' + (ACC_STATUS[r.status] || '待验证')), r.verified ? 'ok' : ''); return; }
         const title = saved + (r.verified ? '，验证通过' : r.status === 'disabled' ? '，保持停用' : '，' + (ACC_STATUS[r.status] || '待验证'));
         const reason = r.status === 'needs_relogin' ? '客户端登录已失效，请在下方重新授权。' : r.reason || '暂时无法完成验证，可在账号列表重试。';
         result.innerHTML = `<div class="client-import-result ${r.verified ? 'ok' : 'warn'}">
@@ -1122,7 +1122,7 @@ function addAccountModal(target = null) {
   });
   $('#i-oauth', form).addEventListener('click', startOAuth);
   function showOAuthFlow(r) {
-    if (!r?.flow_id || !r.authorize_url) { toast(r?.error || '暂时无法开始授权，请重试', 'err'); return; }
+    if (!r?.flow_id || !r.authorize_url) { toast(r?.error || '授权失败，请重试', 'err'); return; }
     stopWatch();
     const generation = flowGeneration;
     let checking = false;
@@ -1139,7 +1139,7 @@ function addAccountModal(target = null) {
         <button class="btn" id="oauth-checknow" style="height:26px;padding:0 10px;font-size:var(--font-size-caption)">检查授权状态</button>
       </div>`;
     $('#oauth-open', box).addEventListener('click', () => window.open(r.authorize_url, '_blank', 'noopener'));
-    $('#oauth-copy', box).addEventListener('click', event => copyText(r.authorize_url, '授权链接已复制', '复制失败，请从授权按钮的标签页地址栏手动复制', event.currentTarget));
+    $('#oauth-copy', box).addEventListener('click', event => copyText(r.authorize_url, '授权链接已复制', '请从授权页地址栏复制', event.currentTarget));
     $('#oauth-checknow', box).addEventListener('click', () => check());
     const setStage = (text, busy = true) => {
       const el = $('#oauth-status', box);
@@ -1170,7 +1170,7 @@ function addAccountModal(target = null) {
       const reason = !x.verified && x.status !== 'disabled' && x.reason ? '。' + x.reason : '';
       if (currentPage === 'accounts') {
         delete $('#main').dataset.fp;
-        render({ swap: true }).catch(() => toast('账号已保存，请手动刷新列表', 'err'));
+        render({ swap: true }).catch(() => toast('已保存，请刷新', 'err'));
       }
       box.innerHTML = `
         <div class="oauth-result ${x.verified ? 'ok' : 'warn'}">
@@ -1229,7 +1229,7 @@ function startOauthWatcher() {
       noteFlowSeen(f.flow_id);
       const x = f.result || {};
       if (f.status === 'done') {
-        toast((x.updated ? '账号凭据已更新' : '登录成功，新账号已加入账号库') + (x.verified ? '（验证通过）' : `（验证未通过：${x.reason || x.status || ''}）`), x.verified ? 'ok' : 'err');
+        toast((x.updated ? '凭据已更新' : '账号已添加') + (x.verified ? '' : `，验证未通过：${x.reason || ACC_STATUS[x.status] || x.status || '待验证'}`), x.verified ? 'ok' : 'err');
         refresh = true;
       } else {
         toast(`${loginProviderLabel(f.provider)} 授权未完成：${f.error || f.status}`, 'err');
@@ -1360,7 +1360,7 @@ function showKeySecret(title, secret, notice = '请复制并妥善保存完整�
     if (keySecretDialog === dialog) keySecretDialog = null;
   });
   keySecretDialog = dialog;
-  $('[data-copy]', result).addEventListener('click', event => copyText(value.textContent, '密钥已复制', '复制失败，请手动选择并复制密钥', event.currentTarget));
+  $('[data-copy]', result).addEventListener('click', event => copyText(value.textContent, '密钥已复制', '请手动复制密钥', event.currentTarget));
 }
 
 function finishKeyChange(dialog, title, secret, token, notice) {
@@ -1581,7 +1581,7 @@ async function pageKeys(main, read) {
       }, '删除失败：');
     }
   });
-  $('#copy-gw').addEventListener('click', event => copyText(`http://127.0.0.1:${RUNTIME?.gateway_port || 6780}/v1`, '网关地址已复制', '复制失败，请手动复制', event.currentTarget));
+  $('#copy-gw').addEventListener('click', event => copyText(`http://127.0.0.1:${RUNTIME?.gateway_port || 6780}/v1`, '网关地址已复制', '请手动复制', event.currentTarget));
   $('#add-key').addEventListener('click', () => openKeyForm(groups));
 }
 
@@ -1771,9 +1771,9 @@ async function pageGroups(main, read) {
     if (button.dataset.groupAction === 'edit') return openGroupForm(group);
     if (button.dataset.groupAction === 'accounts') return buttonAction(button, () => openGroupAccounts(group.id), '加载账号失败：');
     const blockers = [];
-    if (group.account_count > 0) blockers.push(`先移出 ${group.account_count} 个关联账号`);
-    if (group.key_count > 0) blockers.push(`先调整引用该组的 ${group.key_count} 个 API 密钥`);
-    if (blockers.length) return toast(`暂无法删除，请${blockers.join('，并')}`, 'err');
+    if (group.account_count > 0) blockers.push(`移出 ${group.account_count} 个账号`);
+    if (group.key_count > 0) blockers.push(`解除 ${group.key_count} 个密钥引用`);
+    if (blockers.length) return toast(`请先${blockers.join('，')}`, 'err');
     const effect = groups.length === 1
       ? '删除后将没有任何分组。若重启时仍为空，服务会创建默认池。'
       : group.default_chain_after_delete ? `删除后默认链将变为「${groupChainLabel(group.default_chain_after_delete, byId)}」。`

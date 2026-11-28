@@ -111,7 +111,7 @@ async function mountSettingsUpdate(main, mirrorChanged) {
       if (response.ok && health.ok) {
         stopped = true; clearTimeout(timer);
         showLogin();
-        toast('服务已恢复，请重新登录查看更新结果', 'ok');
+        toast('请重新登录', 'ok');
         return;
       }
     } catch {}
@@ -148,7 +148,7 @@ async function mountSettingsUpdate(main, mirrorChanged) {
   });
   install.addEventListener('click', async () => {
     if (requesting || info?.busy || !info?.available || !info?.supported || !info?.asset_ready) return;
-    if (settingsDirty || settingsSaving) { toast('请先保存设置，再更新程序', 'err'); return; }
+    if (settingsDirty || settingsSaving) { toast('请先保存', 'err'); return; }
     const version = info.latest_version;
     const deployment = info.deployment === 'container'
       ? '宿主机将拉取新镜像并重建容器，保留已挂载的数据和配置。启动失败时恢复原镜像。'
@@ -179,7 +179,7 @@ async function mountSettingsUpdate(main, mirrorChanged) {
       try { pending = JSON.parse(sessionStorage.getItem(pendingKey) || 'null'); } catch {}
       if (pending && pending.started_at > Date.now() - 30 * 60000 && ['completed', 'rolled_back', 'error'].includes(info.state?.phase)) {
         panel.open = true;
-        toast(info.state.message || '更新状态已刷新', info.state.phase === 'completed' ? 'ok' : 'err');
+        toast(info.state.phase === 'completed' ? '更新完成' : info.state.message || '更新失败', info.state.phase === 'completed' ? 'ok' : 'err');
       }
       if (!info.busy) forget();
     }

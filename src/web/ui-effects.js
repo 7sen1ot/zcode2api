@@ -3,85 +3,153 @@
 globalThis.Z2AEffects = (() => {
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const copies = new WeakMap();
-  let region, stack, expand, announcements, notices = [];
-  let hovered = false, pinned = false, paused = false;
+  const toastConfig = { width: 208, gap: 8, maxVisible: 3, duration: 220, lifetime: 4000, errorLifetime: 6500 };
+  const exitingNotices = new Set();
+  let region, stack, announcements, toastEasing, notices = [], announcementFrame = 0;
+  let hovered = false, paused = false;
 
-  function layoutNotices() {
-    if (!region) return;
-    const expanded = hovered || pinned || stack.contains(document.activeElement);
-    region.classList.toggle('is-expanded', expanded);
-    region.hidden = !notices.length;
-    expand.hidden = notices.length < 2;
-    expand.textContent = `${expanded ? '收起' : '展开'} ${notices.length} 条通知`;
-    expand.setAttribute('aria-expanded', String(expanded));
-    notices.forEach((notice, index) => {
-      notice.element.hidden = !expanded && index > 2;
-      notice.element.style.setProperty('--toast-index', index);
-      notice.element.style.zIndex = notices.length - index;
-      const now = performance.now();
-      if (expanded && !paused) {
+  function updateNoticePause() {
+    const nextPaused = hovered || stack.contains(document.activeElement);
+    if (nextPaused === paused) return;
+    paused = nextPaused;
+    const now = performance.now();
+    notices.forEach(notice => {
+      if (!notice.slot) return;
+      if (paused) {
         clearTimeout(notice.timer);
         notice.remaining = Math.max(0, notice.remaining - (now - notice.started));
-      } else if (!expanded && paused) armNotice(notice);
+      } else armNotice(notice);
     });
-    paused = expanded;
-    stack.style.setProperty('--toast-height', `${(notices[0]?.element.offsetHeight || 48) + Math.min(2, notices.length - 1) * 8}px`);
   }
 
   function armNotice(notice) {
+    clearTimeout(notice.timer);
     notice.started = performance.now();
     notice.timer = setTimeout(() => dismissNotice(notice), notice.remaining);
   }
 
+  function animateNotice(notice, frames, finish) {
+    notice.animation?.cancel();
+    if (reducedMotion.matches || !notice.element.animate) {
+      notice.animation = null;
+      finish();
+      return;
+    }
+    const animation = notice.element.animate(frames, { duration: toastConfig.duration, easing: toastEasing, fill: 'both' });
+    notice.animation = animation;
+    animation.finished.then(() => {
+      if (notice.animation === animation) finish();
+    }, () => {});
+  }
+
+  function removeNoticeSlot(notice) {
+    const slot = notice.slot;
+    slot.classList.remove('is-settled');
+    slot.classList.add('is-collapsed');
+    const remove = () => {
+      clearTimeout(notice.cleanupTimer);
+      slot.removeEventListener('transitionend', onEnd);
+      slot.remove();
+      notice.animation?.cancel();
+      if (!stack.childElementCount) {
+        region.hidden = true;
+        hovered = false;
+        updateNoticePause();
+      }
+    };
+    const onEnd = event => {
+      if (event.target === slot && event.propertyName === 'grid-template-rows') remove();
+    };
+    if (reducedMotion.matches) remove();
+    else {
+      slot.addEventListener('transitionend', onEnd);
+      // 后台标签页或过渡被取消时也要释放节点。
+      notice.cleanupTimer = setTimeout(remove, toastConfig.duration * 2);
+    }
+  }
+
+  function showNotices() {
+    // 淡出的卡片仍占用显示名额；目标列表始终只保留最新三条。
+    let visible = notices.filter(notice => notice.slot).length + exitingNotices.size;
+    for (const notice of notices) {
+      if (notice.slot || visible >= toastConfig.maxVisible) continue;
+      visible++;
+      const slot = h('<div class="toast-slot is-collapsed"><div class="toast-clip"></div></div>');
+      notice.slot = slot;
+      slot.firstElementChild.append(notice.element);
+      stack.append(slot);
+      region.hidden = false;
+      // 建立零高度起点，让浏览器按内容实际高度展开，不固定卡片高度。
+      slot.getBoundingClientRect();
+      slot.classList.remove('is-collapsed');
+      animateNotice(notice, [
+        { opacity: 0, transform: `translateY(${toastConfig.gap}px)` },
+        { opacity: 1, transform: 'translateY(0)' },
+      ], () => {
+        slot.classList.add('is-settled');
+        notice.animation?.cancel();
+        notice.animation = null;
+      });
+      if (!paused) armNotice(notice);
+      cancelAnimationFrame(announcementFrame);
+      announcements.textContent = '';
+      announcementFrame = requestAnimationFrame(() => {
+        if (notices.includes(notice)) announcements.textContent = notice.message;
+      });
+    }
+  }
+
   function dismissNotice(notice) {
+    if (!notices.includes(notice)) return;
     const focused = notice.element.contains(document.activeElement);
     clearTimeout(notice.timer);
     notices = notices.filter(item => item !== notice);
-    notice.element.classList.add('out');
+    if (!notice.slot) return;
+    exitingNotices.add(notice);
+    if (focused) {
+      const next = notices.find(item => item.slot);
+      if (next) next.element.querySelector('button').focus({ preventScroll: true });
+      else document.activeElement.blur();
+    }
     notice.element.setAttribute('aria-hidden', 'true');
-    notice.element.querySelector('button').tabIndex = -1;
-    setTimeout(() => notice.element.remove(), 180);
-    if (!notices.length) pinned = hovered = false;
-    if (focused) notices[0]?.element.querySelector('button').focus({ preventScroll: true });
-    layoutNotices();
+    notice.element.inert = true;
+    notice.element.classList.add('out');
+    const { opacity, transform } = getComputedStyle(notice.element);
+    animateNotice(notice, [{ opacity, transform }, { opacity: 0, transform }], () => {
+      exitingNotices.delete(notice);
+      removeNoticeSlot(notice);
+      showNotices();
+    });
   }
 
   function toast(message, type) {
     if (!region) {
-      region = h('<aside class="toast-region" aria-label="通知"><button type="button" class="toast-expand" aria-expanded="false" hidden></button><div class="toast-stack"></div><div class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div></aside>');
+      region = h('<aside class="toast-region" aria-label="通知" hidden><div class="toast-stack"></div><div class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div></aside>');
+      for (const [name, value] of Object.entries({ width: `${toastConfig.width}px`, gap: `${toastConfig.gap}px`, duration: `${toastConfig.duration}ms` })) {
+        region.style.setProperty(`--toast-${name}`, value);
+      }
       stack = region.querySelector('.toast-stack');
-      expand = region.querySelector('.toast-expand');
       announcements = region.querySelector('[role="status"]');
-      expand.addEventListener('click', () => { pinned = !pinned; layoutNotices(); });
-      region.addEventListener('pointerenter', event => { if (event.pointerType !== 'touch') { hovered = true; layoutNotices(); } });
-      region.addEventListener('pointerleave', () => { hovered = false; layoutNotices(); });
-      region.addEventListener('focusin', layoutNotices);
-      region.addEventListener('focusout', () => requestAnimationFrame(layoutNotices));
-      region.addEventListener('keydown', event => {
-        if (event.key !== 'Escape') return;
-        pinned = hovered = false;
-        region.querySelectorAll(':focus').forEach(element => element.blur());
-        layoutNotices();
-      });
+      region.addEventListener('pointerenter', event => { if (event.pointerType !== 'touch') { hovered = true; updateNoticePause(); } });
+      region.addEventListener('pointerleave', () => { hovered = false; updateNoticePause(); });
+      region.addEventListener('focusin', updateNoticePause);
+      region.addEventListener('focusout', () => requestAnimationFrame(updateNoticePause));
       document.body.append(region);
+      toastEasing = getComputedStyle(region).getPropertyValue('--ease-out').trim();
     }
     const duplicate = notices.find(item => item.message === message && item.type === type);
     if (duplicate) {
       clearTimeout(duplicate.timer);
-      duplicate.remaining = type === 'err' ? 6500 : 4000;
-      if (!paused) armNotice(duplicate);
+      duplicate.remaining = type === 'err' ? toastConfig.errorLifetime : toastConfig.lifetime;
+      if (duplicate.slot && !paused) armNotice(duplicate);
       return;
     }
-    if (notices.length >= 5) dismissNotice(notices.at(-1));
+    if (notices.length >= toastConfig.maxVisible) dismissNotice(notices[0]);
     const element = h(`<div class="toast" data-tone="${type === 'err' ? 'error' : type === 'ok' ? 'success' : 'info'}"><span class="toast-symbol">${icon(type === 'ok' ? 'check' : type === 'err' ? 'zap' : 'info', 16)}</span><span class="toast-message">${esc(message)}</span><button type="button" class="toast-close" aria-label="关闭通知">×</button></div>`);
-    const notice = { element, message, type, remaining: type === 'err' ? 6500 : 4000, started: performance.now(), timer: 0 };
+    const notice = { element, message, type, remaining: type === 'err' ? toastConfig.errorLifetime : toastConfig.lifetime, timer: 0, slot: null, animation: null };
     element.querySelector('button').addEventListener('click', () => dismissNotice(notice));
-    notices.unshift(notice);
-    stack.prepend(element);
-    if (!paused) armNotice(notice);
-    layoutNotices();
-    announcements.textContent = '';
-    requestAnimationFrame(() => { announcements.textContent = message; });
+    notices.push(notice);
+    showNotices();
   }
 
   function copyFeedback(button, message) {
@@ -136,7 +204,6 @@ globalThis.Z2AEffects = (() => {
   }
   window.addEventListener('resize', () => {
     document.querySelectorAll('.has-tab-indicator').forEach(tabs);
-    layoutNotices();
   });
 
   function skeleton(page) {
